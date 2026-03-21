@@ -91,6 +91,54 @@ func (ac *AppConfig) Set(ctx context.Context, key string, value interface{}) err
 	return nil
 }
 
+// EnsureDefaults creates all required config keys with default values if they don't exist.
+func (ac *AppConfig) EnsureDefaults(ctx context.Context) error {
+	defaults := map[string]interface{}{
+		"appName":                  "DigiNode CC",
+		"timezone":                 "",
+		"env":                      "PRODUCTION",
+		"protocol":                 "meshtastic-binary",
+		"ackTimeoutMs":             3000,
+		"resultTimeoutMs":          10000,
+		"maxRetries":               2,
+		"perNodeCmdRate":           8,
+		"globalCmdRate":            30,
+		"detectMode":               2,
+		"detectChannels":           "1..14",
+		"detectScanSecs":           300,
+		"allowForever":             false,
+		"baselineSecs":             300,
+		"deviceScanSecs":           300,
+		"droneSecs":                600,
+		"deauthSecs":               300,
+		"randomizeSecs":            600,
+		"defaultRadiusM":           50,
+		"logLevel":                 "info",
+		"structuredLogs":           true,
+		"nodePosRetentionDays":     30,
+		"commandRetentionDays":     180,
+		"auditRetentionDays":       365,
+		"metricsEnabled":           false,
+		"metricsPath":              "/metrics",
+		"healthEnabled":            true,
+		"mapTileUrl":               "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+		"mapAttribution":           "OpenStreetMap",
+		"minZoom":                  2,
+		"maxZoom":                  18,
+		"invitationExpiryHours":    48,
+		"passwordResetExpiryHours": 4,
+	}
+
+	for key, val := range defaults {
+		if _, exists := ac.Get(key); !exists {
+			if err := ac.Set(ctx, key, val); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
 // GetAll returns all config entries.
 func (ac *AppConfig) GetAll() map[string]json.RawMessage {
 	ac.mu.RLock()

@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/karamble/diginode-cc/internal/acars"
 	"github.com/karamble/diginode-cc/internal/adsb"
+	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/alarms"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/auth"
@@ -57,6 +58,7 @@ type Services struct {
 	Mail      *mail.Service
 	AppCfg      *config.AppConfig
 	Permissions *permissions.Service
+	Audit       *audit.Service
 	ACARS       *acars.Service
 	ADSB        *adsb.Service
 	MQTT        *mqtt.Service
@@ -375,6 +377,9 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/export", s.handleOUIExport)
 				r.Get("/resolve/{mac}", s.handleOUIResolve)
 			})
+
+			// Audit
+			r.Get("/audit", s.handleListAuditLogs)
 
 			// System
 			r.Get("/system/info", s.handleSystemInfo)

@@ -67,6 +67,12 @@ type Service struct {
 	mu          sync.RWMutex
 	nodeLookup  func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
 	onInventory func(mac, manufacturer, ssid string, rssi int)
+	faaLookup   func(ctx context.Context, serial string) (map[string]interface{}, error)
+
+	// Persistence debouncing
+	persistQueue map[string]struct{} // keys pending persist
+	persistMu    sync.Mutex
+	persistTimer *time.Timer
 }
 
 // SetNodeLookup sets the function to resolve mesh node numbers to node IDs and site IDs.
@@ -77,6 +83,11 @@ func (s *Service) SetNodeLookup(fn func(nodeNum uint32) (nodeID, siteID string))
 // SetInventoryCallback sets a callback to record detected drones in the device inventory.
 func (s *Service) SetInventoryCallback(fn func(mac, manufacturer, ssid string, rssi int)) {
 	s.onInventory = fn
+}
+
+// SetFAALookup sets the function used to asynchronously enrich drones with FAA registry data.
+func (s *Service) SetFAALookup(fn func(ctx context.Context, serial string) (map[string]interface{}, error)) {
+	s.faaLookup = fn
 }
 
 // NewService creates a new drone tracking service.
@@ -135,7 +146,7 @@ func (s *Service) UpdateStatus(key string, status Status) error {
 		Payload: drone,
 	})
 
-	go s.persistDrone(drone)
+	s.enqueuePersist(key)
 	return nil
 }
 
@@ -207,7 +218,23 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 		Payload: drone,
 	})
 
-	go s.persistDrone(drone)
+	// FAA enrichment (async, only if no FAA data yet)
+	if s.faaLookup != nil && drone.FAAData == nil && drone.SerialNumber != "" {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			data, err := s.faaLookup(ctx, drone.SerialNumber)
+			if err != nil || data == nil {
+				return
+			}
+			s.mu.Lock()
+			drone.FAAData = data
+			s.mu.Unlock()
+			go s.persistDrone(drone)
+		}()
+	}
+
+	s.enqueuePersist(key)
 	go s.persistDetection(drone, detection)
 }
 
@@ -292,6 +319,50 @@ func (s *Service) persistDrone(drone *Drone) {
 	if err != nil {
 		slog.Error("failed to persist drone", "mac", drone.MAC, "error", err)
 	}
+}
+
+func (s *Service) enqueuePersist(key string) {
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
+
+	if s.persistQueue == nil {
+		s.persistQueue = make(map[string]struct{})
+	}
+	s.persistQueue[key] = struct{}{}
+
+	if s.persistTimer != nil {
+		s.persistTimer.Stop()
+	}
+	s.persistTimer = time.AfterFunc(200*time.Millisecond, s.flushPersistQueue)
+}
+
+func (s *Service) flushPersistQueue() {
+	s.persistMu.Lock()
+	queue := s.persistQueue
+	s.persistQueue = make(map[string]struct{})
+	s.persistMu.Unlock()
+
+	s.mu.RLock()
+	for key := range queue {
+		if drone, ok := s.drones[key]; ok {
+			go s.persistDrone(drone)
+		}
+	}
+	s.mu.RUnlock()
+}
+
+// PruneDetections removes drone detection records older than the retention period.
+func (s *Service) PruneDetections(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	result, err := s.db.Pool.Exec(ctx, `
+		DELETE FROM drone_detections WHERE timestamp < NOW() - $1 * INTERVAL '1 day'`,
+		retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 func (s *Service) persistDetection(drone *Drone, det *DroneDetection) {

@@ -52,6 +52,15 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.svc.Audit != nil {
+		claims := auth.GetClaims(r.Context())
+		actorID := ""
+		if claims != nil {
+			actorID = claims.UserID
+		}
+		s.svc.Audit.Log(r.Context(), actorID, "USER_CREATE", "user", user.ID, "", nil)
+	}
+
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -84,6 +93,15 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.svc.Audit != nil {
+		claims := auth.GetClaims(r.Context())
+		actorID := ""
+		if claims != nil {
+			actorID = claims.UserID
+		}
+		s.svc.Audit.Log(r.Context(), actorID, "USER_UPDATE", "user", id, "", nil)
+	}
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -93,6 +111,15 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.Users.Delete(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to delete user")
 		return
+	}
+
+	if s.svc.Audit != nil {
+		claims := auth.GetClaims(r.Context())
+		actorID := ""
+		if claims != nil {
+			actorID = claims.UserID
+		}
+		s.svc.Audit.Log(r.Context(), actorID, "USER_DELETE", "user", id, "", nil)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
