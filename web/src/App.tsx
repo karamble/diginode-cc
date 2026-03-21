@@ -1,7 +1,7 @@
 import { Routes, Route, Navigate } from 'react-router-dom'
 import { useEffect } from 'react'
 import { useAuthStore } from './stores/authStore'
-import api from './api/client'
+import { useWebSocketBridge } from './hooks/useWebSocketBridge'
 import wsClient from './api/websocket'
 import Layout from './components/Layout'
 import LoginPage from './pages/LoginPage'
@@ -22,38 +22,8 @@ import ACARSPage from './pages/ACARSPage'
 import TerminalPage from './pages/TerminalPage'
 import ExportsPage from './pages/ExportsPage'
 
-function App() {
-  const { isAuthenticated, token } = useAuthStore()
-
-  useEffect(() => {
-    if (token) {
-      api.setToken(token)
-      wsClient.connect()
-    }
-    return () => wsClient.disconnect()
-  }, [token])
-
-  // Try to restore token from localStorage
-  useEffect(() => {
-    const stored = localStorage.getItem('cc_token')
-    if (stored && !isAuthenticated) {
-      api.setToken(stored)
-      api.get('/auth/me').then((user: any) => {
-        useAuthStore.getState().setAuth(user, stored)
-      }).catch(() => {
-        localStorage.removeItem('cc_token')
-      })
-    }
-  }, [])
-
-  if (!isAuthenticated) {
-    return (
-      <Routes>
-        <Route path="/login" element={<LoginPage />} />
-        <Route path="*" element={<Navigate to="/login" replace />} />
-      </Routes>
-    )
-  }
+function AuthenticatedApp() {
+  useWebSocketBridge()
 
   return (
     <Routes>
@@ -79,6 +49,40 @@ function App() {
       </Route>
     </Routes>
   )
+}
+
+function App() {
+  const { isAuthenticated, token, stage, initialize } = useAuthStore()
+
+  useEffect(() => {
+    initialize()
+  }, [initialize])
+
+  useEffect(() => {
+    if (token && isAuthenticated) {
+      wsClient.connect()
+    }
+    return () => wsClient.disconnect()
+  }, [token, isAuthenticated])
+
+  if (stage === 'idle' || stage === 'checking') {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="inline-block w-8 h-8 border-2 border-primary-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    )
+  }
+
+  if (!isAuthenticated) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    )
+  }
+
+  return <AuthenticatedApp />
 }
 
 export default App
