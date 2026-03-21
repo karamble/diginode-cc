@@ -21,6 +21,7 @@ var (
 	ErrTOTPRequired       = errors.New("2FA code required")
 	ErrInvalidTOTP        = errors.New("invalid 2FA code")
 	ErrTOSNotAccepted     = errors.New("terms of service not accepted")
+	ErrAccountLocked      = errors.New("account is temporarily locked")
 )
 
 // Role defines user permission levels.
@@ -35,14 +36,17 @@ const (
 
 // User represents an authenticated user.
 type User struct {
-	ID                 string    `json:"id"`
-	Email              string    `json:"email"`
-	Name               string    `json:"name,omitempty"`
-	Role               Role      `json:"role"`
-	TOTPEnabled        bool      `json:"totpEnabled"`
-	MustChangePassword bool      `json:"mustChangePassword"`
-	TOSAccepted        bool      `json:"tosAccepted"`
-	LastLogin          time.Time `json:"lastLogin,omitempty"`
+	ID                  string     `json:"id"`
+	Email               string     `json:"email"`
+	Name                string     `json:"name,omitempty"`
+	Role                Role       `json:"role"`
+	TOTPEnabled         bool       `json:"totpEnabled"`
+	MustChangePassword  bool       `json:"mustChangePassword"`
+	TOSAccepted         bool       `json:"tosAccepted"`
+	LastLogin           *time.Time `json:"lastLogin,omitempty"`
+	FailedLoginAttempts int        `json:"-"`
+	LockedUntil         *time.Time `json:"-"`
+	LastLoginIP         string     `json:"-"`
 }
 
 // Claims represents JWT token claims.
@@ -59,6 +63,9 @@ type Service struct {
 	jwtSecret []byte
 }
 
+// DB returns the underlying database for direct queries (e.g., password reset tokens).
+func (s *Service) DB() *database.DB { return s.db }
+
 // NewService creates a new auth service.
 func NewService(db *database.DB, jwtSecret string) *Service {
 	return &Service{
@@ -68,31 +75,46 @@ func NewService(db *database.DB, jwtSecret string) *Service {
 }
 
 // Login authenticates a user and returns a JWT token.
-func (s *Service) Login(ctx context.Context, email, password string) (string, *User, error) {
+func (s *Service) Login(ctx context.Context, email, password, clientIP string) (string, *User, error) {
 	var (
-		id           string
-		passwordHash string
-		name         string
-		role         string
-		totpEnabled  bool
-		totpSecret   string
-		mustChange   bool
-		tosAccepted  bool
-		lastLogin    *time.Time
+		id                  string
+		passwordHash        string
+		name                string
+		role                string
+		totpEnabled         bool
+		totpSecret          string
+		mustChange          bool
+		tosAccepted         bool
+		lastLogin           *time.Time
+		failedLoginAttempts int
+		lockedUntil         *time.Time
 	)
 
 	err := s.db.Pool.QueryRow(ctx, `
 		SELECT id, password_hash, name, role, totp_enabled, totp_secret,
-			must_change_password, tos_accepted, last_login
+			must_change_password, tos_accepted, last_login,
+			COALESCE(failed_login_attempts, 0), locked_until
 		FROM users WHERE email = $1`, email).Scan(
 		&id, &passwordHash, &name, &role, &totpEnabled, &totpSecret,
 		&mustChange, &tosAccepted, &lastLogin,
+		&failedLoginAttempts, &lockedUntil,
 	)
 	if err != nil {
 		return "", nil, ErrInvalidCredentials
 	}
 
+	// Check account lockout
+	if lockedUntil != nil && time.Now().Before(*lockedUntil) {
+		return "", nil, ErrAccountLocked
+	}
+
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
+		// Increment failed attempts and lock if threshold reached
+		_, _ = s.db.Pool.Exec(ctx, `
+			UPDATE users SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
+			locked_at = CASE WHEN COALESCE(failed_login_attempts, 0) >= 4 THEN NOW() ELSE locked_at END,
+			locked_until = CASE WHEN COALESCE(failed_login_attempts, 0) >= 4 THEN NOW() + interval '15 minutes' ELSE locked_until END
+			WHERE id = $1`, id)
 		return "", nil, ErrInvalidCredentials
 	}
 
@@ -104,9 +126,7 @@ func (s *Service) Login(ctx context.Context, email, password string) (string, *U
 		TOTPEnabled:        totpEnabled,
 		MustChangePassword: mustChange,
 		TOSAccepted:        tosAccepted,
-	}
-	if lastLogin != nil {
-		user.LastLogin = *lastLogin
+		LastLogin:          lastLogin,
 	}
 
 	token, err := s.generateToken(user)
@@ -114,10 +134,47 @@ func (s *Service) Login(ctx context.Context, email, password string) (string, *U
 		return "", nil, err
 	}
 
-	// Update last login
-	_, _ = s.db.Pool.Exec(ctx, `UPDATE users SET last_login = NOW() WHERE id = $1`, id)
+	// Reset failed attempts and record successful login
+	_, _ = s.db.Pool.Exec(ctx, `
+		UPDATE users SET last_login = NOW(), failed_login_attempts = 0,
+		locked_at = NULL, locked_until = NULL, last_login_ip = $2
+		WHERE id = $1`, id, clientIP)
 
 	return token, user, nil
+}
+
+// GetUser looks up a user by ID and returns the public User struct.
+func (s *Service) GetUser(ctx context.Context, userID string) (*User, error) {
+	var (
+		email      string
+		name       string
+		role       string
+		totpEn     bool
+		mustChange bool
+		tosAcc     bool
+		lastLogin  *time.Time
+	)
+
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT email, name, role, totp_enabled, must_change_password,
+			tos_accepted, last_login
+		FROM users WHERE id = $1`, userID).Scan(
+		&email, &name, &role, &totpEn, &mustChange, &tosAcc, &lastLogin,
+	)
+	if err != nil {
+		return nil, ErrUserNotFound
+	}
+
+	return &User{
+		ID:                 userID,
+		Email:              email,
+		Name:               name,
+		Role:               Role(role),
+		TOTPEnabled:        totpEn,
+		MustChangePassword: mustChange,
+		TOSAccepted:        tosAcc,
+		LastLogin:          lastLogin,
+	}, nil
 }
 
 // Register creates a new user account.
@@ -242,6 +299,37 @@ func (s *Service) generateToken(user *User) (string, error) {
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
 	return token.SignedString(s.jwtSecret)
+}
+
+// ResetPassword validates a reset token and sets a new password.
+func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) error {
+	var userID string
+	var expiresAt time.Time
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT user_id, expires_at FROM password_resets
+		WHERE token = $1 AND used = false`, token).Scan(&userID, &expiresAt)
+	if err != nil {
+		return ErrInvalidToken
+	}
+	if time.Now().After(expiresAt) {
+		return ErrInvalidToken
+	}
+
+	hash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+
+	_, err = s.db.Pool.Exec(ctx, `UPDATE users SET password_hash = $2 WHERE id = $1`, userID, string(hash))
+	if err != nil {
+		return err
+	}
+
+	// Mark token as used
+	_, _ = s.db.Pool.Exec(ctx, `UPDATE password_resets SET used = true WHERE token = $1`, token)
+
+	slog.Info("password reset completed", "userID", userID)
+	return nil
 }
 
 // HashPassword hashes a password with bcrypt.

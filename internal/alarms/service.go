@@ -69,6 +69,58 @@ func (s *Service) ShouldTrigger(eventType string) []*AlarmConfig {
 	return matching
 }
 
+// Create adds a new alarm configuration.
+func (s *Service) Create(ctx context.Context, a *AlarmConfig) error {
+	err := s.db.Pool.QueryRow(ctx, `
+		INSERT INTO alarm_configs (name, alarm_type, sound_file, trigger_events, enabled)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id`,
+		a.Name, a.AlarmType, a.SoundFile, a.TriggerEvents, a.Enabled,
+	).Scan(&a.ID)
+	if err != nil {
+		return err
+	}
+	s.alarms = append(s.alarms, a)
+	return nil
+}
+
+// Delete removes an alarm configuration.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM alarm_configs WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	for i, a := range s.alarms {
+		if a.ID == id {
+			s.alarms = append(s.alarms[:i], s.alarms[i+1:]...)
+			break
+		}
+	}
+	return nil
+}
+
+// Update modifies an existing alarm config.
+func (s *Service) Update(ctx context.Context, id string, a *AlarmConfig) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE alarm_configs SET name = $2, alarm_type = $3, sound_file = $4,
+			trigger_events = $5, enabled = $6
+		WHERE id = $1`,
+		id, a.Name, a.AlarmType, a.SoundFile, a.TriggerEvents, a.Enabled)
+	if err != nil {
+		return err
+	}
+
+	// Update in-memory list
+	for i, existing := range s.alarms {
+		if existing.ID == id {
+			a.ID = id
+			s.alarms[i] = a
+			return nil
+		}
+	}
+	return nil
+}
+
 // GetAll returns all alarm configs.
 func (s *Service) GetAll() []*AlarmConfig {
 	return s.alarms

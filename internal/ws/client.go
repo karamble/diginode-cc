@@ -30,6 +30,15 @@ func NewClient(hub *Hub, conn *websocket.Conn) *Client {
 	}
 }
 
+// Send pushes a message directly to this client's send channel.
+func (c *Client) Send(data []byte) {
+	select {
+	case c.send <- data:
+	default:
+		slog.Warn("WebSocket client send buffer full, dropping message")
+	}
+}
+
 // ReadPump pumps messages from the WebSocket connection to the hub.
 func (c *Client) ReadPump() {
 	defer func() {

@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"log/slog"
 	"math"
+	"time"
 
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
@@ -16,6 +17,7 @@ type Dispatcher struct {
 	droneHandler   DroneHandler
 	chatHandler    ChatHandler
 	posHandler     PositionHandler
+	onDeviceTime   func(t time.Time)
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -54,6 +56,9 @@ func (d *Dispatcher) SetDroneHandler(h DroneHandler) { d.droneHandler = h }
 // SetChatHandler sets the chat handler.
 func (d *Dispatcher) SetChatHandler(h ChatHandler) { d.chatHandler = h }
 
+// SetDeviceTimeCallback sets a callback invoked when a device time is received.
+func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
+
 // HandlePacket is the main entry point, called by the serial manager for each FromRadio.
 func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 	switch pkt.Type {
@@ -62,6 +67,10 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 			slog.Info("radio connected",
 				"nodeNum", pkt.MyInfo.MyNodeNum,
 				"maxChannels", pkt.MyInfo.MaxChannels)
+			// The radio just responded, so "now" is a valid device time
+			if d.onDeviceTime != nil {
+				d.onDeviceTime(time.Now())
+			}
 		}
 
 	case serial.FromRadioNodeInfo:
@@ -109,6 +118,10 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 			pos := decodePositionPayload(mp.Payload)
 			if pos != nil {
 				d.nodeHandler.HandlePosition(mp.From, pos)
+				// Update device time from GPS-synced position
+				if pos.Time > 0 && d.onDeviceTime != nil {
+					d.onDeviceTime(time.Unix(int64(pos.Time), 0))
+				}
 			}
 		}
 

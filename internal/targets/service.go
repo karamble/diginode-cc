@@ -90,6 +90,40 @@ func (s *Service) Create(ctx context.Context, t *Target) error {
 	return nil
 }
 
+// Delete removes a target.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM targets WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.targets, id)
+	s.mu.Unlock()
+	return nil
+}
+
+// Update modifies an existing target.
+func (s *Service) Update(ctx context.Context, id string, t *Target) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE targets SET name = $2, description = $3, target_type = $4,
+			mac = $5, status = $6, updated_at = NOW()
+		WHERE id = $1`,
+		id, t.Name, t.Description, t.TargetType, t.MAC, t.Status)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if existing, ok := s.targets[id]; ok {
+		existing.Name = t.Name
+		existing.Description = t.Description
+		existing.TargetType = t.TargetType
+		existing.MAC = t.MAC
+		existing.Status = t.Status
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 // UpdatePosition records a new position fix for a target.
 func (s *Service) UpdatePosition(ctx context.Context, targetID string, fix *PositionFix) error {
 	s.mu.Lock()
