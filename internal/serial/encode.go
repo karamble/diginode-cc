@@ -1,6 +1,7 @@
 package serial
 
 import (
+	"crypto/rand"
 	"encoding/binary"
 	"math"
 )
@@ -77,19 +78,37 @@ func buildDataMessage(portNum uint32, payload []byte) []byte {
 	return out
 }
 
+// randomPacketID generates a random 32-bit packet ID.
+// The Meshtastic firmware requires a non-zero ID to transmit packets.
+func randomPacketID() uint32 {
+	var b [4]byte
+	rand.Read(b[:])
+	id := binary.LittleEndian.Uint32(b[:])
+	if id == 0 {
+		id = 1
+	}
+	return id
+}
+
 // buildMeshPacket builds a MeshPacket sub-message.
-//   MeshPacket: field 1 = to (varint), field 4 = decoded (Data, length-delimited)
+//   MeshPacket: field 2 = to (fixed32), field 3 = channel (varint),
+//               field 4 = decoded (Data), field 6 = id (fixed32),
+//               field 10 = hop_limit (varint), field 11 = want_ack (varint/bool)
 func buildMeshPacket(to uint32, data []byte) []byte {
 	var out []byte
-	out = append(out, encodeVarintField(1, uint64(to))...)
-	out = append(out, encodeLengthDelimited(4, data)...)
+	out = append(out, encodeFixed32Field(2, to)...)           // field 2 = to (fixed32)
+	out = append(out, encodeVarintField(3, 0)...)             // field 3 = channel (0 = primary)
+	out = append(out, encodeLengthDelimited(4, data)...)      // field 4 = decoded (Data)
+	out = append(out, encodeFixed32Field(6, randomPacketID())...) // field 6 = id (fixed32, random)
+	out = append(out, encodeVarintField(10, 3)...)            // field 10 = hop_limit (default 3)
+	out = append(out, encodeVarintField(11, 1)...)            // field 11 = want_ack (true)
 	return out
 }
 
 // buildToRadio wraps a MeshPacket in a ToRadio message.
-//   ToRadio: field 2 = packet (MeshPacket, length-delimited)
+//   ToRadio: field 1 = packet (MeshPacket, length-delimited)
 func buildToRadio(meshPacket []byte) []byte {
-	return encodeLengthDelimited(2, meshPacket)
+	return encodeLengthDelimited(1, meshPacket)
 }
 
 // --- Public packet builders ---

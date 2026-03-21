@@ -99,6 +99,32 @@ func (s *Service) ClearAll(ctx context.Context) error {
 	return err
 }
 
+// PersistAndBroadcast persists a message and broadcasts via WebSocket,
+// but does NOT add to the serial ring buffer. Used for locally-sent messages
+// where the caller has already added to the ring buffer.
+func (s *Service) PersistAndBroadcast(from, to uint32, channel uint32, text string) {
+	msg := &Message{
+		FromNode:  from,
+		ToNode:    to,
+		Channel:   channel,
+		Text:      text,
+		Timestamp: time.Now(),
+	}
+
+	slog.Info("chat message",
+		"from", from,
+		"to", to,
+		"channel", channel,
+		"text", text)
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventChat,
+		Payload: msg,
+	})
+
+	go s.persistMessage(msg)
+}
+
 func (s *Service) persistMessage(msg *Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

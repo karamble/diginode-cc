@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/karamble/diginode-cc/internal/config"
@@ -38,6 +39,7 @@ type Manager struct {
 	deviceTimeMu sync.RWMutex
 	protocol     string      // "binary" or "text" (default "text")
 	textParser   *TextParser // text-mode line parser
+	syntheticID  atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -175,25 +177,19 @@ func (m *Manager) connect() error {
 
 	slog.Info("serial port connected", "device", m.cfg.SerialDevice, "protocol", m.protocol)
 
-	// Only send binary config request in binary mode
-	if m.protocol == "binary" {
-		if err := m.sendWantConfig(); err != nil {
-			slog.Warn("failed to send initial config request", "error", err)
-		}
+	// Send wantConfig to activate the Meshtastic serial API session.
+	// Required for the firmware to process ToRadio packets (sending messages).
+	if err := m.sendWantConfig(); err != nil {
+		slog.Warn("failed to send initial config request", "error", err)
 	}
 
 	return nil
 }
 
 func (m *Manager) readLoop() {
-	m.mu.Lock()
-	proto := m.protocol
-	m.mu.Unlock()
-
-	if proto == "text" {
-		m.readLoopText()
-		return
-	}
+	// Always use the hybrid reader: handles both binary protobuf frames
+	// and text debug console lines. WantConfig is required for the firmware
+	// to process ToRadio commands (like sending messages).
 	m.readLoopBinary()
 }
 
@@ -257,14 +253,13 @@ func (m *Manager) readLoopBinary() {
 				continue
 			}
 
-			// Parse as text event — but skip text-message events since those
-			// already arrived via the binary FrameDecoder as MeshPackets.
-			// Only dispatch sensor data (STATUS/DRONE/TARGET etc.) and alerts
-			// that come as debug console text, not binary frames.
+			// Parse text lines for sensor data and message echoes.
+			// After wantConfig, the firmware is in API mode but still
+			// outputs some text debug lines (especially message echoes).
 			if m.textParser != nil {
 				events := m.textParser.ParseLine(line)
 				for _, evt := range events {
-					if evt.Kind != "raw" && evt.Kind != "text-message" {
+					if evt.Kind != "raw" {
 						m.dispatchTextEvent(evt)
 					}
 				}
@@ -355,16 +350,27 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 	copy(handlers, m.handlers)
 	m.mu.Unlock()
 
-	// Store text messages in ring buffer
-	if evt.Kind == "text-message" {
-		text, _ := evt.Data["text"].(string)
-		m.AddTextMessage(evt.NodeID, text, "")
-	}
+	// Text messages are stored in the ring buffer by the chat service's HandleTextMessage
+	// callback (via addToBuffer). We don't add here to avoid duplicates.
 
 	// Convert to synthetic FromRadioPacket for the existing dispatcher pipeline
 	switch evt.Kind {
 	case "text-message":
 		text, _ := evt.Data["text"].(string)
+
+		// Skip echoes of locally sent messages (nodeId "!00000000" or "unknown").
+		// These are already handled by the API send handler.
+		if evt.NodeID == "!00000000" || evt.NodeID == "unknown" {
+			break
+		}
+
+		// Use extracted Meshtastic packet ID, or generate a unique synthetic one
+		// to avoid the dedup filter incorrectly killing messages (all ID=0 from
+		// same node would hash to the same dedup key).
+		pktID := evt.PacketID
+		if pktID == 0 {
+			pktID = m.syntheticID.Add(1)
+		}
 		pkt := &FromRadioPacket{
 			Type: FromRadioMeshPacket,
 			MeshPacket: &MeshPacketData{
@@ -372,6 +378,7 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 				Payload: []byte(text),
 				From:    parseNodeNum(evt.NodeID),
 				To:      BroadcastAddr,
+				ID:      pktID,
 			},
 		}
 		for _, h := range handlers {
@@ -384,12 +391,17 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 			slog.Warn("failed to marshal drone telemetry", "error", err)
 			return
 		}
+		dronePktID := evt.PacketID
+		if dronePktID == 0 {
+			dronePktID = m.syntheticID.Add(1)
+		}
 		pkt := &FromRadioPacket{
 			Type: FromRadioMeshPacket,
 			MeshPacket: &MeshPacketData{
 				PortNum: 160, // DETECTION_SENSOR_APP
 				Payload: jsonData,
 				From:    parseNodeNum(evt.NodeID),
+				ID:      dronePktID,
 			},
 		}
 		for _, h := range handlers {

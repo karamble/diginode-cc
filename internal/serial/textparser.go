@@ -11,6 +11,7 @@ import (
 type ParsedEvent struct {
 	Kind     string                 // "node-telemetry", "target-detected", "alert", "command-ack", "drone-telemetry", "text-message", "raw"
 	NodeID   string                 // Source node ID
+	PacketID uint32                 // Meshtastic packet ID (extracted from echo line, 0 if unavailable)
 	Data     map[string]interface{} // Parsed fields
 	Raw      string                 // Original line
 	Category string                 // For alerts: "status", "gps", "attack", etc.
@@ -26,6 +27,7 @@ type TextParser struct {
 	echoRouter  *regexp.Regexp
 	echoTextMsg *regexp.Regexp
 	fromExtract *regexp.Regexp
+	idExtract   *regexp.Regexp
 	ansiClean   *regexp.Regexp
 
 	// Payload normalization helpers
@@ -45,6 +47,7 @@ func NewTextParser() *TextParser {
 		echoRouter:     regexp.MustCompile(`(?i)\[(Router|SerialConsole)\]`),
 		echoTextMsg:    regexp.MustCompile(`(?i)\btextmessage\s+msg=`),
 		fromExtract:    regexp.MustCompile(`(?i)from=(?:0x)?([0-9a-fA-F]+)`),
+		idExtract:      regexp.MustCompile(`(?i)\bid=(?:0x)?([0-9a-fA-F]+)`),
 		ansiClean:      regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`),
 		nodeIDFallback: regexp.MustCompile(`^([A-Za-z0-9_.:-]+)`),
 		trailingHash:   regexp.MustCompile(`#+$`),
@@ -266,11 +269,21 @@ func (p *TextParser) parseTextEcho(rawLine, payload string) []*ParsedEvent {
 		}
 		nodeID = "!" + hex
 	}
+
+	// Extract Meshtastic packet ID from the echo line (e.g. "id=0x47f7")
+	var packetID uint32
+	if idMatch := p.idExtract.FindStringSubmatch(rawLine); idMatch != nil {
+		if v, err := strconv.ParseUint(idMatch[1], 16, 32); err == nil {
+			packetID = uint32(v)
+		}
+	}
+
 	return []*ParsedEvent{{
-		Kind:   "text-message",
-		NodeID: nodeID,
-		Data:   map[string]interface{}{"text": payload},
-		Raw:    rawLine,
+		Kind:     "text-message",
+		NodeID:   nodeID,
+		PacketID: packetID,
+		Data:     map[string]interface{}{"text": payload},
+		Raw:      rawLine,
 	}}
 }
 
@@ -745,6 +758,11 @@ func parseNodeNum(nodeID string) uint32 {
 	}
 	n, _ := strconv.ParseUint(nodeID, 16, 32)
 	return uint32(n)
+}
+
+// ParseNodeNum is the exported version of parseNodeNum.
+func ParseNodeNum(nodeID string) uint32 {
+	return parseNodeNum(nodeID)
 }
 
 // nodeIDHex formats a uint32 node number as a "!XXXXXXXX" hex string.
