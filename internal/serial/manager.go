@@ -515,16 +515,23 @@ func (m *Manager) SimulatePacket(pkt *FromRadioPacket) {
 	m.dispatchPacket(pkt)
 }
 
-// periodicConfigRefresh re-sends wantConfig every 10 minutes to get fresh
-// NodeInfo with updated DeviceMetrics (battery, voltage, position) from
-// the Heltec's peer cache. Stops when done channel is closed.
+// periodicConfigRefresh sends heartbeats every 15 seconds to keep the firmware's
+// serial API alive (required for receiving MeshPackets from remote nodes), and
+// re-sends wantConfig every 10 minutes to refresh cached node data.
 func (m *Manager) periodicConfigRefresh(done chan struct{}) {
-	ticker := time.NewTicker(10 * time.Minute)
-	defer ticker.Stop()
+	heartbeat := time.NewTicker(15 * time.Second)
+	configRefresh := time.NewTicker(10 * time.Minute)
+	defer heartbeat.Stop()
+	defer configRefresh.Stop()
 
 	for {
 		select {
-		case <-ticker.C:
+		case <-heartbeat.C:
+			data := BuildHeartbeat()
+			if err := m.SendToRadio(data); err != nil {
+				slog.Debug("heartbeat send failed", "error", err)
+			}
+		case <-configRefresh.C:
 			if err := m.sendWantConfig(); err != nil {
 				slog.Warn("periodic config refresh failed", "error", err)
 			} else {
