@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"time"
 
@@ -86,7 +87,8 @@ func isNodeOnline(n *Node) bool {
 	return time.Since(n.LastHeard) < NodeOnlineTimeout
 }
 
-// GetAll returns all tracked nodes with isOnline computed from lastHeard.
+// GetAll returns all tracked nodes with isOnline computed from lastHeard,
+// sorted by NodeNum for stable ordering.
 func (s *Service) GetAll() []*Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
@@ -95,6 +97,9 @@ func (s *Service) GetAll() []*Node {
 		n.IsOnline = isNodeOnline(n)
 		result = append(result, n)
 	}
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].NodeNum < result[j].NodeNum
+	})
 	return result
 }
 
