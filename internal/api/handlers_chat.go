@@ -17,7 +17,27 @@ func (s *Server) handleGetChatMessages(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	messages, err := s.svc.Chat.GetMessages(limit)
+	mode := r.URL.Query().Get("mode")
+	peerStr := r.URL.Query().Get("peer")
+
+	var messages []*chat.Message
+	var err error
+
+	switch mode {
+	case "broadcast":
+		messages, err = s.svc.Chat.GetBroadcastMessages(limit)
+	case "dm":
+		peer, parseErr := strconv.ParseUint(peerStr, 10, 32)
+		if parseErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid peer node number")
+			return
+		}
+		localNum := s.svc.Nodes.GetLocalNodeNum()
+		messages, err = s.svc.Chat.GetDMMessages(limit, uint32(peer), localNum)
+	default:
+		messages, err = s.svc.Chat.GetMessages(limit)
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to get chat messages")
 		return
