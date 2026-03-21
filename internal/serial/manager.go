@@ -1,10 +1,8 @@
 package serial
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
-	"io"
 	"log/slog"
 	"strings"
 	"sync"
@@ -51,7 +49,7 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 		cfg:        cfg,
 		hub:        hub,
 		stopCh:     make(chan struct{}),
-		protocol:   "binary", // Binary protobuf mode (sends wantConfig, reads FromRadio frames)
+		protocol:   "text", // Text mode: reads debug console lines (like CC PRO meshtastic-rewrite)
 		textParser: NewTextParser(),
 	}
 }
@@ -259,11 +257,14 @@ func (m *Manager) readLoopBinary() {
 				continue
 			}
 
-			// Parse as text event
+			// Parse as text event — but skip text-message events since those
+			// already arrived via the binary FrameDecoder as MeshPackets.
+			// Only dispatch sensor data (STATUS/DRONE/TARGET etc.) and alerts
+			// that come as debug console text, not binary frames.
 			if m.textParser != nil {
 				events := m.textParser.ParseLine(line)
 				for _, evt := range events {
-					if evt.Kind != "raw" { // Only dispatch meaningful events
+					if evt.Kind != "raw" && evt.Kind != "text-message" {
 						m.dispatchTextEvent(evt)
 					}
 				}
@@ -293,8 +294,11 @@ func isPrintableText(s string) bool {
 }
 
 // readLoopText reads newline-delimited text from the Heltec debug console.
+// Uses raw Read to handle serial port timeouts gracefully (no reconnect on idle).
 func (m *Manager) readLoopText() {
-	reader := bufio.NewReader(m.port)
+	buf := make([]byte, 4096)
+	var lineBuf []byte
+
 	for {
 		select {
 		case <-m.stopCh:
@@ -302,22 +306,43 @@ func (m *Manager) readLoopText() {
 		default:
 		}
 
-		line, err := reader.ReadString('\n')
+		n, err := m.port.Read(buf)
 		if err != nil {
-			if err != io.EOF {
-				slog.Warn("serial read error", "error", err)
+			// Timeout with no data is normal for serial — just keep reading
+			if n == 0 {
+				continue
 			}
+			slog.Warn("serial read error", "error", err)
 			return
 		}
-
-		line = strings.TrimSpace(line)
-		if line == "" {
+		if n == 0 {
 			continue
 		}
 
-		events := m.textParser.ParseLine(line)
-		for _, evt := range events {
-			m.dispatchTextEvent(evt)
+		// Accumulate bytes and extract complete lines
+		lineBuf = append(lineBuf, buf[:n]...)
+
+		for {
+			idx := bytes.IndexByte(lineBuf, '\n')
+			if idx < 0 {
+				break
+			}
+			line := strings.TrimSpace(string(lineBuf[:idx]))
+			lineBuf = lineBuf[idx+1:]
+
+			if line == "" {
+				continue
+			}
+
+			events := m.textParser.ParseLine(line)
+			for _, evt := range events {
+				m.dispatchTextEvent(evt)
+			}
+		}
+
+		// Prevent buffer from growing unbounded
+		if len(lineBuf) > 4096 {
+			lineBuf = lineBuf[len(lineBuf)-2048:]
 		}
 	}
 }
