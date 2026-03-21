@@ -15,9 +15,9 @@ import (
 type Severity string
 
 const (
-	SeverityLow      Severity = "LOW"
-	SeverityMedium   Severity = "MEDIUM"
-	SeverityHigh     Severity = "HIGH"
+	SeverityInfo     Severity = "INFO"
+	SeverityNotice   Severity = "NOTICE"
+	SeverityAlert    Severity = "ALERT"
 	SeverityCritical Severity = "CRITICAL"
 )
 
@@ -104,7 +104,7 @@ func (s *Service) Trigger(ctx context.Context, ruleID string, title, message str
 		}
 	}
 
-	severity := SeverityMedium
+	severity := SeverityNotice
 	if exists {
 		severity = rule.Severity
 		now := time.Now()
@@ -175,6 +175,79 @@ func (s *Service) Acknowledge(ctx context.Context, eventID, userID string) error
 			acknowledged_by = $2, acknowledged_at = NOW()
 		WHERE id = $1`, eventID, userID)
 	return err
+}
+
+// CreateRule adds a new alert rule.
+func (s *Service) CreateRule(ctx context.Context, r *Rule) error {
+	condJSON, _ := json.Marshal(r.Condition)
+	err := s.db.Pool.QueryRow(ctx, `
+		INSERT INTO alert_rules (name, description, condition, severity, enabled, cooldown_seconds)
+		VALUES ($1, $2, $3, $4, $5, $6)
+		RETURNING id`,
+		r.Name, r.Description, condJSON, string(r.Severity), r.Enabled, r.CooldownSeconds,
+	).Scan(&r.ID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.rules[r.ID] = r
+	s.mu.Unlock()
+	return nil
+}
+
+// UpdateRule updates an existing alert rule.
+func (s *Service) UpdateRule(ctx context.Context, id string, r *Rule) error {
+	condJSON, _ := json.Marshal(r.Condition)
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE alert_rules SET name = $2, description = $3, condition = $4,
+			severity = $5, enabled = $6, cooldown_seconds = $7
+		WHERE id = $1`,
+		id, r.Name, r.Description, condJSON, string(r.Severity), r.Enabled, r.CooldownSeconds)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	r.ID = id
+	s.rules[id] = r
+	s.mu.Unlock()
+	return nil
+}
+
+// DeleteRule removes an alert rule.
+func (s *Service) DeleteRule(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM alert_rules WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.rules, id)
+	s.mu.Unlock()
+	return nil
+}
+
+// GetEvents returns recent alert events.
+func (s *Service) GetEvents(ctx context.Context, limit int) ([]*Event, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, rule_id, severity, title, message, acknowledged,
+			acknowledged_by, acknowledged_at, created_at
+		FROM alert_events ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var events []*Event
+	for rows.Next() {
+		var e Event
+		if err := rows.Scan(&e.ID, &e.RuleID, &e.Severity, &e.Title, &e.Message,
+			&e.Acknowledged, &e.AcknowledgedBy, &e.AcknowledgedAt, &e.CreatedAt); err != nil {
+			continue
+		}
+		events = append(events, &e)
+	}
+	return events, nil
 }
 
 // GetRules returns all alert rules.

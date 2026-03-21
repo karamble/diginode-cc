@@ -19,6 +19,10 @@ type Site struct {
 	Longitude   float64   `json:"longitude,omitempty"`
 	RadiusM     float64   `json:"radiusM"`
 	IsPrimary   bool      `json:"isPrimary"`
+	Color       string    `json:"color,omitempty"`
+	Region      string    `json:"region,omitempty"`
+	Country     string    `json:"country,omitempty"`
+	City        string    `json:"city,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 }
 
@@ -35,7 +39,9 @@ func NewService(db *database.DB) *Service {
 // GetAll returns all sites.
 func (s *Service) GetAll(ctx context.Context) ([]*Site, error) {
 	rows, err := s.db.Pool.Query(ctx, `
-		SELECT id, name, description, latitude, longitude, radius_m, is_primary, created_at
+		SELECT id, name, description, latitude, longitude, radius_m, is_primary,
+			COALESCE(color, '#1d4ed8'), COALESCE(region, ''), COALESCE(country, ''), COALESCE(city, ''),
+			created_at
 		FROM sites ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -47,7 +53,8 @@ func (s *Service) GetAll(ctx context.Context) ([]*Site, error) {
 		var site Site
 		if err := rows.Scan(&site.ID, &site.Name, &site.Description,
 			&site.Latitude, &site.Longitude, &site.RadiusM,
-			&site.IsPrimary, &site.CreatedAt); err != nil {
+			&site.IsPrimary, &site.Color, &site.Region, &site.Country, &site.City,
+			&site.CreatedAt); err != nil {
 			continue
 		}
 		sites = append(sites, &site)
@@ -58,11 +65,11 @@ func (s *Service) GetAll(ctx context.Context) ([]*Site, error) {
 // Create adds a new site.
 func (s *Service) Create(ctx context.Context, site *Site) error {
 	return s.db.Pool.QueryRow(ctx, `
-		INSERT INTO sites (name, description, latitude, longitude, radius_m, is_primary)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO sites (name, description, latitude, longitude, radius_m, is_primary, color, region, country, city)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		RETURNING id`,
 		site.Name, site.Description, site.Latitude, site.Longitude,
-		site.RadiusM, site.IsPrimary,
+		site.RadiusM, site.IsPrimary, site.Color, site.Region, site.Country, site.City,
 	).Scan(&site.ID)
 }
 
@@ -70,16 +77,30 @@ func (s *Service) Create(ctx context.Context, site *Site) error {
 func (s *Service) GetByID(ctx context.Context, id string) (*Site, error) {
 	var site Site
 	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id, name, description, latitude, longitude, radius_m, is_primary, created_at
+		SELECT id, name, description, latitude, longitude, radius_m, is_primary,
+			COALESCE(color, '#1d4ed8'), COALESCE(region, ''), COALESCE(country, ''), COALESCE(city, ''),
+			created_at
 		FROM sites WHERE id = $1`, id).Scan(
 		&site.ID, &site.Name, &site.Description,
 		&site.Latitude, &site.Longitude, &site.RadiusM,
-		&site.IsPrimary, &site.CreatedAt,
+		&site.IsPrimary, &site.Color, &site.Region, &site.Country, &site.City,
+		&site.CreatedAt,
 	)
 	if err != nil {
 		return nil, ErrSiteNotFound
 	}
 	return &site, nil
+}
+
+// Update modifies an existing site.
+func (s *Service) Update(ctx context.Context, id string, site *Site) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE sites SET name = $2, description = $3, latitude = $4, longitude = $5,
+			radius_m = $6, is_primary = $7, color = $8, region = $9, country = $10, city = $11
+		WHERE id = $1`,
+		id, site.Name, site.Description, site.Latitude, site.Longitude,
+		site.RadiusM, site.IsPrimary, site.Color, site.Region, site.Country, site.City)
+	return err
 }
 
 // Delete removes a site.

@@ -23,6 +23,13 @@ type Device struct {
 	LastSeen     time.Time `json:"lastSeen"`
 	IsKnown      bool      `json:"isKnown"`
 	Notes        string    `json:"notes,omitempty"`
+	Hits         int       `json:"hits"`
+	MinRSSI      int       `json:"minRssi,omitempty"`
+	MaxRSSI      int       `json:"maxRssi,omitempty"`
+	AvgRSSI      float64   `json:"avgRssi,omitempty"`
+	LastNodeID   string    `json:"lastNodeId,omitempty"`
+	LastLat      float64   `json:"lastLat,omitempty"`
+	LastLon      float64   `json:"lastLon,omitempty"`
 }
 
 // Service manages WiFi device inventory.
@@ -66,6 +73,17 @@ func (s *Service) Track(mac, manufacturer, ssid string, rssi int) {
 	dev.RSSI = rssi
 	dev.LastSeen = time.Now()
 
+	// Running RSSI statistics
+	dev.Hits++
+	if dev.MinRSSI == 0 || rssi < dev.MinRSSI {
+		dev.MinRSSI = rssi
+	}
+	if rssi > dev.MaxRSSI {
+		dev.MaxRSSI = rssi
+	}
+	// Running average
+	dev.AvgRSSI = dev.AvgRSSI + (float64(rssi)-dev.AvgRSSI)/float64(dev.Hits)
+
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventInventory,
 		Payload: dev,
@@ -103,18 +121,63 @@ func (s *Service) persist(dev *Device) {
 	defer cancel()
 
 	_, err := s.db.Pool.Exec(ctx, `
-		INSERT INTO inventory_devices (mac, manufacturer, rssi, last_ssid, first_seen, last_seen)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO inventory_devices (mac, manufacturer, rssi, last_ssid, first_seen, last_seen,
+			hits, rssi_min, rssi_max, rssi_avg, last_node_id, last_latitude, last_longitude)
+		VALUES ($1, $2, $3, $4, $5, $6, 1, $3, $3, $3, $7, $8, $9)
 		ON CONFLICT (mac) DO UPDATE SET
 			manufacturer = COALESCE(EXCLUDED.manufacturer, inventory_devices.manufacturer),
 			rssi = EXCLUDED.rssi,
 			last_ssid = COALESCE(EXCLUDED.last_ssid, inventory_devices.last_ssid),
-			last_seen = EXCLUDED.last_seen`,
+			last_seen = EXCLUDED.last_seen,
+			hits = inventory_devices.hits + 1,
+			rssi_min = LEAST(COALESCE(inventory_devices.rssi_min, EXCLUDED.rssi), EXCLUDED.rssi),
+			rssi_max = GREATEST(COALESCE(inventory_devices.rssi_max, EXCLUDED.rssi), EXCLUDED.rssi),
+			rssi_avg = EXCLUDED.rssi_avg,
+			last_node_id = COALESCE(EXCLUDED.last_node_id, inventory_devices.last_node_id),
+			last_latitude = COALESCE(EXCLUDED.last_latitude, inventory_devices.last_latitude),
+			last_longitude = COALESCE(EXCLUDED.last_longitude, inventory_devices.last_longitude)`,
 		dev.MAC, dev.Manufacturer, dev.RSSI, dev.LastSSID, dev.FirstSeen, dev.LastSeen,
+		nilIfEmpty(dev.LastNodeID), nilIfZero(dev.LastLat), nilIfZero(dev.LastLon),
 	)
 	if err != nil {
 		slog.Error("failed to persist inventory device", "mac", dev.MAC, "error", err)
 	}
+}
+
+// Update modifies user-editable fields of an inventory device.
+func (s *Service) Update(ctx context.Context, mac string, deviceName, deviceType, notes string, isKnown bool) error {
+	s.mu.Lock()
+	dev, exists := s.devices[mac]
+	if exists {
+		dev.DeviceName = deviceName
+		dev.DeviceType = deviceType
+		dev.Notes = notes
+		dev.IsKnown = isKnown
+	}
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE inventory_devices SET device_name = $2, device_type = $3,
+			notes = $4, is_known = $5
+		WHERE mac = $1`,
+		mac, deviceName, deviceType, notes, isKnown)
+	return err
+}
+
+// nilIfEmpty returns nil for empty strings (for nullable UUID columns).
+func nilIfEmpty(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
+}
+
+// nilIfZero returns nil for zero float64 values (for nullable coordinate columns).
+func nilIfZero(f float64) interface{} {
+	if f == 0 {
+		return nil
+	}
+	return f
 }
 
 // Common OUI prefixes (top entries — full DB would be loaded from file)

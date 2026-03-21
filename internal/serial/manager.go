@@ -16,7 +16,7 @@ type TextMessage struct {
 	NodeID    string `json:"nodeId"`
 	Message   string `json:"message"`
 	SiteID    string `json:"siteId,omitempty"`
-	Timestamp int64  `json:"timestamp"`
+	Timestamp string `json:"timestamp"`
 }
 
 // Manager handles Meshtastic serial port communication.
@@ -31,6 +31,8 @@ type Manager struct {
 	textMessages []TextMessage
 	textSeq      int64
 	textMu       sync.RWMutex
+	deviceTime   time.Time
+	deviceTimeMu sync.RWMutex
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -209,7 +211,7 @@ func (m *Manager) AddTextMessage(nodeID, message, siteID string) {
 		NodeID:    nodeID,
 		Message:   message,
 		SiteID:    siteID,
-		Timestamp: time.Now().Unix(),
+		Timestamp: time.Now().Format(time.RFC3339),
 	}
 	m.textMessages = append(m.textMessages, msg)
 	// Keep last 200
@@ -230,6 +232,29 @@ func (m *Manager) GetTextMessages(sinceSeq int64) []TextMessage {
 		}
 	}
 	return result
+}
+
+// SetDeviceTime records the last known device time from the radio.
+func (m *Manager) SetDeviceTime(t time.Time) {
+	m.deviceTimeMu.Lock()
+	defer m.deviceTimeMu.Unlock()
+	m.deviceTime = t
+}
+
+// GetDeviceTime returns the last known device time and whether it's been set.
+func (m *Manager) GetDeviceTime() (time.Time, bool) {
+	m.deviceTimeMu.RLock()
+	defer m.deviceTimeMu.RUnlock()
+	if m.deviceTime.IsZero() {
+		return time.Time{}, false
+	}
+	return m.deviceTime, true
+}
+
+// SimulatePacket dispatches a fake FromRadio packet through registered handlers.
+// Used for testing without a real serial connection.
+func (m *Manager) SimulatePacket(pkt *FromRadioPacket) {
+	m.dispatchPacket(pkt)
 }
 
 func (m *Manager) sendWantConfig() error {

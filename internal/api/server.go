@@ -9,29 +9,69 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/karamble/diginode-cc/internal/alarms"
+	"github.com/karamble/diginode-cc/internal/alerts"
+	"github.com/karamble/diginode-cc/internal/auth"
+	"github.com/karamble/diginode-cc/internal/chat"
+	"github.com/karamble/diginode-cc/internal/commands"
 	"github.com/karamble/diginode-cc/internal/config"
-	"github.com/karamble/diginode-cc/internal/database"
+	"github.com/karamble/diginode-cc/internal/drones"
+	"github.com/karamble/diginode-cc/internal/exports"
+	"github.com/karamble/diginode-cc/internal/faa"
+	"github.com/karamble/diginode-cc/internal/firewall"
+	"github.com/karamble/diginode-cc/internal/geofences"
+	"github.com/karamble/diginode-cc/internal/inventory"
+	"github.com/karamble/diginode-cc/internal/mail"
+	"github.com/karamble/diginode-cc/internal/nodes"
+	"github.com/karamble/diginode-cc/internal/permissions"
 	"github.com/karamble/diginode-cc/internal/serial"
+	"github.com/karamble/diginode-cc/internal/sites"
+	"github.com/karamble/diginode-cc/internal/targets"
+	"github.com/karamble/diginode-cc/internal/users"
+	"github.com/karamble/diginode-cc/internal/webhooks"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
+
+// Services bundles all domain services for the API server.
+type Services struct {
+	Auth      *auth.Service
+	Users     *users.Service
+	Sites     *sites.Service
+	Nodes     *nodes.Service
+	Drones    *drones.Service
+	Chat      *chat.Service
+	Commands  *commands.Service
+	Alerts    *alerts.Service
+	Geofences *geofences.Service
+	Targets   *targets.Service
+	Inventory *inventory.Service
+	Webhooks  *webhooks.Service
+	Alarms    *alarms.Service
+	Firewall  *firewall.Service
+	FAA       *faa.Service
+	Exports   *exports.Service
+	Mail      *mail.Service
+	AppCfg      *config.AppConfig
+	Permissions *permissions.Service
+}
 
 // Server is the HTTP API server.
 type Server struct {
 	cfg       *config.Config
-	db        *database.DB
 	hub       *ws.Hub
 	serialMgr *serial.Manager
+	svc       *Services
 	router    chi.Router
 	upgrader  websocket.Upgrader
 }
 
 // NewServer creates a new API server.
-func NewServer(cfg *config.Config, db *database.DB, hub *ws.Hub, serialMgr *serial.Manager) *Server {
+func NewServer(cfg *config.Config, hub *ws.Hub, serialMgr *serial.Manager, svc *Services) *Server {
 	s := &Server{
 		cfg:       cfg,
-		db:        db,
 		hub:       hub,
 		serialMgr: serialMgr,
+		svc:       svc,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins (nginx handles CORS)
@@ -76,8 +116,7 @@ func (s *Server) setupRoutes() chi.Router {
 
 		// Protected routes
 		r.Group(func(r chi.Router) {
-			// TODO: Add JWT auth middleware
-			// r.Use(s.authMiddleware)
+			r.Use(s.svc.Auth.Middleware)
 
 			// Auth
 			r.Post("/auth/logout", s.handleLogout)
@@ -93,6 +132,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Put("/{id}", s.handleUpdateUser)
 				r.Delete("/{id}", s.handleDeleteUser)
 				r.Post("/invite", s.handleInviteUser)
+				r.Get("/features", s.handleListFeatures)
 			})
 
 			// Sites
@@ -110,6 +150,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/{id}", s.handleGetNode)
 				r.Get("/{id}/positions", s.handleGetNodePositions)
 				r.Put("/{id}", s.handleUpdateNode)
+				r.Delete("/{id}", s.handleDeleteNode)
 			})
 
 			// Drones
@@ -118,6 +159,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/{id}", s.handleGetDrone)
 				r.Put("/{id}/status", s.handleUpdateDroneStatus)
 				r.Get("/{id}/detections", s.handleGetDroneDetections)
+				r.Delete("/{id}", s.handleDeleteDrone)
 			})
 
 			// Commands
@@ -260,7 +302,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
-// WebSocket upgrade handler
+// WebSocket upgrade handler — sends init event with current state.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -270,6 +312,20 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	client := ws.NewClient(s.hub, conn)
 	s.hub.Register(client)
+
+	// Send init event with current state
+	initPayload := ws.Event{
+		Type: ws.EventInit,
+		Payload: map[string]interface{}{
+			"nodes":     s.svc.Nodes.GetAll(),
+			"drones":    s.svc.Drones.GetAll(),
+			"geofences": s.svc.Geofences.GetAll(),
+		},
+	}
+	data, err := json.Marshal(initPayload)
+	if err == nil {
+		client.Send(data)
+	}
 
 	go client.WritePump()
 	go client.ReadPump()

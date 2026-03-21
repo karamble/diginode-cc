@@ -2,6 +2,7 @@ package nodes
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -33,6 +34,11 @@ type Node struct {
 	RSSI               int32     `json:"rssi,omitempty"`
 	LastHeard          time.Time `json:"lastHeard"`
 	IsOnline           bool      `json:"isOnline"`
+	SiteID             string    `json:"siteId,omitempty"`
+	OriginSiteID       string    `json:"originSiteId,omitempty"`
+	LastMessage        string    `json:"lastMessage,omitempty"`
+	TemperatureC       float64   `json:"temperatureC,omitempty"`
+	TemperatureF       float64   `json:"temperatureF,omitempty"`
 }
 
 // Service manages mesh node state.
@@ -68,6 +74,27 @@ func (s *Service) GetByNodeNum(nodeNum uint32) *Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.nodes[nodeNum]
+}
+
+// UpdateLongName changes a node's display name.
+func (s *Service) UpdateLongName(nodeNum uint32, longName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		return errors.New("node not found")
+	}
+
+	node.LongName = longName
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+
+	go s.persistNode(node)
+	return nil
 }
 
 // HandleNodeInfo processes a NodeInfoLite from the radio.
@@ -179,6 +206,26 @@ func (s *Service) HandlePosition(from uint32, pos *serial.PositionData) {
 	})
 
 	go s.persistPosition(node)
+}
+
+// Remove deletes a node from tracking and broadcasts removal.
+func (s *Service) Remove(nodeNum uint32) {
+	s.mu.Lock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.nodes, nodeNum)
+	s.mu.Unlock()
+
+	s.hub.Broadcast(ws.Event{
+		Type: ws.EventNodeRemove,
+		Payload: map[string]interface{}{
+			"nodeNum": nodeNum,
+			"nodeId":  node.NodeID,
+		},
+	})
 }
 
 func (s *Service) persistNode(node *Node) {

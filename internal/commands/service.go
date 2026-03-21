@@ -19,7 +19,9 @@ const (
 	StatusPending CommandStatus = "PENDING"
 	StatusSent    CommandStatus = "SENT"
 	StatusAcked   CommandStatus = "ACKED"
+	StatusOK      CommandStatus = "OK"      // CC PRO compat
 	StatusFailed  CommandStatus = "FAILED"
+	StatusError   CommandStatus = "ERROR"    // CC PRO compat
 	StatusTimeout CommandStatus = "TIMEOUT"
 )
 
@@ -105,7 +107,7 @@ func (s *Service) HandleACK(cmdID string, result map[string]interface{}) {
 	}
 
 	now := time.Now()
-	cmd.Status = StatusAcked
+	cmd.Status = StatusOK
 	cmd.AckedAt = &now
 	cmd.Result = result
 	delete(s.pending, cmdID)
@@ -141,7 +143,7 @@ func (s *Service) send(cmd *Command) {
 		slog.Error("failed to send command", "id", cmd.ID, "error", err)
 		cmd.RetryCount++
 		if cmd.RetryCount >= cmd.MaxRetries {
-			cmd.Status = StatusFailed
+			cmd.Status = StatusError
 			delete(s.pending, cmd.ID)
 		}
 	} else {
@@ -157,6 +159,81 @@ func (s *Service) send(cmd *Command) {
 	})
 
 	go s.persistCommand(cmd)
+}
+
+// GetByID returns a command by ID. Checks pending first, then DB.
+func (s *Service) GetByID(ctx context.Context, id string) (*Command, error) {
+	s.mu.Lock()
+	if cmd, ok := s.pending[id]; ok {
+		s.mu.Unlock()
+		return cmd, nil
+	}
+	s.mu.Unlock()
+
+	// Fall back to DB
+	var cmd Command
+	var payloadJSON, resultJSON []byte
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT id, target_node, command_type, payload, status,
+			sent_at, acked_at, result, retry_count, max_retries, created_at
+		FROM commands WHERE id = $1`, id).Scan(
+		&cmd.ID, &cmd.TargetNode, &cmd.CommandType, &payloadJSON,
+		&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &resultJSON,
+		&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt)
+	if err != nil {
+		return nil, ErrCommandNotFound
+	}
+	if payloadJSON != nil {
+		json.Unmarshal(payloadJSON, &cmd.Payload)
+	}
+	if resultJSON != nil {
+		json.Unmarshal(resultJSON, &cmd.Result)
+	}
+	return &cmd, nil
+}
+
+// Delete removes a command from the pending queue and database.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	s.mu.Lock()
+	delete(s.pending, id)
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM commands WHERE id = $1`, id)
+	return err
+}
+
+// List returns recent commands from the database.
+func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, target_node, command_type, payload, status,
+			sent_at, acked_at, result, retry_count, max_retries, created_at
+		FROM commands ORDER BY created_at DESC LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var cmds []*Command
+	for rows.Next() {
+		var cmd Command
+		var payloadJSON, resultJSON []byte
+		if err := rows.Scan(&cmd.ID, &cmd.TargetNode, &cmd.CommandType, &payloadJSON,
+			&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &resultJSON,
+			&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt); err != nil {
+			continue
+		}
+		if payloadJSON != nil {
+			json.Unmarshal(payloadJSON, &cmd.Payload)
+		}
+		if resultJSON != nil {
+			json.Unmarshal(resultJSON, &cmd.Result)
+		}
+		cmds = append(cmds, &cmd)
+	}
+	return cmds, nil
 }
 
 func (s *Service) persistCommand(cmd *Command) {

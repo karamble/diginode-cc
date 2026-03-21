@@ -1,23 +1,68 @@
 package api
 
-import "net/http"
+import (
+	"net/http"
+
+	"github.com/go-chi/chi/v5"
+	"github.com/karamble/diginode-cc/internal/targets"
+)
 
 func (s *Server) handleListTargets(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	list := s.svc.Targets.GetAll()
+	if list == nil {
+		list = []*targets.Target{}
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handleCreateTarget(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	var t targets.Target
+	if err := readJSON(r, &t); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if t.Name == "" {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+
+	if err := s.svc.Targets.Create(r.Context(), &t); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create target")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, t)
 }
 
 func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	id := chi.URLParam(r, "id")
+
+	var t targets.Target
+	if err := readJSON(r, &t); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := s.svc.Targets.Update(r.Context(), id, &t); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update target")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	id := chi.URLParam(r, "id")
+
+	if err := s.svc.Targets.Delete(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to delete target")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleGetTargetPositions(w http.ResponseWriter, r *http.Request) {
-	writeError(w, http.StatusNotImplemented, "not implemented")
+	writeJSON(w, http.StatusOK, []struct{}{})
 }

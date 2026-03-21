@@ -162,6 +162,56 @@ func matchesEvent(events []string, eventType string) bool {
 	return false
 }
 
+// Create adds a new webhook.
+func (s *Service) Create(ctx context.Context, w *Webhook) error {
+	headersJSON, _ := json.Marshal(w.Headers)
+	err := s.db.Pool.QueryRow(ctx, `
+		INSERT INTO webhooks (name, url, method, headers, secret, events, enabled)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id`,
+		w.Name, w.URL, w.Method, headersJSON, w.Secret, w.Events, w.Enabled,
+	).Scan(&w.ID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.webhooks[w.ID] = w
+	s.mu.Unlock()
+	return nil
+}
+
+// Delete removes a webhook.
+func (s *Service) Delete(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM webhooks WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	delete(s.webhooks, id)
+	s.mu.Unlock()
+	return nil
+}
+
+// Update modifies an existing webhook.
+func (s *Service) Update(ctx context.Context, id string, w *Webhook) error {
+	headersJSON, _ := json.Marshal(w.Headers)
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE webhooks SET name = $2, url = $3, method = $4, headers = $5,
+			secret = $6, events = $7, enabled = $8
+		WHERE id = $1`,
+		id, w.Name, w.URL, w.Method, headersJSON, w.Secret, w.Events, w.Enabled)
+	if err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	w.ID = id
+	s.webhooks[id] = w
+	s.mu.Unlock()
+
+	return nil
+}
+
 // GetAll returns all webhooks.
 func (s *Service) GetAll() []*Webhook {
 	s.mu.RLock()

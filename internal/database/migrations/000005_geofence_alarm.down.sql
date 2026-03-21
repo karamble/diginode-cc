@@ -1,0 +1,11 @@
+ALTER TABLE geofences DROP COLUMN IF EXISTS origin_site_id;
+ALTER TABLE geofences DROP COLUMN IF EXISTS applies_to_devices;
+ALTER TABLE geofences DROP COLUMN IF EXISTS applies_to_targets;
+ALTER TABLE geofences DROP COLUMN IF EXISTS applies_to_drones;
+ALTER TABLE geofences DROP COLUMN IF EXISTS applies_to_adsb;
+ALTER TABLE geofences DROP COLUMN IF EXISTS trigger_on_exit;
+ALTER TABLE geofences DROP COLUMN IF EXISTS trigger_on_entry;
+ALTER TABLE geofences DROP COLUMN IF EXISTS alarm_message;
+ALTER TABLE geofences DROP COLUMN IF EXISTS alarm_level;
+ALTER TABLE geofences DROP COLUMN IF EXISTS alarm_enabled;
+ALTER TABLE geofences DROP COLUMN IF EXISTS color;

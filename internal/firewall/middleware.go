@@ -113,6 +113,40 @@ func (s *Service) GetRules() []*Rule {
 	return result
 }
 
+// CreateRule adds a new firewall rule.
+func (s *Service) CreateRule(ctx context.Context, r *Rule) error {
+	err := s.db.Pool.QueryRow(ctx, `
+		INSERT INTO firewall_rules (rule_type, value, action, reason, enabled)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id`,
+		r.RuleType, r.Value, r.Action, r.Reason, r.Enabled,
+	).Scan(&r.ID)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.rules = append(s.rules, r)
+	s.mu.Unlock()
+	return nil
+}
+
+// DeleteRule removes a firewall rule.
+func (s *Service) DeleteRule(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM firewall_rules WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	for i, r := range s.rules {
+		if r.ID == id {
+			s.rules = append(s.rules[:i], s.rules[i+1:]...)
+			break
+		}
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 func extractIP(r *http.Request) string {
 	// Check X-Forwarded-For first
 	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {

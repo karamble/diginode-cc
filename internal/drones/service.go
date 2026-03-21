@@ -43,6 +43,9 @@ type Drone struct {
 	RSSI           int                    `json:"rssi,omitempty"`
 	Status         Status                 `json:"status"`
 	Source         string                 `json:"source,omitempty"`
+	NodeRefID      string                 `json:"nodeId,omitempty"`
+	SiteID         string                 `json:"siteId,omitempty"`
+	OriginSiteID   string                 `json:"originSiteId,omitempty"`
 	FAAData        map[string]interface{} `json:"faaData,omitempty"`
 	FirstSeen      time.Time              `json:"firstSeen"`
 	LastSeen       time.Time              `json:"lastSeen"`
@@ -87,6 +90,13 @@ func (s *Service) GetActive() []*Drone {
 		}
 	}
 	return result
+}
+
+// GetByKey returns a drone by its key (MAC, serial, or UAS ID).
+func (s *Service) GetByKey(key string) *Drone {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.drones[key]
 }
 
 // UpdateStatus changes a drone's status.
@@ -173,6 +183,27 @@ func (s *Service) HandleDroneDetection(from uint32, payload []byte) {
 	}
 	detection.Source = "mesh"
 	s.HandleDetection(detection)
+}
+
+// Remove deletes a drone from tracking and broadcasts removal.
+func (s *Service) Remove(key string) {
+	s.mu.Lock()
+	drone, exists := s.drones[key]
+	if !exists {
+		s.mu.Unlock()
+		return
+	}
+	delete(s.drones, key)
+	s.mu.Unlock()
+
+	s.hub.Broadcast(ws.Event{
+		Type: ws.EventDroneRemove,
+		Payload: map[string]interface{}{
+			"droneId": drone.ID,
+			"id":      drone.ID,
+			"mac":     drone.MAC,
+		},
+	})
 }
 
 func (s *Service) persistDrone(drone *Drone) {
