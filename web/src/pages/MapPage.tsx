@@ -225,7 +225,7 @@ export default function MapPage() {
   const defaultZoom = 5
 
   return (
-    <div className="h-full flex flex-col">
+    <div className="absolute inset-0 flex flex-col">
       {/* Map header bar */}
       <div className="px-4 py-2.5 border-b border-dark-700/50 bg-surface/80 backdrop-blur-sm flex items-center justify-between z-10">
         <h2 className="text-sm font-semibold text-dark-100">
