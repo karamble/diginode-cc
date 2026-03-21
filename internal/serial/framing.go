@@ -257,10 +257,10 @@ type DeviceMetadata struct {
 
 // DecodeFromRadio decodes a protobuf frame into a FromRadioPacket.
 // This is a manual protobuf decoder that doesn't require generated code.
-// Meshtastic FromRadio field numbers:
-//   2 = my_info, 3 = node_info, 4 = config, 5 = log_record
-//   7 = config_complete_id, 8 = rebooted, 11 = mesh_packet
-//   12 = channel, 13 = metadata
+// Meshtastic FromRadio field numbers (from meshtastic/mesh.proto):
+//   1 = id, 2 = packet, 3 = my_info, 4 = node_info, 5 = config,
+//   6 = log_record, 7 = config_complete_id, 8 = rebooted,
+//   9 = moduleConfig, 10 = channel, 13 = metadata
 func DecodeFromRadio(data []byte) (*FromRadioPacket, error) {
 	if len(data) == 0 {
 		return nil, fmt.Errorf("empty frame")
@@ -316,19 +316,22 @@ func DecodeFromRadio(data []byte) (*FromRadioPacket, error) {
 			pos += int(length)
 
 			switch fieldNum {
-			case 2: // my_info
-				pkt.Type = FromRadioMyInfo
-				pkt.MyInfo = decodeMyInfo(subData)
-			case 3: // node_info
-				pkt.Type = FromRadioNodeInfo
-				pkt.NodeInfo = decodeNodeInfo(subData)
-			case 11: // mesh_packet
+			case 2: // packet (MeshPacket)
 				pkt.Type = FromRadioMeshPacket
 				pkt.MeshPacket = decodeMeshPacket(subData)
-			case 4: // config
+			case 3: // my_info
+				pkt.Type = FromRadioMyInfo
+				pkt.MyInfo = decodeMyInfo(subData)
+			case 4: // node_info
+				pkt.Type = FromRadioNodeInfo
+				pkt.NodeInfo = decodeNodeInfo(subData)
+			case 5: // config
 				pkt.Type = FromRadioConfig
 				pkt.Config = &ConfigPayload{Raw: subData}
-			case 12: // channel
+			case 9: // moduleConfig (treat same as config)
+				pkt.Type = FromRadioConfig
+				pkt.Config = &ConfigPayload{Raw: subData}
+			case 10: // channel
 				pkt.Type = FromRadioChannel
 			case 13: // metadata
 				pkt.Type = FromRadioMetadata
