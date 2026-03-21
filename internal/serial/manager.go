@@ -65,6 +65,10 @@ func (m *Manager) IsConnected() bool {
 func (m *Manager) Start() error {
 	slog.Info("starting serial manager", "device", m.cfg.SerialDevice, "baud", m.cfg.SerialBaud)
 
+	baseDelay := 500 * time.Millisecond
+	maxDelay := 15 * time.Second
+	delay := baseDelay
+
 	for {
 		select {
 		case <-m.stopCh:
@@ -74,18 +78,29 @@ func (m *Manager) Start() error {
 
 		err := m.connect()
 		if err != nil {
-			slog.Warn("serial connection failed, retrying in 5s", "error", err)
+			slog.Warn("serial connection failed, retrying", "error", err, "delay", delay)
 			select {
-			case <-time.After(5 * time.Second):
+			case <-time.After(delay):
+				// Exponential backoff with jitter
+				delay = time.Duration(float64(delay) * 1.5)
+				if delay > maxDelay {
+					delay = maxDelay
+				}
+				// Add jitter (±20%)
+				jitter := time.Duration(float64(delay) * 0.2 * (2*float64(time.Now().UnixNano()%100)/100 - 1))
+				delay += jitter
 				continue
 			case <-m.stopCh:
 				return nil
 			}
 		}
 
+		// Reset delay on successful connection
+		delay = baseDelay
+
 		m.readLoop()
 
-		// If we get here, connection was lost
+		// Connection lost
 		m.mu.Lock()
 		m.connected = false
 		if m.port != nil {
@@ -94,9 +109,13 @@ func (m *Manager) Start() error {
 		}
 		m.mu.Unlock()
 
-		slog.Warn("serial connection lost, reconnecting in 3s")
+		slog.Warn("serial connection lost, reconnecting", "delay", delay)
 		select {
-		case <-time.After(3 * time.Second):
+		case <-time.After(delay):
+			delay = time.Duration(float64(delay) * 1.5)
+			if delay > maxDelay {
+				delay = maxDelay
+			}
 		case <-m.stopCh:
 			return nil
 		}

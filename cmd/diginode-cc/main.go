@@ -83,13 +83,14 @@ func main() {
 	nodesSvc := nodes.NewService(db, hub)
 	dronesSvc := drones.NewService(db, hub)
 	dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)
+	inventorySvc := inventory.NewService(db, hub)
+	dronesSvc.SetInventoryCallback(inventorySvc.Track)
 	chatSvc := chat.NewService(db, hub)
 	chatSvc.SetBufferCallback(serialMgr.AddTextMessage)
 	commandsSvc := commands.NewService(db, hub)
 	alertsSvc := alerts.NewService(db, hub)
 	geofencesSvc := geofences.NewService(db, hub)
 	targetsSvc := targets.NewService(db, hub)
-	inventorySvc := inventory.NewService(db, hub)
 	webhooksSvc := webhooks.NewService(db)
 	alarmsSvc := alarms.NewService(db)
 	firewallSvc := firewall.NewService(db)
@@ -129,6 +130,10 @@ func main() {
 	dispatcher.SetDroneHandler(dronesSvc)
 	dispatcher.SetChatHandler(chatSvc)
 	dispatcher.SetDeviceTimeCallback(serialMgr.SetDeviceTime)
+	dispatcher.SetAlertCallback(func(ctx context.Context, evt alerts.DetectionEvent) {
+		alertsSvc.Evaluate(ctx, evt)
+	})
+	dispatcher.SetWebhookCallback(webhooksSvc.Dispatch)
 	serialMgr.RegisterHandler(dispatcher.HandlePacket)
 
 	// Load startup data from DB

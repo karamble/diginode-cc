@@ -1,11 +1,15 @@
 package meshtastic
 
 import (
+	"context"
 	"encoding/binary"
+	"fmt"
 	"log/slog"
 	"math"
+	"sync"
 	"time"
 
+	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
@@ -18,6 +22,10 @@ type Dispatcher struct {
 	chatHandler    ChatHandler
 	posHandler     PositionHandler
 	onDeviceTime   func(t time.Time)
+	onAlertEval    func(ctx context.Context, evt alerts.DetectionEvent)
+	onWebhookFire  func(eventType string, payload interface{})
+	dedup          map[uint64]time.Time // packet hash → last seen
+	dedupMu        sync.Mutex
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -45,7 +53,10 @@ type PositionHandler interface {
 
 // NewDispatcher creates a new packet dispatcher.
 func NewDispatcher(hub *ws.Hub) *Dispatcher {
-	return &Dispatcher{hub: hub}
+	return &Dispatcher{
+		hub:   hub,
+		dedup: make(map[uint64]time.Time),
+	}
 }
 
 // SetNodeHandler sets the node handler.
@@ -59,6 +70,16 @@ func (d *Dispatcher) SetChatHandler(h ChatHandler) { d.chatHandler = h }
 
 // SetDeviceTimeCallback sets a callback invoked when a device time is received.
 func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
+
+// SetAlertCallback sets a callback invoked to evaluate detection events against alert rules.
+func (d *Dispatcher) SetAlertCallback(fn func(ctx context.Context, evt alerts.DetectionEvent)) {
+	d.onAlertEval = fn
+}
+
+// SetWebhookCallback sets a callback invoked to dispatch webhook events.
+func (d *Dispatcher) SetWebhookCallback(fn func(eventType string, payload interface{})) {
+	d.onWebhookFire = fn
+}
 
 // HandlePacket is the main entry point, called by the serial manager for each FromRadio.
 func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
@@ -99,7 +120,40 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 	}
 }
 
+// isDuplicate returns true if this packet was already seen within the dedup window.
+// Meshtastic mesh networks rebroadcast packets, so duplicates must be filtered.
+func (d *Dispatcher) isDuplicate(mp *serial.MeshPacketData) bool {
+	// Hash based on from + id (packet ID is unique per sender)
+	key := uint64(mp.From)<<32 | uint64(mp.ID)
+
+	d.dedupMu.Lock()
+	defer d.dedupMu.Unlock()
+
+	now := time.Now()
+	if last, ok := d.dedup[key]; ok && now.Sub(last) < 15*time.Second {
+		return true // duplicate within 15s window
+	}
+	d.dedup[key] = now
+
+	// Prune old entries (keep max 512)
+	if len(d.dedup) > 512 {
+		cutoff := now.Add(-15 * time.Second)
+		for k, t := range d.dedup {
+			if t.Before(cutoff) {
+				delete(d.dedup, k)
+			}
+		}
+	}
+
+	return false
+}
+
 func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
+	if d.isDuplicate(mp) {
+		slog.Debug("duplicate packet filtered", "from", mp.From, "id", mp.ID)
+		return
+	}
+
 	portNum := PortNum(mp.PortNum)
 
 	slog.Debug("mesh packet",
@@ -113,6 +167,14 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		if d.chatHandler != nil && len(mp.Payload) > 0 {
 			d.chatHandler.HandleTextMessage(mp.From, mp.To, mp.Channel, string(mp.Payload))
 		}
+		if d.onWebhookFire != nil && len(mp.Payload) > 0 {
+			d.onWebhookFire("mesh.text_message", map[string]interface{}{
+				"from":    mp.From,
+				"to":      mp.To,
+				"channel": mp.Channel,
+				"text":    string(mp.Payload),
+			})
+		}
 
 	case PortNumPosition:
 		if d.nodeHandler != nil && len(mp.Payload) > 0 {
@@ -122,6 +184,15 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 				// Update device time from GPS-synced position
 				if pos.Time > 0 && d.onDeviceTime != nil {
 					d.onDeviceTime(time.Unix(int64(pos.Time), 0))
+				}
+				if d.onWebhookFire != nil {
+					d.onWebhookFire("mesh.position", map[string]interface{}{
+						"from":      mp.From,
+						"latitude":  pos.LatitudeI,
+						"longitude": pos.LongitudeI,
+						"altitude":  pos.Altitude,
+						"time":      pos.Time,
+					})
 				}
 			}
 		}
@@ -144,6 +215,17 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 	case PortNumDetectionSensor:
 		if d.droneHandler != nil {
 			d.droneHandler.HandleDroneDetection(mp.From, mp.Payload)
+		}
+		if d.onAlertEval != nil {
+			d.onAlertEval(context.Background(), alerts.DetectionEvent{
+				NodeID: fmt.Sprintf("!%08x", mp.From),
+			})
+		}
+		if d.onWebhookFire != nil {
+			d.onWebhookFire("mesh.drone_detection", map[string]interface{}{
+				"from":       mp.From,
+				"payloadLen": len(mp.Payload),
+			})
 		}
 
 	case PortNumRouting:
