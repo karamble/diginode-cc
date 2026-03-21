@@ -213,6 +213,13 @@ type DeviceMetrics struct {
 	UptimeSeconds     uint32
 }
 
+// EnvironmentMetrics from Meshtastic Telemetry.environment_metrics (field 3)
+type EnvironmentMetrics struct {
+	Temperature        float32
+	RelativeHumidity   float32
+	BarometricPressure float32
+}
+
 type MeshPacketData struct {
 	From        uint32
 	To          uint32

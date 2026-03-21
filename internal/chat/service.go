@@ -2,6 +2,7 @@ package chat
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -21,13 +22,19 @@ type Message struct {
 
 // Service manages mesh chat messages.
 type Service struct {
-	db  *database.DB
-	hub *ws.Hub
+	db          *database.DB
+	hub         *ws.Hub
+	addToBuffer func(nodeID, message, siteID string) // serial ring buffer callback
 }
 
 // NewService creates a new chat service.
 func NewService(db *database.DB, hub *ws.Hub) *Service {
 	return &Service{db: db, hub: hub}
+}
+
+// SetBufferCallback sets the callback to add messages to the serial ring buffer.
+func (s *Service) SetBufferCallback(fn func(nodeID, message, siteID string)) {
+	s.addToBuffer = fn
 }
 
 // HandleTextMessage processes an incoming text message from the mesh.
@@ -50,6 +57,12 @@ func (s *Service) HandleTextMessage(from, to uint32, channel uint32, text string
 		Type:    ws.EventChat,
 		Payload: msg,
 	})
+
+	// Add to serial ring buffer (gotailme polls this)
+	if s.addToBuffer != nil {
+		nodeID := fmt.Sprintf("!%08x", from)
+		s.addToBuffer(nodeID, text, "")
+	}
 
 	go s.persistMessage(msg)
 }
