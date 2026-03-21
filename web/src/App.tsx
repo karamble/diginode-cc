@@ -18,6 +18,8 @@ import InventoryPage from './pages/InventoryPage'
 import CommandsPage from './pages/CommandsPage'
 import WebhooksPage from './pages/WebhooksPage'
 import ADSBPage from './pages/ADSBPage'
+import ACARSPage from './pages/ACARSPage'
+import TerminalPage from './pages/TerminalPage'
 import ExportsPage from './pages/ExportsPage'
 
 function App() {
@@ -69,6 +71,8 @@ function App() {
         <Route path="/commands" element={<CommandsPage />} />
         <Route path="/webhooks" element={<WebhooksPage />} />
         <Route path="/adsb" element={<ADSBPage />} />
+        <Route path="/acars" element={<ACARSPage />} />
+        <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/exports" element={<ExportsPage />} />
         <Route path="/users" element={<UsersPage />} />
         <Route path="/config" element={<ConfigPage />} />
