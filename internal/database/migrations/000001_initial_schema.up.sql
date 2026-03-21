@@ -140,7 +140,7 @@ CREATE TABLE drones (
     pilot_latitude DOUBLE PRECISION,
     pilot_longitude DOUBLE PRECISION,
     rssi INTEGER,
-    status drone_status DEFAULT 'ACTIVE',
+    status drone_status DEFAULT 'UNKNOWN',
     source TEXT,
     node_id UUID REFERENCES nodes(id) ON DELETE SET NULL,
     site_id UUID REFERENCES sites(id) ON DELETE SET NULL,
