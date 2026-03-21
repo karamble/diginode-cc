@@ -3,6 +3,7 @@ package nodes
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -75,6 +76,33 @@ func (s *Service) GetByNodeNum(nodeNum uint32) *Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.nodes[nodeNum]
+}
+
+// TouchNode ensures a node entry exists for the given mesh node number.
+// Called by the dispatcher on every incoming mesh packet so remote nodes
+// appear in the node list even before we receive their full NodeInfo.
+func (s *Service) TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32) {
+	s.mu.Lock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		node = &Node{
+			NodeNum: nodeNum,
+			NodeID:  fmt.Sprintf("!%08x", nodeNum),
+			IsOnline: true,
+		}
+		s.nodes[nodeNum] = node
+		slog.Info("new mesh node discovered", "nodeNum", nodeNum, "nodeId", node.NodeID)
+
+		s.hub.Broadcast(ws.Event{
+			Type:    ws.EventNodeUpdate,
+			Payload: node,
+		})
+	}
+	node.SNR = rxSNR
+	node.RSSI = rxRSSI
+	node.LastHeard = time.Now()
+	node.IsOnline = true
+	s.mu.Unlock()
 }
 
 // LookupNodeIDAndSite returns the hex node ID and site ID for a mesh node number.
