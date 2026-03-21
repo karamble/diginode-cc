@@ -50,7 +50,7 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 		cfg:        cfg,
 		hub:        hub,
 		stopCh:     make(chan struct{}),
-		protocol:   "text", // Default to text mode (Heltec debug console)
+		protocol:   "text", // Binary protobuf mode (sends wantConfig, reads FromRadio frames)
 		textParser: NewTextParser(),
 	}
 }
