@@ -387,9 +387,26 @@ func (s *Server) setupRoutes() chi.Router {
 		})
 	})
 
-	// Serve static frontend files
-	fileServer := http.FileServer(http.Dir("web/dist"))
-	r.Handle("/*", fileServer)
+	// Serve static frontend files with SPA fallback
+	staticDir := http.Dir("web/dist")
+	fileServer := http.FileServer(staticDir)
+	r.Handle("/*", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Try to serve the file directly
+		path := r.URL.Path
+		if path == "/" {
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// Check if the file exists on disk
+		if f, err := staticDir.Open(path); err == nil {
+			f.Close()
+			fileServer.ServeHTTP(w, r)
+			return
+		}
+		// SPA fallback: serve index.html for client-side routes
+		r.URL.Path = "/"
+		fileServer.ServeHTTP(w, r)
+	}))
 
 	return r
 }
