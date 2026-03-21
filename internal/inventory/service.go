@@ -197,6 +197,11 @@ func nilIfZero(f float64) interface{} {
 	return f
 }
 
+// GetOUIDB returns the OUI vendor database.
+func GetOUIDB() map[string]string {
+	return ouiDB
+}
+
 // Common OUI prefixes (top entries — full DB would be loaded from file)
 var ouiDB = map[string]string{
 	"00:17:88": "Philips Lighting",

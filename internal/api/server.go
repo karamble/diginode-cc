@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/karamble/diginode-cc/internal/acars"
 	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/alarms"
 	"github.com/karamble/diginode-cc/internal/alerts"
@@ -56,6 +57,7 @@ type Services struct {
 	Mail      *mail.Service
 	AppCfg      *config.AppConfig
 	Permissions *permissions.Service
+	ACARS       *acars.Service
 	ADSB        *adsb.Service
 	MQTT        *mqtt.Service
 	Updates     *updates.Service
@@ -109,6 +111,7 @@ func (s *Server) setupRoutes() chi.Router {
 	// Health check (no auth)
 	r.Get("/api/health", s.handleHealth)
 	r.Get("/healthz", s.handleHealth) // gotailme compat alias
+	r.Get("/readyz", s.handleHealth)  // readiness probe alias
 
 	// WebSocket endpoint (auth checked on connect)
 	r.Get("/ws", s.handleWebSocket)
@@ -292,6 +295,7 @@ func (s *Server) setupRoutes() chi.Router {
 			// Serial
 			r.Route("/serial", func(r chi.Router) {
 				r.Get("/ports", s.handleListSerialPorts)
+				r.Get("/protocols", s.handleListSerialProtocols)
 				r.Get("/status", s.handleSerialStatus)
 				r.Get("/state", s.handleSerialStatus) // CC PRO compat alias
 				r.Get("/text-messages", s.handleGetTextMessages)
@@ -318,7 +322,9 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/config", s.handleGetADSBConfig)
 				r.Put("/config", s.handleUpdateADSBConfig)
 				r.Get("/log", s.handleADSBLog)
+				r.Delete("/log", s.handleClearADSBLog)
 				r.Post("/database/upload", s.handleADSBDatabaseUpload)
+				r.Post("/opensky/credentials", s.handleADSBOpenSkyCredentials)
 				r.Get("/alerts/rules", s.handleListADSBAlertRules)
 				r.Post("/alerts/rules", s.handleCreateADSBAlertRule)
 				r.Put("/alerts/rules/{id}", s.handleUpdateADSBAlertRule)
@@ -343,6 +349,31 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/trigger", s.handleTriggerUpdate)
 				r.Get("/history", s.handleUpdateHistory)
 				r.Post("/rollback/{id}", s.handleRollbackUpdate)
+			})
+
+			// ACARS
+			r.Route("/acars", func(r chi.Router) {
+				r.Get("/status", s.handleACARSStatus)
+				r.Get("/messages", s.handleGetACARSMessages)
+				r.Delete("/messages", s.handleClearACARSMessages)
+				r.Post("/config", s.handleUpdateACARSConfig)
+			})
+
+			// TAK
+			r.Route("/tak", func(r chi.Router) {
+				r.Get("/config", s.handleGetTAKConfig)
+				r.Put("/config", s.handleUpdateTAKConfig)
+				r.Post("/reload", s.handleTAKReload)
+				r.Post("/send", s.handleTAKSend)
+			})
+
+			// OUI
+			r.Route("/oui", func(r chi.Router) {
+				r.Get("/stats", s.handleOUIStats)
+				r.Get("/cache", s.handleOUICache)
+				r.Post("/import", s.handleOUIImport)
+				r.Get("/export", s.handleOUIExport)
+				r.Get("/resolve/{mac}", s.handleOUIResolve)
 			})
 
 			// System

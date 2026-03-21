@@ -82,6 +82,30 @@ func (s *Server) handleADSBLog(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// ---- ADS-B Clear Log ----
+
+func (s *Server) handleClearADSBLog(w http.ResponseWriter, r *http.Request) {
+	// Clear ADS-B tracks from memory
+	s.svc.ADSB.ClearAircraft()
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ---- ADS-B OpenSky Credentials ----
+
+func (s *Server) handleADSBOpenSkyCredentials(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	s.svc.AppCfg.Set(r.Context(), "adsb.opensky_username", req.Username)
+	s.svc.AppCfg.Set(r.Context(), "adsb.opensky_password", req.Password)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // ---- ADS-B Database Upload ----
 
 func (s *Server) handleADSBDatabaseUpload(w http.ResponseWriter, r *http.Request) {
