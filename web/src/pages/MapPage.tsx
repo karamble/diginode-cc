@@ -25,6 +25,7 @@ interface DroneRow {
 interface NodeRow {
   id: string
   nodeNum: number
+  nodeType?: string
   name: string
   shortName?: string
   hwModel?: string
@@ -33,8 +34,21 @@ interface NodeRow {
   altitude?: number
   batteryLevel?: number
   isOnline: boolean
+  isLocal?: boolean
   lastHeard?: string
   siteName?: string
+}
+
+function nodeColor(n: NodeRow): { fill: string; stroke: string } {
+  if (!n.isOnline) return { fill: '#475569', stroke: '#64748B' }
+  if (n.nodeType === 'antihunter') return { fill: '#F97316', stroke: '#FB923C' }
+  return { fill: '#3B82F6', stroke: '#60A5FA' } // gotailme default
+}
+
+function nodeTypeLabel(t?: string): string {
+  if (t === 'gotailme') return 'GTM'
+  if (t === 'antihunter') return 'AH'
+  return '?'
 }
 
 interface GeofencePoint {
@@ -238,8 +252,12 @@ export default function MapPage() {
             <span className="text-dark-400">Drones ({droneMarkers.length})</span>
           </div>
           <div className="flex items-center gap-1.5">
-            <span className="inline-block w-3 h-3 rounded-full bg-primary-500" />
-            <span className="text-dark-400">Nodes ({nodeMarkers.length})</span>
+            <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#3B82F6' }} />
+            <span className="text-dark-400">GTM ({nodeMarkers.filter((n: NodeRow) => n.nodeType !== 'antihunter').length})</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#F97316' }} />
+            <span className="text-dark-400">AH ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'antihunter').length})</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 bg-orange-500" style={{ transform: 'rotate(45deg)', width: '10px', height: '10px' }} />
@@ -335,58 +353,80 @@ export default function MapPage() {
 
             <LayersControl.Overlay checked name="Nodes">
               <LayerGroup>
-                {nodeMarkers.map((n: NodeRow) => (
-                  <CircleMarker
-                    key={`node-${n.id}`}
-                    center={[n.lat!, n.lon!]}
-                    radius={8}
-                    pathOptions={{
-                      fillColor: n.isOnline ? '#3B82F6' : '#475569',
-                      fillOpacity: n.isOnline ? 0.7 : 0.4,
-                      color: n.isOnline ? '#60A5FA' : '#64748B',
-                      weight: 2,
-                    }}
-                  >
-                    <Popup>
-                      <div className="text-xs min-w-[180px]" style={{ color: '#e2e8f0' }}>
-                        <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '4px', color: '#f1f5f9' }}>
-                          {n.name || n.shortName || `Node ${n.nodeNum}`}
+                {nodeMarkers.map((n: NodeRow) => {
+                  const c = nodeColor(n)
+                  return (
+                    <CircleMarker
+                      key={`node-${n.id}`}
+                      center={[n.lat!, n.lon!]}
+                      radius={8}
+                      pathOptions={{
+                        fillColor: c.fill,
+                        fillOpacity: n.isOnline ? 0.7 : 0.4,
+                        color: c.stroke,
+                        weight: 2,
+                      }}
+                    >
+                      <Popup>
+                        <div className="text-xs min-w-[180px]" style={{ color: '#e2e8f0' }}>
+                          <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '4px', color: '#f1f5f9', display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            {n.name || n.shortName || `Node ${n.nodeNum}`}
+                            <span style={{
+                              fontSize: '9px',
+                              padding: '1px 5px',
+                              borderRadius: '3px',
+                              fontFamily: 'monospace',
+                              backgroundColor: n.nodeType === 'antihunter' ? 'rgba(249,115,22,0.2)' : 'rgba(59,130,246,0.2)',
+                              color: n.nodeType === 'antihunter' ? '#FB923C' : '#60A5FA',
+                              border: `1px solid ${n.nodeType === 'antihunter' ? 'rgba(249,115,22,0.3)' : 'rgba(59,130,246,0.3)'}`,
+                            }}>
+                              {nodeTypeLabel(n.nodeType)}
+                            </span>
+                            {n.isLocal && (
+                              <span style={{ fontSize: '9px', padding: '1px 5px', borderRadius: '3px', fontFamily: 'monospace', backgroundColor: 'rgba(100,116,139,0.3)', color: '#94a3b8', border: '1px solid rgba(100,116,139,0.3)' }}>
+                                LOCAL
+                              </span>
+                            )}
+                          </div>
+                          <div style={{ color: '#94a3b8' }}>
+                            <div>HW: {n.hwModel || 'Unknown'}</div>
+                            <div>Status: <span style={{ color: n.isOnline ? '#22C55E' : '#94A3B8' }}>{n.isOnline ? 'Online' : 'Offline'}</span></div>
+                            {n.batteryLevel !== undefined && n.batteryLevel > 0 && (
+                              <div>Battery: {n.batteryLevel}%</div>
+                            )}
+                            {n.altitude !== undefined && n.altitude > 0 && (
+                              <div>Alt: {n.altitude.toFixed(0)}m</div>
+                            )}
+                            {n.siteName && <div>Site: {n.siteName}</div>}
+                            {n.lastHeard && <div style={{ marginTop: '2px', fontSize: '10px', color: '#64748B' }}>Last: {new Date(n.lastHeard).toLocaleString()}</div>}
+                          </div>
                         </div>
-                        <div style={{ color: '#94a3b8' }}>
-                          <div>HW: {n.hwModel || 'Unknown'}</div>
-                          <div>Status: <span style={{ color: n.isOnline ? '#22C55E' : '#94A3B8' }}>{n.isOnline ? 'Online' : 'Offline'}</span></div>
-                          {n.batteryLevel !== undefined && n.batteryLevel > 0 && (
-                            <div>Battery: {n.batteryLevel}%</div>
-                          )}
-                          {n.altitude !== undefined && n.altitude > 0 && (
-                            <div>Alt: {n.altitude.toFixed(0)}m</div>
-                          )}
-                          {n.siteName && <div>Site: {n.siteName}</div>}
-                          {n.lastHeard && <div style={{ marginTop: '2px', fontSize: '10px', color: '#64748B' }}>Last: {new Date(n.lastHeard).toLocaleString()}</div>}
-                        </div>
-                      </div>
-                    </Popup>
-                  </CircleMarker>
-                ))}
+                      </Popup>
+                    </CircleMarker>
+                  )
+                })}
               </LayerGroup>
             </LayersControl.Overlay>
 
             <LayersControl.Overlay checked name="Node Coverage">
               <LayerGroup>
-                {nodeMarkers.map((n: NodeRow) => (
-                  <Circle
-                    key={`coverage-${n.id}`}
-                    center={[n.lat!, n.lon!]}
-                    radius={50}
-                    pathOptions={{
-                      fillColor: '#3B82F6',
-                      fillOpacity: 0.1,
-                      color: '#3B82F6',
-                      weight: 1,
-                      opacity: 0.3,
-                    }}
-                  />
-                ))}
+                {nodeMarkers.map((n: NodeRow) => {
+                  const c = nodeColor(n)
+                  return (
+                    <Circle
+                      key={`coverage-${n.id}`}
+                      center={[n.lat!, n.lon!]}
+                      radius={50}
+                      pathOptions={{
+                        fillColor: c.fill,
+                        fillOpacity: 0.1,
+                        color: c.fill,
+                        weight: 1,
+                        opacity: 0.3,
+                      }}
+                    />
+                  )
+                })}
               </LayerGroup>
             </LayersControl.Overlay>
 
