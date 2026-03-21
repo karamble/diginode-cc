@@ -79,6 +79,14 @@ export default function NodesPage() {
     refetchInterval: 5000,
   })
 
+  const refreshNodes = useMutation({
+    mutationFn: () => api.post('/serial/refresh'),
+    onSuccess: () => {
+      // Wait a moment for the config dump to complete, then refetch
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['nodes'] }), 2000)
+    },
+  })
+
   const deleteNode = useMutation({
     mutationFn: (nodeNum: number) => api.delete(`/nodes/${nodeNum}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
@@ -331,6 +339,18 @@ export default function NodesPage() {
                                 <span className="text-dark-300">{n.lastMessage}</span>
                               </div>
                             )}
+                          </div>
+                          <div className="mt-3 pt-3 border-t border-dark-700/30 flex gap-2">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                refreshNodes.mutate()
+                              }}
+                              disabled={refreshNodes.isPending}
+                              className="px-3 py-1 text-xs rounded bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-dark-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors border border-dark-600/50"
+                            >
+                              {refreshNodes.isPending ? 'Refreshing...' : 'Update Telemetry'}
+                            </button>
                           </div>
                         </td>
                       </tr>

@@ -98,6 +98,14 @@ func (s *Server) handleSerialDisconnect(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "disconnected"})
 }
 
+func (s *Server) handleRefreshNodes(w http.ResponseWriter, r *http.Request) {
+	if err := s.serialMgr.RefreshConfig(); err != nil {
+		writeError(w, http.StatusInternalServerError, "refresh failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleSendSerialTextMessage(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message string  `json:"message"`

@@ -538,6 +538,12 @@ func (m *Manager) periodicConfigRefresh(done chan struct{}) {
 	}
 }
 
+// RefreshConfig re-sends wantConfig to get fresh NodeInfo from the firmware.
+// Called by the API to trigger an on-demand telemetry refresh.
+func (m *Manager) RefreshConfig() error {
+	return m.sendWantConfig()
+}
+
 func (m *Manager) sendWantConfig() error {
 	// Build a ToRadio { want_config_id: ... } protobuf
 	// This tells the radio to send us its full config
