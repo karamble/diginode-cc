@@ -34,6 +34,9 @@ type NodeHandler interface {
 	HandleTelemetry(from uint32, metrics *serial.DeviceMetrics)
 	HandlePosition(from uint32, pos *serial.PositionData)
 	HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
+	// TouchNode ensures a node entry exists for the given mesh number.
+	// Called on every incoming mesh packet so remote nodes appear in the list.
+	TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32)
 }
 
 // DroneHandler processes drone detection events.
@@ -161,6 +164,12 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		"to", mp.To,
 		"port", portNum.String(),
 		"payloadLen", len(mp.Payload))
+
+	// Register / touch the sending node so it appears in the node list.
+	// Every mesh packet tells us a node exists, even if we don't have its full info yet.
+	if d.nodeHandler != nil && mp.From != 0 {
+		d.nodeHandler.TouchNode(mp.From, mp.RxSNR, mp.RxRSSI)
+	}
 
 	switch portNum {
 	case PortNumTextMessage:
