@@ -684,6 +684,8 @@ func decodeMeshPacket(data []byte) *MeshPacketData {
 				mp.ID = uint32(val)
 			case 7:
 				mp.RxTime = uint32(val)
+			case 9: // rx_rssi (sint32 zigzag encoded)
+				mp.RxRSSI = int32(decodeZigzag(val))
 			case 10:
 				mp.HopLimit = uint32(val)
 			case 11:
@@ -831,6 +833,12 @@ func decodeMetadata(data []byte) *DeviceMetadata {
 		}
 	}
 	return meta
+}
+
+// decodeZigzag converts a protobuf zigzag-encoded uint64 to the signed value.
+// Used for sint32/sint64 fields (e.g. rx_rssi).
+func decodeZigzag(v uint64) int64 {
+	return int64(v>>1) ^ -int64(v&1)
 }
 
 func skipField(data []byte, pos int, wireType uint64) int {
