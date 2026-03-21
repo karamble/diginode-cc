@@ -110,3 +110,10 @@ func (s *Service) GetMessages(limit int) []*Message {
 	}
 	return s.messages[len(s.messages)-limit:]
 }
+
+// ClearMessages removes all stored messages.
+func (s *Service) ClearMessages() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.messages = nil
+}

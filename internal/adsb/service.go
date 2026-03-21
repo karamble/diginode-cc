@@ -83,6 +83,13 @@ func (s *Service) Stop() {
 	close(s.stopCh)
 }
 
+// ClearAircraft removes all tracked aircraft from memory.
+func (s *Service) ClearAircraft() {
+	s.mu.Lock()
+	s.aircraft = make(map[string]*Aircraft)
+	s.mu.Unlock()
+}
+
 // GetAircraft returns all currently tracked aircraft.
 func (s *Service) GetAircraft() []*Aircraft {
 	s.mu.RLock()

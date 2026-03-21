@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/karamble/diginode-cc/internal/alarms"
@@ -172,12 +174,25 @@ func (s *Server) handleFAASync(w http.ResponseWriter, r *http.Request) {
 	// Start a background download and import (use background context since
 	// the HTTP request context will be canceled after we return).
 	go func() {
-		resp, err := http.Get(syncCfg.URL)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		req, err := http.NewRequestWithContext(ctx, "GET", syncCfg.URL, nil)
 		if err != nil {
+			slog.Error("FAA sync: failed to create request", "error", err)
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			slog.Error("FAA sync: download failed", "error", err)
 			return
 		}
 		defer resp.Body.Close()
-		s.svc.FAA.ImportCSV(context.Background(), resp.Body)
+		count, err := s.svc.FAA.ImportCSV(ctx, resp.Body)
+		if err != nil {
+			slog.Error("FAA sync: import failed", "error", err)
+			return
+		}
+		slog.Info("FAA sync completed", "records", count)
 	}()
 
 	writeJSON(w, http.StatusAccepted, map[string]string{

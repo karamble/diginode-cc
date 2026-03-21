@@ -305,6 +305,11 @@ func (s *Server) handleSerialSimulate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "simulated"})
 }
 
+// handleListSerialProtocols returns the supported serial protocol names.
+func (s *Server) handleListSerialProtocols(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, []string{"meshtastic-binary", "meshtastic-rewrite", "raw-lines"})
+}
+
 // handleListSerialPorts returns the available serial ports on the system.
 func (s *Server) handleListSerialPorts(w http.ResponseWriter, r *http.Request) {
 	ports, err := goserial.GetPortsList()
