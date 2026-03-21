@@ -183,6 +183,7 @@ type UserInfo struct {
 	ID        string
 	LongName  string
 	ShortName string
+	MacAddr   string // BLE MAC address (formatted XX:XX:XX:XX:XX:XX)
 	HWModel   string
 	Role      string
 }
@@ -526,15 +527,20 @@ func decodeUserInfo(data []byte) *UserInfo {
 			if pos+int(length) > len(data) {
 				break
 			}
-			s := string(data[pos : pos+int(length)])
+			raw := data[pos : pos+int(length)]
 			pos += int(length)
 			switch fieldNum {
 			case 1:
-				user.ID = s
+				user.ID = string(raw)
 			case 2:
-				user.LongName = s
+				user.LongName = string(raw)
 			case 3:
-				user.ShortName = s
+				user.ShortName = string(raw)
+			case 4: // macaddr (6 bytes) → formatted MAC string
+				if len(raw) == 6 {
+					user.MacAddr = fmt.Sprintf("%02X:%02X:%02X:%02X:%02X:%02X",
+						raw[0], raw[1], raw[2], raw[3], raw[4], raw[5])
+				}
 			}
 		} else if wireType == 0 {
 			val, n := decodeVarint(data[pos:])

@@ -20,6 +20,7 @@ type nodeResponse struct {
 	Name               string    `json:"name"`
 	ShortName          string    `json:"shortName,omitempty"`
 	HWModel            string    `json:"hwModel,omitempty"`
+	MacAddr            string    `json:"macAddr,omitempty"`
 	Role               string    `json:"role,omitempty"`
 	FirmwareVersion    string    `json:"firmwareVersion,omitempty"`
 	Lat                float64   `json:"lat,omitempty"`
@@ -60,6 +61,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		Name:               n.LongName,
 		ShortName:          n.ShortName,
 		HWModel:            n.HWModel,
+		MacAddr:            n.MacAddr,
 		Role:               n.Role,
 		FirmwareVersion:    n.FirmwareVersion,
 		Lat:                n.Latitude,
