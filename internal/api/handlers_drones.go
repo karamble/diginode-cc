@@ -14,6 +14,7 @@ import (
 // Field names use lat/lon/operatorLat/operatorLon/droneId instead of the
 // internal Go struct names (latitude/longitude/pilotLatitude/pilotLongitude/id).
 type droneResponse struct {
+	ID            string                 `json:"id"`
 	DroneID       string                 `json:"droneId"`
 	MAC           string                 `json:"mac,omitempty"`
 	SerialNumber  string                 `json:"serialNumber,omitempty"`
@@ -42,6 +43,7 @@ type droneResponse struct {
 	SiteCountry   string                 `json:"siteCountry,omitempty"`
 	SiteCity      string                 `json:"siteCity,omitempty"`
 	FAAData       map[string]interface{} `json:"faaData,omitempty"`
+	Ts            time.Time              `json:"ts"`
 	FirstSeen     time.Time              `json:"firstSeen"`
 	LastSeen      time.Time              `json:"lastSeen"`
 }
@@ -50,6 +52,7 @@ type droneResponse struct {
 // response format expected by gotailme.
 func mapDroneToResponse(d *drones.Drone) droneResponse {
 	return droneResponse{
+		ID:            d.ID,
 		DroneID:       d.ID,
 		MAC:           d.MAC,
 		SerialNumber:  d.SerialNumber,
@@ -74,6 +77,7 @@ func mapDroneToResponse(d *drones.Drone) droneResponse {
 		SiteID:        d.SiteID,
 		OriginSiteID:  d.OriginSiteID,
 		FAAData:       d.FAAData,
+		Ts:            d.LastSeen,
 		FirstSeen:     d.FirstSeen,
 		LastSeen:      d.LastSeen,
 	}
