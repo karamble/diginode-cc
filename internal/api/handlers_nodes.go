@@ -33,6 +33,7 @@ type nodeResponse struct {
 	TemperatureC          float64    `json:"temperatureC,omitempty"`
 	TemperatureF          float64    `json:"temperatureF,omitempty"`
 	TemperatureUpdatedAt  *time.Time `json:"temperatureUpdatedAt,omitempty"`
+	TelemetryUpdatedAt    *time.Time `json:"telemetryUpdatedAt,omitempty"`
 	SNR                   float32    `json:"snr,omitempty"`
 	RSSI                  int32      `json:"rssi,omitempty"`
 	Ts                    time.Time  `json:"ts"`
@@ -72,6 +73,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		TemperatureC:          n.TemperatureC,
 		TemperatureF:          n.TemperatureF,
 		TemperatureUpdatedAt:  n.TemperatureUpdatedAt,
+		TelemetryUpdatedAt:    n.TelemetryUpdatedAt,
 		SNR:                   n.SNR,
 		RSSI:                  n.RSSI,
 		Ts:                    n.LastHeard,
