@@ -61,16 +61,22 @@ type Drone struct {
 
 // Service manages drone detection and tracking.
 type Service struct {
-	db         *database.DB
-	hub        *ws.Hub
-	drones     map[string]*Drone // keyed by MAC or serial
-	mu         sync.RWMutex
-	nodeLookup func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
+	db          *database.DB
+	hub         *ws.Hub
+	drones      map[string]*Drone // keyed by MAC or serial
+	mu          sync.RWMutex
+	nodeLookup  func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
+	onInventory func(mac, manufacturer, ssid string, rssi int)
 }
 
 // SetNodeLookup sets the function to resolve mesh node numbers to node IDs and site IDs.
 func (s *Service) SetNodeLookup(fn func(nodeNum uint32) (nodeID, siteID string)) {
 	s.nodeLookup = fn
+}
+
+// SetInventoryCallback sets a callback to record detected drones in the device inventory.
+func (s *Service) SetInventoryCallback(fn func(mac, manufacturer, ssid string, rssi int)) {
+	s.onInventory = fn
 }
 
 // NewService creates a new drone tracking service.
@@ -188,6 +194,11 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 	}
 	if detection.Model != "" {
 		drone.Model = detection.Model
+	}
+
+	// Track in inventory
+	if s.onInventory != nil && drone.MAC != "" {
+		s.onInventory(drone.MAC, drone.Manufacturer, "", drone.RSSI)
 	}
 
 	// Broadcast telemetry
