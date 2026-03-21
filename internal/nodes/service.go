@@ -57,6 +57,7 @@ type Node struct {
 	TemperatureC          float64    `json:"temperatureC,omitempty"`
 	TemperatureF          float64    `json:"temperatureF,omitempty"`
 	TemperatureUpdatedAt  *time.Time `json:"temperatureUpdatedAt,omitempty"`
+	TelemetryUpdatedAt    *time.Time `json:"telemetryUpdatedAt,omitempty"`
 }
 
 // Service manages mesh node state.
@@ -292,8 +293,10 @@ func (s *Service) HandleTelemetry(from uint32, metrics *serial.DeviceMetrics) {
 	node.Voltage = metrics.Voltage
 	node.ChannelUtilization = metrics.ChannelUtilization
 	node.AirUtilTx = metrics.AirUtilTx
-	node.LastHeard = time.Now()
+	now := time.Now()
+	node.LastHeard = now
 	node.IsOnline = true
+	node.TelemetryUpdatedAt = &now
 
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventNodeUpdate,

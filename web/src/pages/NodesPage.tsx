@@ -31,6 +31,7 @@ interface NodeRow {
   siteName?: string
   siteColor?: string
   lastMessage?: string
+  telemetryUpdatedAt?: string
 }
 
 function nodeTypeBadge(nodeType?: string): { label: string; color: string } | null {
@@ -222,16 +223,23 @@ export default function NodesPage() {
                       {/* Battery bar */}
                       <td className="px-4 py-2.5">
                         {n.batteryLevel && n.batteryLevel > 0 ? (
-                          <div className="flex items-center gap-2">
-                            <div className="w-16 h-2 bg-dark-700 rounded-full overflow-hidden">
-                              <div
-                                className={`h-full rounded-full ${batteryColor(n.batteryLevel)}`}
-                                style={{ width: `${Math.min(n.batteryLevel, 100)}%` }}
-                              />
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <div className="w-16 h-2 bg-dark-700 rounded-full overflow-hidden">
+                                <div
+                                  className={`h-full rounded-full ${batteryColor(n.batteryLevel)}`}
+                                  style={{ width: `${Math.min(n.batteryLevel, 100)}%` }}
+                                />
+                              </div>
+                              <span className={`text-xs font-mono ${batteryTextColor(n.batteryLevel)}`}>
+                                {n.batteryLevel}%
+                              </span>
                             </div>
-                            <span className={`text-xs font-mono ${batteryTextColor(n.batteryLevel)}`}>
-                              {n.batteryLevel}%
-                            </span>
+                            {n.telemetryUpdatedAt && (
+                              <div className="text-[9px] text-dark-600 font-mono mt-0.5">
+                                {timeAgo(n.telemetryUpdatedAt)}
+                              </div>
+                            )}
                           </div>
                         ) : (
                           <span className="text-dark-500 text-xs">-</span>
