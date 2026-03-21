@@ -46,7 +46,7 @@ type Node struct {
 	AirUtilTx          float32   `json:"airUtilTx,omitempty"`
 	Temperature        float64   `json:"temperature,omitempty"`
 	SNR                float32   `json:"snr,omitempty"`
-	RSSI               int32     `json:"rssi,omitempty"`
+	RSSI               int32     `json:"rssi"`
 	LastHeard          time.Time `json:"lastHeard"`
 	IsOnline           bool      `json:"isOnline"`
 	IsLocal            bool      `json:"isLocal,omitempty"`
