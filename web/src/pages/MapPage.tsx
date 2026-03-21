@@ -4,6 +4,30 @@ import L from 'leaflet'
 import { useEffect, useMemo } from 'react'
 import api from '../api/client'
 
+// Dark popup style override
+const darkPopupStyle = document.createElement('style')
+darkPopupStyle.textContent = `
+  .leaflet-popup-content-wrapper {
+    background: #1e293b !important;
+    color: #e2e8f0 !important;
+    border-radius: 8px !important;
+    box-shadow: 0 4px 20px rgba(0,0,0,0.5) !important;
+  }
+  .leaflet-popup-tip {
+    background: #1e293b !important;
+  }
+  .leaflet-popup-close-button {
+    color: #94a3b8 !important;
+  }
+  .leaflet-popup-close-button:hover {
+    color: #e2e8f0 !important;
+  }
+`
+if (!document.getElementById('dark-popup-style')) {
+  darkPopupStyle.id = 'dark-popup-style'
+  document.head.appendChild(darkPopupStyle)
+}
+
 interface DroneRow {
   id: string
   droneId: string
