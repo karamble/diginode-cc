@@ -455,12 +455,12 @@ func decodeNodeInfo(data []byte) *NodeInfoLite {
 			}
 			pos += n
 			switch fieldNum {
-			case 1:
+			case 1: // num
 				info.Num = uint32(val)
-			case 4:
-				info.LastHeard = uint32(val)
-			case 7:
+			case 7: // channel
 				info.Channel = uint32(val)
+			case 10: // is_favorite
+				info.IsFavorite = val != 0
 			}
 		case 2: // length-delimited
 			length, n := decodeVarint(data[pos:])
@@ -474,21 +474,27 @@ func decodeNodeInfo(data []byte) *NodeInfoLite {
 			subData := data[pos : pos+int(length)]
 			pos += int(length)
 			switch fieldNum {
-			case 2:
+			case 2: // user
 				info.User = decodeUserInfo(subData)
-			case 3:
+			case 3: // position
 				info.Position = decodePosition(subData)
-			case 6:
+			case 6: // device_metrics
 				info.DeviceMetrics = decodeDeviceMetrics(subData)
 			}
 		case 5: // fixed32
 			if pos+4 > len(data) {
 				return info
 			}
-			if fieldNum == 5 {
-				info.SNR = decodeFloat32(data[pos : pos+4])
-			}
+			u32 := binary.LittleEndian.Uint32(data[pos : pos+4])
 			pos += 4
+			switch fieldNum {
+			case 1: // num (can also be fixed32)
+				info.Num = u32
+			case 4: // snr (float)
+				info.SNR = math.Float32frombits(u32)
+			case 5: // last_heard (fixed32 unix timestamp)
+				info.LastHeard = u32
+			}
 		default:
 			pos = skipField(data, pos, wireType)
 			if pos < 0 {
