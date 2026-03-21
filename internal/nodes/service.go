@@ -36,6 +36,7 @@ type Node struct {
 	LongName           string    `json:"longName,omitempty"`
 	ShortName          string    `json:"shortName,omitempty"`
 	HWModel            string    `json:"hwModel,omitempty"`
+	MacAddr            string    `json:"macAddr,omitempty"`
 	Role               string    `json:"role,omitempty"`
 	FirmwareVersion    string    `json:"firmwareVersion,omitempty"`
 	Latitude           float64   `json:"latitude,omitempty"`
@@ -234,6 +235,7 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 		node.NodeID = info.User.ID
 		node.LongName = info.User.LongName
 		node.ShortName = info.User.ShortName
+		node.MacAddr = info.User.MacAddr
 		node.HWModel = info.User.HWModel
 		node.Role = info.User.Role
 	}
