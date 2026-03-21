@@ -307,6 +307,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/config/reset", s.handleResetSerialConfig)
 				r.Post("/connect", s.handleSerialConnect)
 				r.Post("/disconnect", s.handleSerialDisconnect)
+				r.Post("/refresh", s.handleRefreshNodes)
 				r.Post("/text-message", s.handleSendSerialTextMessage)
 				r.Post("/text-alert", s.handleSendSerialTextAlert)
 				r.Post("/position", s.handleSendSerialPosition)
