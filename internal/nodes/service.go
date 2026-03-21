@@ -244,6 +244,12 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 	}
 	node.IsOnline = isNodeOnline(node)
 
+	// Default unclassified nodes to gotailme — antihunter overrides
+	// when the dispatcher sees sensor data (STATUS:/DRONE:/TARGET: etc.)
+	if node.NodeType == NodeTypeUnknown {
+		node.NodeType = NodeTypeGotailme
+	}
+
 	slog.Info("node updated",
 		"nodeNum", info.Num,
 		"longName", node.LongName,
