@@ -5,6 +5,7 @@ import api from '../api/client'
 interface NodeRow {
   id: string
   nodeNum: number
+  nodeType?: string  // "gotailme" | "antihunter" | ""
   name: string
   shortName?: string
   hwModel?: string
@@ -25,10 +26,17 @@ interface NodeRow {
   lastHeard?: string
   lastSeen?: string
   isOnline: boolean
+  isLocal?: boolean
   siteId?: string
   siteName?: string
   siteColor?: string
   lastMessage?: string
+}
+
+function nodeTypeBadge(nodeType?: string): { label: string; color: string } | null {
+  if (nodeType === 'gotailme') return { label: 'GTM', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' }
+  if (nodeType === 'antihunter') return { label: 'AH', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
+  return null
 }
 
 function batteryColor(level: number | undefined): string {
@@ -155,11 +163,14 @@ export default function NodesPage() {
             ) : (
               nodes.map((n: NodeRow) => {
                 const sig = signalStrength(n.rssi)
+                const badge = nodeTypeBadge(n.nodeType)
                 return (
                   <>
                     <tr
                       key={n.id}
-                      className="border-b border-dark-700/30 hover:bg-dark-800/30 cursor-pointer transition-colors"
+                      className={`border-b border-dark-700/30 hover:bg-dark-800/30 cursor-pointer transition-colors ${
+                        n.isLocal ? 'bg-dark-800/40' : ''
+                      }`}
                       onClick={() => setExpandedId(expandedId === n.id ? null : n.id)}
                     >
                       {/* Online indicator */}
@@ -172,10 +183,22 @@ export default function NodesPage() {
                         />
                       </td>
 
-                      {/* Node name */}
+                      {/* Node name + type badge */}
                       <td className="px-4 py-2.5">
-                        <div className="text-dark-200 font-medium text-sm">
-                          {n.name || n.shortName || `!${n.nodeNum.toString(16)}`}
+                        <div className="flex items-center gap-2">
+                          <span className="text-dark-200 font-medium text-sm">
+                            {n.name || n.shortName || `!${n.nodeNum.toString(16)}`}
+                          </span>
+                          {badge && (
+                            <span className={`px-1.5 py-0.5 text-[10px] font-mono rounded border ${badge.color}`}>
+                              {badge.label}
+                            </span>
+                          )}
+                          {n.isLocal && (
+                            <span className="px-1.5 py-0.5 text-[10px] font-mono rounded border bg-dark-600/50 text-dark-300 border-dark-500/30">
+                              LOCAL
+                            </span>
+                          )}
                         </div>
                         <div className="text-dark-500 text-xs font-mono mt-0.5">
                           {n.shortName ? `${n.shortName} / ` : ''}{n.id}
