@@ -1,10 +1,12 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/karamble/diginode-cc/internal/chat"
+	"github.com/karamble/diginode-cc/internal/serial"
 )
 
 func (s *Server) handleGetChatMessages(w http.ResponseWriter, r *http.Request) {
@@ -53,8 +55,23 @@ func (s *Server) handleSendChatMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Queue the message for serial transmission via the ring buffer.
-	s.serialMgr.AddTextMessage("", body.Message, "")
+	// Build and transmit the message via serial port to the Heltec radio
+	var toAddr uint32 = serial.BroadcastAddr
+	if body.To != "" {
+		toAddr = serial.ParseNodeNum(body.To)
+	}
+	data := serial.BuildTextMessage(toAddr, body.Message)
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		slog.Warn("failed to send chat message via serial", "error", err)
+		// Still store locally even if serial send fails
+	}
+
+	// Store in ring buffer (gotailme polls this) with "local" nodeId
+	s.serialMgr.AddTextMessage("local", body.Message, "")
+
+	// Persist to DB and broadcast via WebSocket (bypassing the ring buffer callback
+	// since we already added to the buffer above)
+	s.svc.Chat.PersistAndBroadcast(0, toAddr, 0, body.Message)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }

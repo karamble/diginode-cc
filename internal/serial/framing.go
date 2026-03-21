@@ -702,11 +702,21 @@ func decodeMeshPacket(data []byte) *MeshPacketData {
 			if pos+4 > len(data) {
 				return mp
 			}
-			f := decodeFloat32(data[pos : pos+4])
+			u32 := binary.LittleEndian.Uint32(data[pos : pos+4])
 			pos += 4
 			switch fieldNum {
-			case 8:
-				mp.RxSNR = f
+			case 1: // from (fixed32 in Meshtastic proto)
+				mp.From = u32
+			case 2: // to (fixed32 in Meshtastic proto)
+				mp.To = u32
+			case 6: // id (fixed32 in Meshtastic proto)
+				mp.ID = u32
+			case 7: // rx_time (fixed32)
+				mp.RxTime = u32
+			case 8: // rx_snr (float)
+				mp.RxSNR = math.Float32frombits(u32)
+			case 9: // rx_rssi (sint32 — but some firmware encodes as fixed32)
+				mp.RxRSSI = int32(u32)
 			}
 		default:
 			pos = skipField(data, pos, wireType)
