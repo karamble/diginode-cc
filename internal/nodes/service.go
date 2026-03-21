@@ -13,11 +13,21 @@ import (
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
+// NodeType distinguishes C2 gateways from sensor nodes.
+type NodeType string
+
+const (
+	NodeTypeUnknown    NodeType = ""            // Not yet classified
+	NodeTypeGotailme   NodeType = "gotailme"    // C2 gateway (runs DigiNode CC / CC PRO)
+	NodeTypeAntihunter NodeType = "antihunter"  // AntiHunter detection sensor node
+)
+
 // Node represents a tracked mesh node in memory.
 type Node struct {
 	ID                 string    `json:"id"`
 	NodeNum            uint32    `json:"nodeNum"`
 	NodeID             string    `json:"nodeId,omitempty"`
+	NodeType           NodeType  `json:"nodeType,omitempty"`
 	LongName           string    `json:"longName,omitempty"`
 	ShortName          string    `json:"shortName,omitempty"`
 	HWModel            string    `json:"hwModel,omitempty"`
@@ -35,6 +45,7 @@ type Node struct {
 	RSSI               int32     `json:"rssi,omitempty"`
 	LastHeard          time.Time `json:"lastHeard"`
 	IsOnline           bool      `json:"isOnline"`
+	IsLocal            bool      `json:"isLocal,omitempty"`
 	SiteID             string    `json:"siteId,omitempty"`
 	OriginSiteID       string    `json:"originSiteId,omitempty"`
 	LastMessage        string    `json:"lastMessage,omitempty"`
@@ -103,6 +114,41 @@ func (s *Service) TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32) {
 	node.LastHeard = time.Now()
 	node.IsOnline = true
 	s.mu.Unlock()
+}
+
+// MarkLocal flags a node as the local C2 gateway (ourselves).
+func (s *Service) MarkLocal(nodeNum uint32) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		return
+	}
+	node.IsLocal = true
+	node.NodeType = NodeTypeGotailme
+}
+
+// ClassifyNode sets the node type based on observed behavior.
+// Called when we learn something about what a node does.
+func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		return
+	}
+	// Only upgrade classification, never downgrade
+	// antihunter is more specific than gotailme
+	if node.NodeType == NodeTypeAntihunter {
+		return // already classified as sensor, don't overwrite
+	}
+	if nodeType != "" {
+		node.NodeType = NodeType(nodeType)
+		s.hub.Broadcast(ws.Event{
+			Type:    ws.EventNodeUpdate,
+			Payload: node,
+		})
+	}
 }
 
 // LookupNodeIDAndSite returns the hex node ID and site ID for a mesh node number.

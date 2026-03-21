@@ -16,6 +16,7 @@ import (
 type nodeResponse struct {
 	ID                 string    `json:"id"`
 	NodeNum            uint32    `json:"nodeNum"`
+	NodeType           string    `json:"nodeType,omitempty"`
 	Name               string    `json:"name"`
 	ShortName          string    `json:"shortName,omitempty"`
 	HWModel            string    `json:"hwModel,omitempty"`
@@ -38,6 +39,7 @@ type nodeResponse struct {
 	LastHeard             time.Time  `json:"lastHeard"`
 	LastSeen              *time.Time `json:"lastSeen,omitempty"`
 	IsOnline              bool       `json:"isOnline"`
+	IsLocal               bool       `json:"isLocal,omitempty"`
 	SiteID             string    `json:"siteId,omitempty"`
 	OriginSiteID       string    `json:"originSiteId,omitempty"`
 	SiteName           string    `json:"siteName,omitempty"`
@@ -53,6 +55,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 	return nodeResponse{
 		ID:                 n.NodeID, // CC PRO uses the hex node ID string
 		NodeNum:            n.NodeNum,
+		NodeType:           string(n.NodeType),
 		Name:               n.LongName,
 		ShortName:          n.ShortName,
 		HWModel:            n.HWModel,
@@ -75,6 +78,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		LastHeard:             n.LastHeard,
 		LastSeen:              &n.LastHeard,
 		IsOnline:              n.IsOnline,
+		IsLocal:               n.IsLocal,
 		SiteID:                n.SiteID,
 		OriginSiteID:          n.OriginSiteID,
 		LastMessage:           n.LastMessage,
