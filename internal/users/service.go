@@ -177,6 +177,96 @@ func (s *Service) AcceptTOS(ctx context.Context, userID string) error {
 	return err
 }
 
+// SiteAccess represents a user's access to a specific site.
+type SiteAccess struct {
+	SiteID string `json:"siteId"`
+	Level  string `json:"level"` // VIEW, MANAGE
+}
+
+// SetSiteAccess replaces all site access entries for a user.
+func (s *Service) SetSiteAccess(ctx context.Context, userID string, access []SiteAccess) error {
+	tx, err := s.db.Pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	_, err = tx.Exec(ctx, `DELETE FROM user_site_access WHERE user_id = $1`, userID)
+	if err != nil {
+		return err
+	}
+
+	for _, a := range access {
+		level := a.Level
+		if level == "" {
+			level = "VIEW"
+		}
+		_, err = tx.Exec(ctx, `
+			INSERT INTO user_site_access (user_id, site_id, access_level)
+			VALUES ($1, $2, $3)
+			ON CONFLICT (user_id, site_id) DO UPDATE SET access_level = $3`,
+			userID, a.SiteID, level)
+		if err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit(ctx)
+}
+
+// AuditEntry represents a single audit log entry.
+type AuditEntry struct {
+	ID         string     `json:"id"`
+	UserID     *string    `json:"userId,omitempty"`
+	Action     string     `json:"action"`
+	Resource   *string    `json:"resource,omitempty"`
+	ResourceID *string    `json:"resourceId,omitempty"`
+	Details    *string    `json:"details,omitempty"`
+	IPAddress  *string    `json:"ipAddress,omitempty"`
+	Timestamp  time.Time  `json:"timestamp"`
+}
+
+// GetAuditLogs returns recent audit log entries for a user.
+func (s *Service) GetAuditLogs(ctx context.Context, userID string, limit int) ([]*AuditEntry, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+
+	// Try audit_logs first (migration 3), fall back to audit_log (migration 1)
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, user_id, action, resource, resource_id,
+			details::text, ip_address, timestamp
+		FROM audit_logs
+		WHERE user_id = $1
+		ORDER BY timestamp DESC
+		LIMIT $2`, userID, limit)
+	if err != nil {
+		// Fall back to audit_log table
+		rows, err = s.db.Pool.Query(ctx, `
+			SELECT id, user_id, action, resource, resource_id,
+				details::text, ip_address, timestamp
+			FROM audit_log
+			WHERE user_id = $1
+			ORDER BY timestamp DESC
+			LIMIT $2`, userID, limit)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	var entries []*AuditEntry
+	for rows.Next() {
+		var e AuditEntry
+		if err := rows.Scan(&e.ID, &e.UserID, &e.Action, &e.Resource,
+			&e.ResourceID, &e.Details, &e.IPAddress, &e.Timestamp); err != nil {
+			continue
+		}
+		entries = append(entries, &e)
+	}
+	return entries, nil
+}
+
 func generateToken() (string, error) {
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {

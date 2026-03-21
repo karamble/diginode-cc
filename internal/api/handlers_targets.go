@@ -52,6 +52,27 @@ func (s *Server) handleUpdateTarget(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// handleClearTargets removes all targets from memory and the database.
+func (s *Server) handleClearTargets(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.Targets.ClearAll(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clear targets: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleResolveTarget marks a target as resolved/closed.
+func (s *Server) handleResolveTarget(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	if err := s.svc.Targets.Resolve(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to resolve target: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleDeleteTarget(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 

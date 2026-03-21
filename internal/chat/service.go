@@ -93,6 +93,12 @@ func (s *Service) GetMessages(limit int) ([]*Message, error) {
 	return messages, nil
 }
 
+// ClearAll deletes all chat messages from the database.
+func (s *Service) ClearAll(ctx context.Context) error {
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM chat_messages`)
+	return err
+}
+
 func (s *Service) persistMessage(msg *Message) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

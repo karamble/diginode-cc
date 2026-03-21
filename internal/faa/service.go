@@ -118,6 +118,24 @@ func (s *Service) ImportCSV(ctx context.Context, r io.Reader) (int, error) {
 	return count, nil
 }
 
+// Status represents the current state of the FAA registry.
+type Status struct {
+	TotalRecords int        `json:"totalRecords"`
+	LastImported *time.Time `json:"lastImported,omitempty"`
+}
+
+// GetStatus returns the FAA registry record count and last import time.
+func (s *Service) GetStatus(ctx context.Context) (*Status, error) {
+	var st Status
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT COUNT(*), MAX(imported_at)
+		FROM faa_registry`).Scan(&st.TotalRecords, &st.LastImported)
+	if err != nil {
+		return nil, err
+	}
+	return &st, nil
+}
+
 func getField(record []string, idx map[string]int, name string) string {
 	if i, ok := idx[name]; ok && i < len(record) {
 		return record[i]

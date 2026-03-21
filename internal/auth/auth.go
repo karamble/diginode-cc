@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -330,6 +332,120 @@ func (s *Service) ResetPassword(ctx context.Context, token, newPassword string) 
 
 	slog.Info("password reset completed", "userID", userID)
 	return nil
+}
+
+// ValidateTOTP checks a TOTP code without enabling 2FA (for verification-only flows).
+func (s *Service) ValidateTOTP(ctx context.Context, userID, code string) error {
+	var secret string
+	err := s.db.Pool.QueryRow(ctx, `SELECT totp_secret FROM users WHERE id = $1`, userID).Scan(&secret)
+	if err != nil {
+		return ErrUserNotFound
+	}
+
+	if !totp.Validate(code, secret) {
+		return ErrInvalidTOTP
+	}
+
+	return nil
+}
+
+// DisableTOTP disables 2FA for a user and clears the secret.
+func (s *Service) DisableTOTP(ctx context.Context, userID string) error {
+	_, err := s.db.Pool.Exec(ctx, `UPDATE users SET totp_enabled = false, totp_secret = NULL WHERE id = $1`, userID)
+	if err != nil {
+		return err
+	}
+	slog.Info("2FA disabled", "userID", userID)
+	return nil
+}
+
+// VerifyPassword checks a user's current password.
+func (s *Service) VerifyPassword(ctx context.Context, userID, password string) error {
+	var hash string
+	err := s.db.Pool.QueryRow(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&hash)
+	if err != nil {
+		return ErrUserNotFound
+	}
+	if err := bcrypt.CompareHashAndPassword([]byte(hash), []byte(password)); err != nil {
+		return ErrInvalidCredentials
+	}
+	return nil
+}
+
+// RegenerateRecoveryCodes generates new recovery codes for a user.
+func (s *Service) RegenerateRecoveryCodes(ctx context.Context, userID string) ([]string, error) {
+	// Verify user exists and has 2FA enabled
+	var totpEnabled bool
+	err := s.db.Pool.QueryRow(ctx, `SELECT totp_enabled FROM users WHERE id = $1`, userID).Scan(&totpEnabled)
+	if err != nil {
+		return nil, ErrUserNotFound
+	}
+	if !totpEnabled {
+		return nil, errors.New("2FA is not enabled")
+	}
+
+	codes := make([]string, 8)
+	for i := range codes {
+		b := make([]byte, 4)
+		if _, err := rand.Read(b); err != nil {
+			return nil, fmt.Errorf("failed to generate recovery code: %w", err)
+		}
+		codes[i] = hex.EncodeToString(b)
+	}
+
+	// Store hashed recovery codes
+	hashedCodes := make([]string, len(codes))
+	for i, code := range codes {
+		h, err := bcrypt.GenerateFromPassword([]byte(code), bcrypt.DefaultCost)
+		if err != nil {
+			return nil, err
+		}
+		hashedCodes[i] = string(h)
+	}
+
+	_, err = s.db.Pool.Exec(ctx,
+		`UPDATE users SET two_factor_recovery_codes = $1 WHERE id = $2`,
+		hashedCodes, userID)
+	if err != nil {
+		return nil, err
+	}
+
+	slog.Info("recovery codes regenerated", "userID", userID)
+	return codes, nil
+}
+
+// UnlockUser clears lockout state for a user (admin action).
+func (s *Service) UnlockUser(ctx context.Context, userID string) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE users SET locked_at = NULL, locked_until = NULL, failed_login_attempts = 0
+		WHERE id = $1`, userID)
+	return err
+}
+
+// GeneratePasswordResetToken creates a password reset token for a user (admin-initiated).
+func (s *Service) GeneratePasswordResetToken(ctx context.Context, userID string) (string, error) {
+	// Verify user exists
+	var email string
+	err := s.db.Pool.QueryRow(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email)
+	if err != nil {
+		return "", ErrUserNotFound
+	}
+
+	tokenBytes := make([]byte, 32)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return "", fmt.Errorf("failed to generate reset token: %w", err)
+	}
+	token := hex.EncodeToString(tokenBytes)
+	expiresAt := time.Now().Add(1 * time.Hour)
+
+	_, err = s.db.Pool.Exec(ctx, `
+		INSERT INTO password_resets (user_id, token, expires_at)
+		VALUES ($1, $2, $3)`, userID, token, expiresAt)
+	if err != nil {
+		return "", err
+	}
+
+	return token, nil
 }
 
 // HashPassword hashes a password with bcrypt.

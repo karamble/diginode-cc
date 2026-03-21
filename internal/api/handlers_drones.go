@@ -172,6 +172,15 @@ func (s *Server) handleUpdateDroneStatus(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// handleClearDrones removes all drones from memory and the database.
+func (s *Server) handleClearDrones(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.Drones.ClearAll(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clear drones: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 // handleDeleteDrone removes a drone from tracking.
 func (s *Server) handleDeleteDrone(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")

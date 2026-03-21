@@ -26,6 +26,19 @@ func (s *Server) handleGetChatMessages(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, messages)
 }
 
+// handleClearChatMessages deletes all chat messages from the DB and serial ring buffer.
+func (s *Server) handleClearChatMessages(w http.ResponseWriter, r *http.Request) {
+	if err := s.svc.Chat.ClearAll(r.Context()); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to clear chat messages: "+err.Error())
+		return
+	}
+
+	// Also clear the serial ring buffer
+	s.serialMgr.ClearTextMessages()
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleSendChatMessage(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Message string `json:"message"`
