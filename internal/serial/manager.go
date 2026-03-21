@@ -1,7 +1,11 @@
 package serial
 
 import (
+	"bufio"
+	"encoding/json"
+	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +37,8 @@ type Manager struct {
 	textMu       sync.RWMutex
 	deviceTime   time.Time
 	deviceTimeMu sync.RWMutex
+	protocol     string      // "binary" or "text" (default "text")
+	textParser   *TextParser // text-mode line parser
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -41,10 +47,26 @@ type PacketHandler func(packet *FromRadioPacket)
 // NewManager creates a new serial port manager.
 func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 	return &Manager{
-		cfg:    cfg,
-		hub:    hub,
-		stopCh: make(chan struct{}),
+		cfg:        cfg,
+		hub:        hub,
+		stopCh:     make(chan struct{}),
+		protocol:   "text", // Default to text mode (Heltec debug console)
+		textParser: NewTextParser(),
 	}
+}
+
+// SetProtocol switches the serial protocol mode ("binary" or "text").
+func (m *Manager) SetProtocol(proto string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.protocol = proto
+}
+
+// GetProtocol returns the current serial protocol mode.
+func (m *Manager) GetProtocol() string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.protocol
 }
 
 // RegisterHandler adds a packet handler callback.
@@ -152,17 +174,32 @@ func (m *Manager) connect() error {
 	m.connected = true
 	m.mu.Unlock()
 
-	slog.Info("serial port connected", "device", m.cfg.SerialDevice)
+	slog.Info("serial port connected", "device", m.cfg.SerialDevice, "protocol", m.protocol)
 
-	// Send initial config request to radio
-	if err := m.sendWantConfig(); err != nil {
-		slog.Warn("failed to send initial config request", "error", err)
+	// Only send binary config request in binary mode
+	if m.protocol == "binary" {
+		if err := m.sendWantConfig(); err != nil {
+			slog.Warn("failed to send initial config request", "error", err)
+		}
 	}
 
 	return nil
 }
 
 func (m *Manager) readLoop() {
+	m.mu.Lock()
+	proto := m.protocol
+	m.mu.Unlock()
+
+	if proto == "text" {
+		m.readLoopText()
+		return
+	}
+	m.readLoopBinary()
+}
+
+// readLoopBinary is the existing binary protobuf frame reader.
+func (m *Manager) readLoopBinary() {
 	buf := make([]byte, 4096)
 	decoder := NewFrameDecoder()
 
@@ -190,6 +227,95 @@ func (m *Manager) readLoop() {
 				continue
 			}
 			m.dispatchPacket(packet)
+		}
+	}
+}
+
+// readLoopText reads newline-delimited text from the Heltec debug console.
+func (m *Manager) readLoopText() {
+	reader := bufio.NewReader(m.port)
+	for {
+		select {
+		case <-m.stopCh:
+			return
+		default:
+		}
+
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			if err != io.EOF {
+				slog.Warn("serial read error", "error", err)
+			}
+			return
+		}
+
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		events := m.textParser.ParseLine(line)
+		for _, evt := range events {
+			m.dispatchTextEvent(evt)
+		}
+	}
+}
+
+// dispatchTextEvent converts a ParsedEvent into synthetic FromRadioPackets for
+// the existing handler pipeline, and stores text messages in the ring buffer.
+func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
+	m.mu.Lock()
+	handlers := make([]PacketHandler, len(m.handlers))
+	copy(handlers, m.handlers)
+	m.mu.Unlock()
+
+	// Store text messages in ring buffer
+	if evt.Kind == "text-message" {
+		text, _ := evt.Data["text"].(string)
+		m.AddTextMessage(evt.NodeID, text, "")
+	}
+
+	// Convert to synthetic FromRadioPacket for the existing dispatcher pipeline
+	switch evt.Kind {
+	case "text-message":
+		text, _ := evt.Data["text"].(string)
+		pkt := &FromRadioPacket{
+			Type: FromRadioMeshPacket,
+			MeshPacket: &MeshPacketData{
+				PortNum: PortNumTextMessage,
+				Payload: []byte(text),
+				From:    parseNodeNum(evt.NodeID),
+				To:      BroadcastAddr,
+			},
+		}
+		for _, h := range handlers {
+			h(pkt)
+		}
+
+	case "drone-telemetry":
+		jsonData, err := json.Marshal(evt.Data)
+		if err != nil {
+			slog.Warn("failed to marshal drone telemetry", "error", err)
+			return
+		}
+		pkt := &FromRadioPacket{
+			Type: FromRadioMeshPacket,
+			MeshPacket: &MeshPacketData{
+				PortNum: 160, // DETECTION_SENSOR_APP
+				Payload: jsonData,
+				From:    parseNodeNum(evt.NodeID),
+			},
+		}
+		for _, h := range handlers {
+			h(pkt)
+		}
+
+	default:
+		// Other event types (alert, node-telemetry, command-ack, target-detected, raw)
+		// are logged for debug; downstream consumers can be added later.
+		if evt.Kind != "raw" {
+			slog.Debug("text event", "kind", evt.Kind, "nodeId", evt.NodeID,
+				"category", evt.Category, "level", evt.Level)
 		}
 	}
 }
