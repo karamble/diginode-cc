@@ -30,16 +30,15 @@ func (s *Server) handleGetTextMessages(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleGetDeviceTime(w http.ResponseWriter, r *http.Request) {
 	deviceTime, hasTime := s.serialMgr.GetDeviceTime()
 	var ageSeconds float64
-	var deviceTimeStr *string
+	var deviceTimeUnix int64
 	if hasTime {
 		ageSeconds = time.Since(deviceTime).Seconds()
-		ts := deviceTime.Format(time.RFC3339)
-		deviceTimeStr = &ts
+		deviceTimeUnix = deviceTime.Unix()
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"hasTime":    hasTime,
-		"deviceTime": deviceTimeStr,
-		"ageSeconds": int(ageSeconds),
+		"deviceTime": deviceTimeUnix,
+		"ageSeconds": ageSeconds,
 	})
 }
 
@@ -150,9 +149,9 @@ func (s *Server) handleSendSerialTextAlert(w http.ResponseWriter, r *http.Reques
 
 func (s *Server) handleSendSerialPosition(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Latitude  float64 `json:"latitude"`
-		Longitude float64 `json:"longitude"`
-		Altitude  *int32  `json:"altitude,omitempty"`
+		Latitude  float64  `json:"latitude"`
+		Longitude float64  `json:"longitude"`
+		Altitude  *float64 `json:"altitude,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -163,7 +162,7 @@ func (s *Server) handleSendSerialPosition(w http.ResponseWriter, r *http.Request
 	lonI := int32(req.Longitude * 1e7)
 	alt := int32(0)
 	if req.Altitude != nil {
-		alt = *req.Altitude
+		alt = int32(*req.Altitude)
 	}
 
 	data := serial.BuildPosition(latI, lonI, alt)
@@ -178,7 +177,7 @@ func (s *Server) handleSendSerialPosition(w http.ResponseWriter, r *http.Request
 func (s *Server) handleSendSerialDeviceMetrics(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		BatteryLevel uint32   `json:"batteryLevel"`
-		Voltage      *float32 `json:"voltage,omitempty"`
+		Voltage      *float64 `json:"voltage,omitempty"`
 	}
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
@@ -187,7 +186,7 @@ func (s *Server) handleSendSerialDeviceMetrics(w http.ResponseWriter, r *http.Re
 
 	voltage := float32(0)
 	if req.Voltage != nil {
-		voltage = *req.Voltage
+		voltage = float32(*req.Voltage)
 	}
 
 	data := serial.BuildDeviceMetrics(req.BatteryLevel, voltage)
@@ -303,4 +302,24 @@ func (s *Server) handleSerialSimulate(w http.ResponseWriter, r *http.Request) {
 	s.serialMgr.SimulatePacket(&pkt)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "simulated"})
+}
+
+func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Enabled  bool   `json:"enabled"`
+		Mode     uint32 `json:"mode"`
+		FixedPin uint32 `json:"fixedPin"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	data := serial.BuildAdminBluetoothConfig(req.Enabled, req.Mode, req.FixedPin)
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent"})
 }

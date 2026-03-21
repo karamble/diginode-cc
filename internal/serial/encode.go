@@ -168,6 +168,31 @@ func BuildAdminDisplayConfig(screenOnSecs uint32) []byte {
 	return buildToRadio(mp)
 }
 
+// BuildAdminBluetoothConfig builds a ToRadio containing an admin command to set Bluetooth config.
+//   AdminMessage: field 3 = set_config (Config, length-delimited)
+//   Config: field 8 = bluetooth (BluetoothConfig, length-delimited)
+//   BluetoothConfig: field 1 = enabled (bool/varint), field 2 = mode (varint), field 3 = fixed_pin (varint)
+func BuildAdminBluetoothConfig(enabled bool, mode uint32, fixedPin uint32) []byte {
+	var btCfg []byte
+	enabledVal := uint64(0)
+	if enabled {
+		enabledVal = 1
+	}
+	btCfg = append(btCfg, encodeVarintField(1, enabledVal)...)
+	btCfg = append(btCfg, encodeVarintField(2, uint64(mode))...)
+	if fixedPin > 0 {
+		btCfg = append(btCfg, encodeVarintField(3, uint64(fixedPin))...)
+	}
+	// Config: field 8 = bluetooth
+	config := encodeLengthDelimited(8, btCfg)
+	// AdminMessage: field 3 = set_config
+	admin := encodeLengthDelimited(3, config)
+
+	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(BroadcastAddr, data)
+	return buildToRadio(mp)
+}
+
 // EncodeSFixed32Field is an exported wrapper for building protobuf sfixed32 fields.
 func EncodeSFixed32Field(fieldNum uint64, val int32) []byte {
 	return encodeSFixed32Field(fieldNum, val)
