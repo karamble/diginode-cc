@@ -111,6 +111,14 @@ func buildToRadio(meshPacket []byte) []byte {
 	return encodeLengthDelimited(1, meshPacket)
 }
 
+// BuildHeartbeat builds a ToRadio heartbeat to keep the serial API connection alive.
+//   ToRadio: field 7 = heartbeat (Heartbeat, length-delimited)
+//   Heartbeat: empty message (no required fields)
+func BuildHeartbeat() []byte {
+	// Heartbeat is an empty sub-message — just the length-delimited wrapper
+	return encodeLengthDelimited(7, nil)
+}
+
 // --- Public packet builders ---
 // Each returns a complete ToRadio protobuf (NOT framed — caller must use EncodeFrame).
 
