@@ -1,0 +1,10 @@
+export default function InventoryPage() {
+  return (
+    <div className="p-6">
+      <h2 className="text-lg font-semibold text-dark-100 mb-4">Inventory</h2>
+      <div className="bg-dark-900 rounded-lg border border-dark-700 p-6">
+        <p className="text-dark-400">Inventory management coming soon</p>
+      </div>
+    </div>
+  )
+}

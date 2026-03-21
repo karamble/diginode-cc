@@ -1,0 +1,19 @@
+# Binary
+diginode-cc
+
+# Frontend build output
+web/dist/
+web/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment
+.env
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,45 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: diginode
+      POSTGRES_PASSWORD: diginode
+      POSTGRES_DB: diginode
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U diginode"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  diginode-cc:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://diginode:diginode@postgres:5432/diginode?sslmode=disable
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      LISTEN_ADDR: ":3000"
+      SERIAL_DEVICE: ${SERIAL_DEVICE:-}
+      SERIAL_BAUD: ${SERIAL_BAUD:-115200}
+      MQTT_ENABLED: ${MQTT_ENABLED:-false}
+      ADSB_ENABLED: ${ADSB_ENABLED:-false}
+      ACARS_ENABLED: ${ACARS_ENABLED:-false}
+      TAK_ENABLED: ${TAK_ENABLED:-false}
+    ports:
+      - "3000:3000"
+    devices:
+      - "${SERIAL_DEVICE:-/dev/null}:${SERIAL_DEVICE:-/dev/null}"
+    group_add:
+      - dialout
+
+volumes:
+  pgdata:
