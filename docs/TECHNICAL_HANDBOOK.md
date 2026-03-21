@@ -1,0 +1,673 @@
+# DigiNode CC -- Technical Handbook
+
+## 1. Overview
+
+DigiNode CC (Command Center) is a standalone Go backend that replaces AntiHunter CC PRO (NestJS). It manages Meshtastic mesh network devices, drone detection, WiFi surveillance, geofencing, and multi-site operations. A single binary serves the REST API, WebSocket events, and embedded React frontend.
+
+**Key metrics:**
+
+| | DigiNode CC | CC PRO |
+|--|-------------|--------|
+| Language | Go 1.23 | TypeScript (NestJS) |
+| LOC | ~12,000 | ~29,000 |
+| Docker containers | 2 (Go + PostgreSQL) | 4 (Node + Nginx + PostgreSQL + Prisma) |
+| Build time (ARM64) | ~30s | ~6min |
+| API routes | 165+ | 130+ |
+| Database | PostgreSQL 16 (pgx) | PostgreSQL 16 (Prisma) |
+
+---
+
+## 2. Architecture
+
+```
+                    +------------------+
+                    |  React Frontend  |
+                    |  (web/dist)      |
+                    +--------+---------+
+                             |
+                    +--------+---------+
+                    |   Chi HTTP Router |
+                    |   165+ REST routes|
+                    |   /ws WebSocket   |
+                    +--------+---------+
+                             |
+              +--------------+--------------+
+              |              |              |
+     +--------+--+   +------+------+  +----+------+
+     |  Auth/JWT  |   | Domain Svcs |  | WebSocket |
+     |  Middleware |   | (20 pkgs)   |  |   Hub     |
+     +------------+   +------+------+  +-----------+
+                             |
+              +--------------+--------------+
+              |              |              |
+     +--------+--+   +------+------+  +----+--------+
+     | PostgreSQL |   | Meshtastic  |  | External    |
+     |  (pgx)     |   | Dispatcher  |  | Integrations|
+     +------------+   +------+------+  +-------------+
+                             |              |
+                      +------+------+  ADS-B, MQTT,
+                      | Serial Port |  ACARS, TAK
+                      | (Heltec V3) |
+                      +-------------+
+```
+
+### Data Flow
+
+```
+Heltec Radio
+    |
+    v
+Serial Port (/dev/ttyUSB0)
+    |
+    v
+Frame Decoder (0x94 0xC3 + length + protobuf)
+    |
+    v
+FromRadio Protobuf Decoder
+    |
+    v
+Meshtastic Dispatcher (port-based routing + dedup)
+    |
+    +---> NodeHandler    --> nodes/service.go    --> DB + WS broadcast
+    +---> DroneHandler   --> drones/service.go   --> DB + WS + inventory + FAA
+    +---> ChatHandler    --> chat/service.go      --> DB + WS + ring buffer
+    +---> AlertCallback  --> alerts/evaluator.go  --> rule matching + trigger
+    +---> WebhookCallback --> webhooks/service.go --> HTTP dispatch
+    +---> DeviceTime     --> serial/manager.go    --> time tracking
+```
+
+---
+
+## 3. Project Structure
+
+```
+diginode-cc/
++-- cmd/diginode-cc/
+|   +-- main.go              # Entry point, service wiring, startup
+|   +-- version.go           # Build version variable
++-- internal/
+|   +-- api/                 # HTTP handlers (24 files)
+|   |   +-- server.go        # Router setup, Services struct, middleware
+|   |   +-- handlers_*.go    # One file per domain (auth, drones, nodes, ...)
+|   +-- auth/                # JWT authentication + 2FA
+|   +-- audit/               # Audit logging service
+|   +-- alerts/              # Alert rules + evaluation engine
+|   +-- alarms/              # Audio/visual alarm config
+|   +-- adsb/                # ADS-B aircraft feed polling
+|   +-- acars/               # ACARS UDP listener
+|   +-- chat/                # Mesh text message handling
+|   +-- commands/            # Command queue + ACK tracking
+|   +-- config/              # Env config + runtime AppConfig
+|   +-- database/            # PostgreSQL pool + embedded migrations
+|   |   +-- migrations/      # 7 SQL migration files
+|   +-- drones/              # Drone detection + tracking
+|   +-- exports/             # CSV/JSON data export
+|   +-- faa/                 # FAA aircraft registry
+|   +-- firewall/            # IP/CIDR blocking middleware
+|   +-- geofences/           # Polygon geofence engine
+|   +-- inventory/           # WiFi device inventory
+|   +-- mail/                # SMTP email delivery
+|   +-- meshtastic/          # Packet dispatcher + port numbers
+|   +-- mqtt/                # MQTT broker federation
+|   +-- nodes/               # Mesh node tracking
+|   +-- permissions/         # Feature-level RBAC
+|   +-- serial/              # Meshtastic serial framing + encoding
+|   +-- sites/               # Multi-site management
+|   +-- tak/                 # TAK/ATAK COT protocol
+|   +-- targets/             # Target tracking + triangulation
+|   +-- updates/             # Self-update (git-based)
+|   +-- users/               # User CRUD + invitations
+|   +-- webhooks/            # HTTP callback dispatch + HMAC
+|   +-- ws/                  # WebSocket hub + client
++-- web/                     # React frontend (Vite + Tailwind)
++-- docker/
+|   +-- Dockerfile           # Multi-stage build (Go + Node + Alpine)
++-- docker-compose.yml       # PostgreSQL + DigiNode CC
++-- Makefile                 # Build targets
++-- docs/                    # Documentation
+```
+
+---
+
+## 4. Startup Sequence
+
+`main.go` executes in this order:
+
+1. **Logger** -- structured logging via `slog`
+2. **Config** -- `config.Load()` reads environment variables
+3. **Database** -- PostgreSQL connection pool via `pgx`
+4. **Migrations** -- `db.Migrate()` runs embedded SQL files (000001-000007)
+5. **WebSocket Hub** -- `ws.NewHub()` + goroutine
+6. **Serial Manager** -- `serial.NewManager(cfg, hub)`
+7. **Domain Services** -- 20 services instantiated:
+   - auth, users, sites, nodes, drones, chat, commands, alerts, geofences, targets, inventory, webhooks, alarms, firewall, faa, exports, permissions, audit, mail, appConfig
+8. **Dispatcher Wiring** -- Meshtastic dispatcher connected to:
+   - `nodesSvc` (NodeHandler)
+   - `dronesSvc` (DroneHandler)
+   - `chatSvc` (ChatHandler)
+   - Alert evaluation callback
+   - Webhook dispatch callback
+   - Device time callback
+9. **Service Callbacks** -- Cross-service wiring:
+   - `dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)`
+   - `dronesSvc.SetInventoryCallback(inventorySvc.Track)`
+   - `dronesSvc.SetFAALookup(...)` (FAA registry enrichment)
+   - `chatSvc.SetBufferCallback(serialMgr.AddTextMessage)`
+10. **Startup Data** -- Load from DB: alerts, geofences, webhooks, alarms, firewall, appConfig defaults
+11. **Optional Services** -- ADS-B poller, MQTT connection (if enabled)
+12. **HTTP Server** -- Chi router with all 165+ routes
+13. **Daily Pruning** -- Background goroutine: positions (30d), detections (30d), commands (180d)
+14. **Signal Handler** -- Graceful shutdown on SIGTERM/SIGINT
+
+---
+
+## 5. Meshtastic Serial Protocol
+
+### Frame Format
+
+```
+[0x94] [0xC3] [MSB_LEN] [LSB_LEN] [PROTOBUF_PAYLOAD...]
+```
+
+- Start bytes: `0x94 0xC3`
+- Length: Big-endian 16-bit (max 512 bytes)
+- Payload: Meshtastic protobuf (FromRadio or ToRadio)
+
+### FromRadio Decoding
+
+Manual protobuf decoder (no generated code). Field numbers:
+
+| Field | Type | Content |
+|-------|------|---------|
+| 2 | sub-message | MyInfo (node number, max channels) |
+| 3 | sub-message | NodeInfoLite (num, user, position, metrics) |
+| 4 | sub-message | Config |
+| 7 | varint | ConfigComplete |
+| 8 | varint | Rebooted |
+| 11 | sub-message | MeshPacket (from, to, channel, decoded data) |
+| 12 | sub-message | Channel |
+| 13 | sub-message | DeviceMetadata (firmware, bluetooth, wifi) |
+
+### MeshPacket Port Numbers
+
+| Port | Name | Handler |
+|------|------|---------|
+| 1 | TEXT_MESSAGE_APP | ChatHandler |
+| 3 | POSITION_APP | NodeHandler.HandlePosition |
+| 6 | ADMIN_APP | Admin commands (config, shutdown) |
+| 67 | TELEMETRY_APP | NodeHandler.HandleTelemetry + HandleEnvironment |
+| 10 | DETECTION_SENSOR_APP | DroneHandler |
+
+### ToRadio Encoding
+
+Builder functions in `serial/encode.go`:
+
+```go
+BuildTextMessage(to uint32, text string) []byte
+BuildPosition(latI, lonI int32, altitude int32) []byte
+BuildDeviceMetrics(batteryLevel uint32, voltage float32) []byte
+BuildAdminShutdown(seconds uint32) []byte
+BuildAdminDisplayConfig(screenOnSecs uint32) []byte
+BuildAdminBluetoothConfig(enabled bool, mode, fixedPin uint32) []byte
+```
+
+Each builds a complete ToRadio protobuf (caller wraps with `EncodeFrame`).
+
+### Message Deduplication
+
+The dispatcher filters mesh rebroadcasts:
+- Hash key: `from << 32 | packetID`
+- Window: 15 seconds
+- Max entries: 512 (auto-pruned)
+
+### Serial Reconnect
+
+Exponential backoff with jitter:
+- Base delay: 500ms
+- Max delay: 15s
+- Scale factor: 1.5x per attempt
+- Jitter: +/-20%
+- Resets to base on successful connection
+
+---
+
+## 6. Domain Services
+
+### 6.1 Drones
+
+**Detection lifecycle:**
+1. Meshtastic detection sensor packet arrives
+2. `HandleDroneDetection(from, payload)` parses JSON payload
+3. `HandleDetection(detection)` creates/updates in-memory drone
+4. `nodeLookup` resolves detecting node's ID and site
+5. FAA enrichment (async, if serial number present)
+6. Persistence debouncing (200ms batch writes)
+7. Detection history append (immediate)
+8. WebSocket broadcast `drone.telemetry`
+9. Inventory tracking callback
+10. Alert evaluation + webhook dispatch
+
+**Status enum:** UNKNOWN, FRIENDLY, NEUTRAL, HOSTILE
+
+**API response** uses CC PRO field names: `droneId`, `lat`, `lon`, `operatorLat`, `operatorLon`, `faa`, `ts`, `nodeId`, `siteId`, `siteName`, `siteColor`, `siteCountry`, `siteCity`
+
+### 6.2 Nodes
+
+**Event handlers:**
+- `HandleNodeInfo` -- mesh node metadata (name, hardware, role, firmware)
+- `HandleTelemetry` -- device metrics (battery, voltage, channel utilization)
+- `HandlePosition` -- GPS coordinates + device time sync
+- `HandleEnvironment` -- temperature (C+F conversion), humidity, pressure
+
+**API response** uses CC PRO field names: `id` (hex node ID), `name` (longName), `lat`, `lon`, `ts`, `lastSeen`, `temperatureC`, `temperatureF`, `temperatureUpdatedAt`
+
+### 6.3 Alert Rules Engine
+
+**Condition matching:**
+- `macAddresses` -- exact MAC match
+- `ouiPrefixes` -- OUI prefix match (first 3 bytes)
+- `ssids` -- SSID string match
+- `channels` -- channel number match
+- `minRssi` / `maxRssi` -- RSSI range
+- `matchMode` -- "ANY" (default, OR) or "ALL" (AND)
+
+**Template rendering** with placeholders: `{mac}`, `{oui}`, `{ssid}`, `{channel}`, `{rssi}`, `{nodeId}`, `{nodeName}`, `{rule}`, `{severity}`
+
+**Severity levels:** INFO, NOTICE, ALERT, CRITICAL
+
+### 6.4 Geofences
+
+- Polygon storage as JSON array of `{lat, lng}` points
+- Ray casting point-in-polygon algorithm
+- Entity filtering: ADSB, drones, targets, devices
+- Alarm config: level, message template, trigger on entry/exit
+- WebSocket notification with `geofence.event`
+
+### 6.5 Commands
+
+**Lifecycle:** PENDING -> SENT -> OK / ERROR / TIMEOUT
+
+- Rate limiting: 1 command per node per 2 seconds
+- Retry: configurable max retries (default 3)
+- ACK handling via `HandleACK(cmdID, result)`
+- Persistence: immediate on state change
+
+### 6.6 Webhooks
+
+- HMAC-SHA256 signing (`X-Signature-256` header)
+- Event matching with wildcard (`*`) support
+- Dispatch from Meshtastic events: `mesh.text_message`, `mesh.position`, `mesh.drone_detection`
+- Delivery tracking in `webhook_deliveries` table
+- Custom headers and HTTP method selection (POST/PUT/PATCH)
+
+---
+
+## 7. Authentication & Authorization
+
+### JWT Authentication
+
+- Algorithm: HMAC-SHA256
+- Expiry: 24 hours
+- Claims: `uid` (user ID), `email`, `role`
+- Middleware extracts from `Authorization: Bearer <token>` header
+
+### Role Hierarchy
+
+```
+ADMIN (3) > OPERATOR (2) > ANALYST (1) > VIEWER (0)
+```
+
+### Feature-Level RBAC
+
+12 granular permissions with role defaults:
+
+| Feature | ADMIN | OPERATOR | ANALYST | VIEWER |
+|---------|:-----:|:--------:|:-------:|:------:|
+| map.view | X | X | X | X |
+| inventory.view | X | X | X | X |
+| inventory.manage | X | X | | |
+| targets.view | X | X | X | X |
+| targets.manage | X | X | | |
+| commands.send | X | X | | |
+| commands.audit | X | X | X | |
+| config.manage | X | | | |
+| alarms.manage | X | X | | |
+| exports.generate | X | X | X | |
+| users.manage | X | | | |
+| scheduler.manage | X | | | |
+
+### Account Security
+
+- **Password hashing:** bcrypt (DefaultCost)
+- **Account lockout:** 5 failed attempts -> 15 minute lock
+- **2FA:** TOTP with recovery codes
+- **Password reset:** Token-based (4h expiry), email delivery
+
+---
+
+## 8. Database Schema
+
+7 migrations (`internal/database/migrations/`), 33 tables:
+
+### Core Tables
+
+| Table | Purpose | Key Columns |
+|-------|---------|-------------|
+| `users` | User accounts | email, password_hash, role, totp, lockout fields |
+| `sites` | Deployment locations | name, color, region, country, city, lat/lon/radius |
+| `nodes` | Mesh node state | node_num, node_id, telemetry (battery, voltage, temp, SNR) |
+| `drones` | Detected drones | MAC, serial, lat/lon, pilot lat/lon, status, FAA data |
+| `targets` | Tracked entities | name, MAC, lat/lon, status, tracking confidence |
+| `inventory_devices` | WiFi devices | MAC, manufacturer, RSSI stats (min/max/avg/hits) |
+| `geofences` | Polygon boundaries | polygon (JSONB), alarm config, entity filtering |
+| `alert_rules` | Alert conditions | condition (JSONB), severity, cooldown, match mode |
+| `commands` | Command queue | target_node, status lifecycle, retry tracking |
+
+### History & Audit
+
+| Table | Purpose | Retention |
+|-------|---------|-----------|
+| `node_positions` | GPS history | 30 days |
+| `drone_detections` | Detection log | 30 days |
+| `alert_events` | Triggered alerts | -- |
+| `chat_messages` | Mesh text messages | -- |
+| `webhook_deliveries` | Delivery tracking | -- |
+| `audit_logs` | User action audit | 365 days |
+| `commands` | Command history | 180 days |
+
+### Configuration
+
+| Table | Purpose |
+|-------|---------|
+| `app_config` | Runtime key-value config (33 defaults) |
+| `serial_config` | Serial port settings (singleton) |
+| `mqtt_config` | MQTT per-site config |
+| `tak_config` | TAK/ATAK integration |
+| `alarm_configs` | Alarm profiles |
+| `alarm_sounds` | Sound files per severity |
+| `visual_config` | Pulse/blink/stroke settings |
+| `coverage_config` | Default radio coverage radius |
+| `firewall_rules` | IP/CIDR blocks + jailed IPs |
+
+### Enums
+
+```sql
+user_role:      ADMIN, OPERATOR, ANALYST, VIEWER
+drone_status:   UNKNOWN, FRIENDLY, NEUTRAL, HOSTILE
+alert_severity: INFO, NOTICE, ALERT, CRITICAL
+command_status: PENDING, SENT, ACKED, OK, FAILED, ERROR, TIMEOUT
+geofence_action: ALERT, LOG, ALARM
+webhook_method: POST, PUT, PATCH
+node_role:      CLIENT, ROUTER, REPEATER, TRACKER, SENSOR, TAK, ...
+```
+
+---
+
+## 9. WebSocket Events
+
+Connection: `GET /ws` (supports `?token=` query param or `Authorization` header)
+
+### Init Event
+
+Sent per-client on connect:
+```json
+{
+  "type": "init",
+  "payload": {
+    "nodes": [...],
+    "drones": [...],
+    "geofences": [...]
+  }
+}
+```
+
+### Event Types
+
+| Type | Trigger | Payload |
+|------|---------|---------|
+| `drone.telemetry` | New detection / position update | Full drone object |
+| `drone.status` | Status change (UNKNOWN->HOSTILE) | Drone with new status |
+| `drone.remove` | Drone deleted | {droneId, id, mac} |
+| `node.update` | Node info/telemetry/environment | Full node object |
+| `node.position` | GPS position update | {nodeNum, lat, lon, alt} |
+| `node.remove` | Node deleted | {nodeNum, nodeId} |
+| `chat.message` | Mesh text message | {fromNode, toNode, channel, text} |
+| `alert` | Alert rule triggered | Alert event object |
+| `command.update` | Command status change | Command object |
+| `geofence.event` | Geofence violation | {geofence, entityType, lat, lng} |
+| `inventory.update` | Device tracked | Device object |
+| `target.update` | Target position update | Target object |
+| `adsb.update` | ADS-B aircraft | Aircraft object |
+| `acars.message` | ACARS message | Message object |
+| `health` | System health | Health status |
+| `config.update` | Config changed | Config diff |
+
+---
+
+## 10. API Reference
+
+### Authentication
+
+| Method | Path | Auth | Description |
+|--------|------|:----:|-------------|
+| POST | `/api/auth/login` | No | Login, returns JWT |
+| POST | `/api/auth/register` | No | Create first user (ADMIN) |
+| POST | `/api/auth/forgot-password` | No | Request password reset email |
+| POST | `/api/auth/reset-password` | No | Reset password with token |
+| POST | `/api/auth/logout` | Yes | Logout (stateless) |
+| GET | `/api/auth/me` | Yes | Current user info |
+| POST | `/api/auth/legal-ack` | Yes | Accept terms of service |
+| POST | `/api/auth/2fa/setup` | Yes | Generate TOTP secret |
+| POST | `/api/auth/2fa/verify` | Yes | Verify TOTP code |
+| POST | `/api/auth/2fa/confirm` | Yes | Confirm 2FA setup |
+| POST | `/api/auth/2fa/disable` | Yes | Disable 2FA |
+| POST | `/api/auth/2fa/recovery/regenerate` | Yes | New recovery codes |
+
+### Users
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/users` | List all users |
+| POST | `/api/users` | Create user |
+| GET | `/api/users/me` | Current user (alias) |
+| GET | `/api/users/features` | List feature permissions |
+| POST | `/api/users/invite` | Send invitation |
+| GET | `/api/users/{id}` | Get user by ID |
+| PUT | `/api/users/{id}` | Update user |
+| DELETE | `/api/users/{id}` | Delete user |
+| POST | `/api/users/{id}/unlock` | Unlock locked account |
+| PATCH | `/api/users/{id}/permissions` | Set feature permissions |
+| PATCH | `/api/users/{id}/sites` | Set site access |
+| POST | `/api/users/{id}/password-reset` | Admin password reset |
+| GET | `/api/users/{id}/audit` | User audit log |
+
+### Serial / Meshtastic
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/serial/ports` | List available serial ports |
+| GET | `/api/serial/protocols` | List supported protocols |
+| GET | `/api/serial/status` | Connection status |
+| GET | `/api/serial/config` | Serial configuration |
+| PUT | `/api/serial/config` | Update serial config |
+| POST | `/api/serial/config/reset` | Reset to defaults |
+| POST | `/api/serial/connect` | Open serial connection |
+| POST | `/api/serial/disconnect` | Close serial connection |
+| GET | `/api/serial/text-messages` | Poll ring buffer (?sinceSeq=N) |
+| GET | `/api/serial/device-time` | Meshtastic device clock |
+| POST | `/api/serial/text-message` | Send text to mesh |
+| POST | `/api/serial/text-alert` | Broadcast alert |
+| POST | `/api/serial/position` | Send GPS position |
+| POST | `/api/serial/device-metrics` | Send battery/voltage |
+| POST | `/api/serial/display-config` | Set screen-on duration |
+| POST | `/api/serial/bluetooth-config` | Set Bluetooth mode |
+| POST | `/api/serial/shutdown` | Shutdown Heltec device |
+| POST | `/api/serial/simulate` | Inject test packet |
+
+### Resources (CRUD pattern)
+
+Each resource follows: `GET /`, `POST /`, `GET /{id}`, `PUT /{id}`, `DELETE /{id}`
+
+- `/api/sites` -- Deployment locations
+- `/api/nodes` -- Mesh nodes (+ `POST /clear`, `GET /{id}/positions`)
+- `/api/drones` -- Detected drones (+ `POST /clear`, `PUT /{id}/status`, `GET /{id}/detections`)
+- `/api/targets` -- Tracked entities (+ `POST /clear`, `POST /{id}/resolve`, `GET /{id}/positions`)
+- `/api/geofences` -- Polygon geofences
+- `/api/alerts/rules` -- Alert rule definitions
+- `/api/alerts/events` -- Triggered alert log (+ `POST /{id}/acknowledge`)
+- `/api/webhooks` -- HTTP callbacks (+ `POST /{id}/test`)
+- `/api/commands` -- Mesh command queue
+- `/api/inventory` -- WiFi devices (+ `POST /clear`, `POST /{mac}/promote`)
+- `/api/alarms` -- Alarm configs (+ `POST /sounds/{level}`, `DELETE /sounds/{level}`)
+- `/api/firewall/rules` -- IP blocking rules
+
+### Integrations
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/adsb/status` | ADS-B feed status |
+| GET | `/api/adsb/tracks` | Current aircraft |
+| GET/PUT | `/api/adsb/config` | ADS-B configuration |
+| GET | `/api/mqtt/sites` | MQTT site configs |
+| GET | `/api/mqtt/sites-status` | Connection status |
+| GET/PUT | `/api/tak/config` | TAK configuration |
+| GET | `/api/acars/status` | ACARS listener status |
+| GET | `/api/updates/check` | Check for updates |
+| POST | `/api/updates/trigger` | Apply update |
+| GET | `/api/oui/resolve/{mac}` | MAC vendor lookup |
+| GET | `/api/faa/lookup/{serial}` | FAA registry lookup |
+| GET | `/api/audit` | System audit log |
+
+---
+
+## 11. Configuration
+
+### Environment Variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_SECRET` | (required) | JWT signing secret |
+| `DATABASE_URL` | `postgres://diginode:diginode@localhost:5432/diginode?sslmode=disable` | PostgreSQL connection |
+| `LISTEN_ADDR` | `:3000` | HTTP listen address |
+| `SERIAL_DEVICE` | (empty) | Meshtastic serial port |
+| `SERIAL_BAUD` | `115200` | Serial baud rate |
+| `MQTT_ENABLED` | `false` | Enable MQTT federation |
+| `MQTT_BROKER_URL` | `tcp://localhost:1883` | MQTT broker URL |
+| `ADSB_ENABLED` | `false` | Enable ADS-B polling |
+| `ADSB_URL` | `http://localhost:8080/data/aircraft.json` | dump1090 JSON URL |
+| `ACARS_ENABLED` | `false` | Enable ACARS listener |
+| `ACARS_PORT` | `5555` | ACARS UDP port |
+| `TAK_ENABLED` | `false` | Enable TAK/ATAK |
+| `TAK_ADDR` | (empty) | TAK server address |
+| `SMTP_HOST` | (empty) | SMTP server |
+| `SMTP_PORT` | `587` | SMTP port |
+| `SMTP_USER` | (empty) | SMTP username |
+| `SMTP_PASSWORD` | (empty) | SMTP password |
+| `SMTP_FROM` | (empty) | Sender email |
+| `GEOIP_DB_PATH` | (empty) | GeoIP database path |
+
+### Runtime AppConfig (33 keys)
+
+Stored in `app_config` table, seeded on first startup:
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `appName` | "DigiNode CC" | Application name |
+| `protocol` | "meshtastic-binary" | Serial protocol |
+| `ackTimeoutMs` | 3000 | Command ACK timeout |
+| `resultTimeoutMs` | 10000 | Command result timeout |
+| `maxRetries` | 2 | Command max retries |
+| `perNodeCmdRate` | 8 | Commands/min per node |
+| `globalCmdRate` | 30 | Commands/min global |
+| `defaultRadiusM` | 50 | Default coverage radius |
+| `nodePosRetentionDays` | 30 | Position history retention |
+| `commandRetentionDays` | 180 | Command history retention |
+| `auditRetentionDays` | 365 | Audit log retention |
+| `mapTileUrl` | OSM tile URL | Map tile server |
+| `invitationExpiryHours` | 48 | Invitation token expiry |
+| `passwordResetExpiryHours` | 4 | Reset token expiry |
+
+---
+
+## 12. Deployment
+
+### Docker Compose
+
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: diginode
+      POSTGRES_PASSWORD: diginode
+      POSTGRES_DB: diginode
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  diginode-cc:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      DATABASE_URL: postgres://diginode:diginode@postgres:5432/diginode?sslmode=disable
+      JWT_SECRET: your-secret-here
+      SERIAL_DEVICE: /dev/ttyUSB0
+    devices:
+      - /dev/ttyUSB0:/dev/ttyUSB0
+    depends_on:
+      - postgres
+```
+
+### Makefile Targets
+
+| Target | Description |
+|--------|-------------|
+| `make build` | Build Go binary |
+| `make build-frontend` | Build React frontend |
+| `make all` | Build both |
+| `make run` | Build + run locally |
+| `make docker-prod-push` | Build ARM64 image + push to Docker Hub |
+| `make docker-prod-build` | Build ARM64 image locally |
+| `make docker-up` | Start containers |
+| `make docker-down` | Stop containers |
+| `make docker-logs` | View container logs |
+
+### Production (Raspberry Pi)
+
+1. Push image: `make docker-prod-push`
+2. Watchtower auto-updates hourly, or force: `curl -H 'Authorization: Bearer gotailme-update-token' localhost:8081/v1/update`
+
+---
+
+## 13. Dependencies
+
+```
+github.com/go-chi/chi/v5          # HTTP router
+github.com/gorilla/websocket      # WebSocket
+github.com/golang-jwt/jwt/v5      # JWT authentication
+github.com/jackc/pgx/v5           # PostgreSQL driver
+github.com/golang-migrate/migrate/v4  # Database migrations
+github.com/pquerna/otp            # TOTP 2FA
+go.bug.st/serial                  # Serial port I/O
+golang.org/x/crypto               # bcrypt
+github.com/eclipse/paho.mqtt.golang  # MQTT client
+```
+
+---
+
+## 14. gotailme Integration
+
+gotailme connects to DigiNode CC via REST polling (not WebSocket):
+
+| Operation | Endpoint | Interval |
+|-----------|----------|----------|
+| Login | `POST /api/auth/login` | Once |
+| Drone sync | `GET /api/drones` | 30s |
+| Text messages | `GET /api/serial/text-messages?sinceSeq=N` | 10s |
+| Device time | `GET /api/serial/device-time` | 5min |
+| Send alert | `POST /api/serial/text-alert` | On demand |
+| Send position | `POST /api/serial/position` | 30s |
+| Send battery | `POST /api/serial/device-metrics` | 30s |
+| Health check | `GET /healthz` | On connect |
+
+All responses use CC PRO-compatible field names and types for seamless backend replacement.
