@@ -306,6 +306,20 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // WebSocket upgrade handler — sends init event with current state.
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// Validate JWT before upgrading — check query param "token" or Authorization header
+	tokenStr := r.URL.Query().Get("token")
+	if tokenStr == "" {
+		if auth := r.Header.Get("Authorization"); len(auth) > 7 && auth[:7] == "Bearer " {
+			tokenStr = auth[7:]
+		}
+	}
+	if tokenStr != "" {
+		if _, err := s.svc.Auth.ValidateToken(tokenStr); err != nil {
+			http.Error(w, `{"error":"invalid token"}`, http.StatusUnauthorized)
+			return
+		}
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Error("WebSocket upgrade failed", "error", err)

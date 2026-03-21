@@ -2,7 +2,9 @@ package drones
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -10,6 +12,12 @@ import (
 	"github.com/karamble/diginode-cc/internal/database"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
+
+func generateUUID() string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // Status represents a drone's operational status.
 type Status string
@@ -135,6 +143,7 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 
 	if !exists {
 		drone = &Drone{
+			ID:           generateUUID(),
 			MAC:          detection.MAC,
 			SerialNumber: detection.SerialNumber,
 			UASID:        detection.UASID,
