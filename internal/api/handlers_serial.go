@@ -123,6 +123,10 @@ func (s *Server) handleSendSerialTextMessage(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
+	// Persist to chat DB, broadcast via WebSocket, and store in ring buffer
+	s.serialMgr.AddTextMessage("local", req.Message, "")
+	s.svc.Chat.PersistAndBroadcast(0, to, 0, req.Message)
+
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
 
@@ -144,6 +148,10 @@ func (s *Server) handleSendSerialTextAlert(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
 	}
+
+	// Persist to chat DB, broadcast via WebSocket, and store in ring buffer
+	s.serialMgr.AddTextMessage("local", req.Message, "")
+	s.svc.Chat.PersistAndBroadcast(0, serial.BroadcastAddr, 0, req.Message)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "sent"})
 }
