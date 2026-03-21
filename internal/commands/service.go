@@ -236,6 +236,20 @@ func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
 	return cmds, nil
 }
 
+// PruneOldCommands removes commands older than the retention period.
+func (s *Service) PruneOldCommands(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		retentionDays = 180
+	}
+	result, err := s.db.Pool.Exec(ctx, `
+		DELETE FROM commands WHERE created_at < NOW() - $1 * INTERVAL '1 day'`,
+		retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 func (s *Service) persistCommand(cmd *Command) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

@@ -100,6 +100,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	token, user, err := s.svc.Auth.Login(r.Context(), req.Email, req.Password, clientIP)
 	if err != nil {
+		if s.svc.Audit != nil {
+			s.svc.Audit.Log(r.Context(), "", "AUTH_LOGIN_FAILED", "user", "", clientIP,
+				map[string]interface{}{"email": req.Email})
+		}
 		if errors.Is(err, auth.ErrAccountLocked) {
 			writeError(w, http.StatusTooManyRequests, "account is temporarily locked due to too many failed login attempts")
 			return
@@ -110,6 +114,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "login failed")
 		return
+	}
+
+	if s.svc.Audit != nil {
+		s.svc.Audit.Log(r.Context(), user.ID, "AUTH_LOGIN", "user", user.ID, clientIP, nil)
 	}
 
 	// CC PRO compatible response format
@@ -444,6 +452,10 @@ func (s *Server) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.Auth.UnlockUser(r.Context(), id); err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to unlock user")
 		return
+	}
+
+	if s.svc.Audit != nil {
+		s.svc.Audit.Log(r.Context(), claims.UserID, "USER_UNLOCK", "user", id, "", nil)
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "user unlocked"})

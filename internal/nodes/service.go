@@ -277,6 +277,20 @@ func (s *Service) Remove(nodeNum uint32) {
 	})
 }
 
+// PrunePositions removes node positions older than the retention period.
+func (s *Service) PrunePositions(ctx context.Context, retentionDays int) (int64, error) {
+	if retentionDays <= 0 {
+		retentionDays = 30
+	}
+	result, err := s.db.Pool.Exec(ctx, `
+		DELETE FROM node_positions WHERE timestamp < NOW() - $1 * INTERVAL '1 day'`,
+		retentionDays)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 func (s *Service) persistNode(node *Node) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

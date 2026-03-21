@@ -12,6 +12,7 @@ import (
 
 	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/alarms"
+	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/api"
 	"github.com/karamble/diginode-cc/internal/auth"
@@ -85,6 +86,23 @@ func main() {
 	dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)
 	inventorySvc := inventory.NewService(db, hub)
 	dronesSvc.SetInventoryCallback(inventorySvc.Track)
+	faaSvc := faa.NewService(db)
+	dronesSvc.SetFAALookup(func(ctx context.Context, serial string) (map[string]interface{}, error) {
+		entry, err := faaSvc.Lookup(ctx, serial)
+		if err != nil {
+			return nil, err
+		}
+		data := map[string]interface{}{
+			"serialNumber":    entry.SerialNumber,
+			"registration":    entry.Registration,
+			"manufacturer":    entry.Manufacturer,
+			"model":           entry.Model,
+			"registrantName":  entry.RegistrantName,
+			"registrantCity":  entry.RegistrantCity,
+			"registrantState": entry.RegistrantState,
+		}
+		return data, nil
+	})
 	chatSvc := chat.NewService(db, hub)
 	chatSvc.SetBufferCallback(serialMgr.AddTextMessage)
 	commandsSvc := commands.NewService(db, hub)
@@ -94,7 +112,6 @@ func main() {
 	webhooksSvc := webhooks.NewService(db)
 	alarmsSvc := alarms.NewService(db)
 	firewallSvc := firewall.NewService(db)
-	faaSvc := faa.NewService(db)
 	exportsSvc := exports.NewService(db)
 	permsSvc := permissions.NewService(db)
 	mailSvc := mail.NewService(mail.Config{
@@ -156,6 +173,12 @@ func main() {
 	if err := appCfg.Load(ctx); err != nil {
 		slog.Warn("failed to load app config", "error", err)
 	}
+	if err := appCfg.EnsureDefaults(ctx); err != nil {
+		slog.Warn("failed to ensure app config defaults", "error", err)
+	}
+
+	// Audit logging service
+	auditSvc := audit.NewService(db)
 
 	// Start serial manager
 	if cfg.SerialDevice != "" {
@@ -201,6 +224,7 @@ func main() {
 		Mail:      mailSvc,
 		AppCfg:      appCfg,
 		Permissions: permsSvc,
+		Audit:       auditSvc,
 		ADSB:        adsbSvc,
 		MQTT:        mqttSvc,
 		Updates:     updatesSvc,
@@ -225,6 +249,35 @@ func main() {
 		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			slog.Error("HTTP server error", "error", err)
 			os.Exit(1)
+		}
+	}()
+
+	// Start daily pruning goroutine
+	go func() {
+		ticker := time.NewTicker(24 * time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				pruneCtx := context.Background()
+				if n, err := nodesSvc.PrunePositions(pruneCtx, 30); err != nil {
+					slog.Warn("failed to prune node positions", "error", err)
+				} else if n > 0 {
+					slog.Info("pruned old node positions", "deleted", n)
+				}
+				if n, err := dronesSvc.PruneDetections(pruneCtx, 30); err != nil {
+					slog.Warn("failed to prune drone detections", "error", err)
+				} else if n > 0 {
+					slog.Info("pruned old drone detections", "deleted", n)
+				}
+				if n, err := commandsSvc.PruneOldCommands(pruneCtx, 180); err != nil {
+					slog.Warn("failed to prune old commands", "error", err)
+				} else if n > 0 {
+					slog.Info("pruned old commands", "deleted", n)
+				}
+			case <-sigCtx.Done():
+				return
+			}
 		}
 	}()
 
