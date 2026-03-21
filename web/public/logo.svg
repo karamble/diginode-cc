@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  viewBox="0 0 640 200"
+  role="img"
+  aria-labelledby="title desc"
+>
+  <title id="title">AntiHunter Perimeter Defense Systems</title>
+  <desc id="desc">
+    Stylized AntiHunter shield logomark with brand wordmark and perimeter defense systems tagline.
+  </desc>
+  <rect width="640" height="200" rx="18" fill="#FFFFFF" />
+  <g transform="translate(40 8)">
+    <path
+      d="M120 12 L34 44 V122 C34 170 74 216 120 226 C166 216 206 170 206 122 V44 L120 12 Z"
+      fill="#000000"
+    />
+    <path
+      d="M120 32 L52 56 V122 C52 160 84 200 120 208 C156 200 188 160 188 122 V56 L120 32 Z"
+      fill="#FFFFFF"
+    />
+    <path
+      d="M88 150 V88 L114 78 V96 L100 102 V150 H88 Z"
+      fill="#000000"
+    />
+    <path
+      d="M114 112 V134 L100 140 V118 L114 112 Z"
+      fill="#000000"
+    />
+    <path
+      d="M132 78 L158 88 V150 H146 V120 L132 124 V150 H120 V78 Z"
+      fill="#000000"
+    />
+  </g>
+  <text
+    x="246"
+    y="108"
+    fill="#000000"
+    font-size="64"
+    font-weight="700"
+    font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+  >
+    AntiHunter
+  </text>
+  <text
+    x="246"
+    y="154"
+    fill="#000000"
+    font-size="26"
+    font-weight="600"
+    letter-spacing="6"
+    font-family="'Segoe UI', 'Helvetica Neue', Arial, sans-serif"
+  >
+    PERIMETER DEFENSE SYSTEMS
+  </text>
+</svg>

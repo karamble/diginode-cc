@@ -1,29 +1,31 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-/* Leaflet map container */
-.leaflet-container {
-  width: 100%;
-  height: 100%;
-  z-index: 0;
+body {
+  font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  background-color: #0F172A;
+  color: #E2E8F0;
 }
 
-/* Scrollbar styling */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+/* Leaflet */
+.leaflet-container { width: 100%; height: 100%; z-index: 0; }
 
-::-webkit-scrollbar-track {
-  background: #0f172a;
-}
+/* Scrollbar */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #0B1220; }
+::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #475569; }
 
-::-webkit-scrollbar-thumb {
-  background: #334155;
-  border-radius: 3px;
-}
+/* Status badge colors */
+.badge-unknown { @apply bg-status-unknown/20 text-status-unknown; }
+.badge-friendly { @apply bg-status-friendly/20 text-status-friendly; }
+.badge-neutral { @apply bg-status-neutral/20 text-status-neutral; }
+.badge-hostile { @apply bg-status-hostile/20 text-status-hostile; }
 
-::-webkit-scrollbar-thumb:hover {
-  background: #475569;
-}
+.badge-info { @apply bg-alert-info/20 text-alert-info; }
+.badge-notice { @apply bg-alert-notice/20 text-alert-notice; }
+.badge-alert { @apply bg-alert-alert/20 text-alert-alert; }
+.badge-critical { @apply bg-alert-critical/20 text-alert-critical; }
