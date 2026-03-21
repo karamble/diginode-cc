@@ -42,7 +42,7 @@ type droneResponse struct {
 	SiteColor     string                 `json:"siteColor,omitempty"`
 	SiteCountry   string                 `json:"siteCountry,omitempty"`
 	SiteCity      string                 `json:"siteCity,omitempty"`
-	FAAData       map[string]interface{} `json:"faaData,omitempty"`
+	FAAData       map[string]interface{} `json:"faa,omitempty"`
 	Ts            time.Time              `json:"ts"`
 	FirstSeen     time.Time              `json:"firstSeen"`
 	LastSeen      time.Time              `json:"lastSeen"`
