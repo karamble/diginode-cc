@@ -13,6 +13,10 @@ import (
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
+// NodeOnlineTimeout is how long since last_heard before a node is considered offline.
+// Meshtastic nodes broadcast NodeInfo every 15 minutes; 16 min = just over 1 heartbeat.
+const NodeOnlineTimeout = 16 * time.Minute
+
 // NodeType distinguishes C2 gateways from sensor nodes.
 type NodeType string
 
@@ -71,12 +75,24 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 	}
 }
 
-// GetAll returns all tracked nodes.
+// isNodeOnline returns true if the node was heard within the online timeout window.
+func isNodeOnline(n *Node) bool {
+	if n.IsLocal {
+		return true // local node is always online
+	}
+	if n.LastHeard.IsZero() {
+		return false
+	}
+	return time.Since(n.LastHeard) < NodeOnlineTimeout
+}
+
+// GetAll returns all tracked nodes with isOnline computed from lastHeard.
 func (s *Service) GetAll() []*Node {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make([]*Node, 0, len(s.nodes))
 	for _, n := range s.nodes {
+		n.IsOnline = isNodeOnline(n)
 		result = append(result, n)
 	}
 	return result
@@ -221,7 +237,7 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 	if info.LastHeard > 0 {
 		node.LastHeard = time.Unix(int64(info.LastHeard), 0)
 	}
-	node.IsOnline = true
+	node.IsOnline = isNodeOnline(node)
 
 	slog.Info("node updated",
 		"nodeNum", info.Num,
