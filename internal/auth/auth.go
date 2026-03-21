@@ -93,7 +93,7 @@ func (s *Service) Login(ctx context.Context, email, password, clientIP string) (
 	)
 
 	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id, password_hash, name, role, totp_enabled, totp_secret,
+		SELECT id, password_hash, COALESCE(name, ''), role, totp_enabled, COALESCE(totp_secret, ''),
 			must_change_password, tos_accepted, last_login,
 			COALESCE(failed_login_attempts, 0), locked_until
 		FROM users WHERE email = $1`, email).Scan(
@@ -102,6 +102,7 @@ func (s *Service) Login(ctx context.Context, email, password, clientIP string) (
 		&failedLoginAttempts, &lockedUntil,
 	)
 	if err != nil {
+		slog.Error("login query failed", "email", email, "error", err)
 		return "", nil, ErrInvalidCredentials
 	}
 
