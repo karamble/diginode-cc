@@ -121,7 +121,14 @@ func (m *Manager) Start() error {
 		// Reset delay on successful connection
 		delay = baseDelay
 
+		// Periodically re-send wantConfig to refresh node data (battery, position, etc.)
+		// The firmware re-sends all NodeInfo with fresh DeviceMetrics on each wantConfig.
+		refreshDone := make(chan struct{})
+		go m.periodicConfigRefresh(refreshDone)
+
 		m.readLoop()
+
+		close(refreshDone)
 
 		// Connection lost
 		m.mu.Lock()
@@ -506,6 +513,29 @@ func (m *Manager) GetDeviceTime() (time.Time, bool) {
 // Used for testing without a real serial connection.
 func (m *Manager) SimulatePacket(pkt *FromRadioPacket) {
 	m.dispatchPacket(pkt)
+}
+
+// periodicConfigRefresh re-sends wantConfig every 10 minutes to get fresh
+// NodeInfo with updated DeviceMetrics (battery, voltage, position) from
+// the Heltec's peer cache. Stops when done channel is closed.
+func (m *Manager) periodicConfigRefresh(done chan struct{}) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := m.sendWantConfig(); err != nil {
+				slog.Warn("periodic config refresh failed", "error", err)
+			} else {
+				slog.Info("periodic config refresh sent")
+			}
+		case <-done:
+			return
+		case <-m.stopCh:
+			return
+		}
+	}
 }
 
 func (m *Manager) sendWantConfig() error {
