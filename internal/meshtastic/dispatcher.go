@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,20 @@ import (
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
+
+// isSensorData returns true if the text looks like AntiHunter DigiNode sensor output.
+func isSensorData(text string) bool {
+	upper := strings.ToUpper(text)
+	return strings.Contains(upper, "STATUS:") ||
+		strings.Contains(upper, "DRONE:") ||
+		strings.Contains(upper, "TARGET:") ||
+		strings.Contains(upper, "DEVICE:") ||
+		strings.Contains(upper, "ATTACK:") ||
+		strings.Contains(upper, "ANOMALY-") ||
+		strings.Contains(upper, "VIBRATION:") ||
+		strings.Contains(upper, "BASELINE_STATUS:") ||
+		strings.Contains(upper, "TRIANGULATE_")
+}
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
 type Dispatcher struct {
@@ -26,6 +41,8 @@ type Dispatcher struct {
 	onWebhookFire  func(eventType string, payload interface{})
 	dedup          map[uint64]time.Time // packet hash → last seen
 	dedupMu        sync.Mutex
+	localNodeSeen  bool   // true after first NodeInfo from wantConfig
+	localNodeNum   uint32 // our local Heltec's mesh node number
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -37,6 +54,10 @@ type NodeHandler interface {
 	// TouchNode ensures a node entry exists for the given mesh number.
 	// Called on every incoming mesh packet so remote nodes appear in the list.
 	TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32)
+	// ClassifyNode tags a node as "gotailme" (C2 gateway) or "antihunter" (sensor).
+	ClassifyNode(nodeNum uint32, nodeType string)
+	// MarkLocal flags a node as the local C2 gateway.
+	MarkLocal(nodeNum uint32)
 }
 
 // DroneHandler processes drone detection events.
@@ -96,11 +117,23 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 			if d.onDeviceTime != nil {
 				d.onDeviceTime(time.Now())
 			}
+			// Mark the local node as a gotailme C2 gateway
+			if d.nodeHandler != nil && pkt.MyInfo.MyNodeNum != 0 {
+				d.nodeHandler.TouchNode(pkt.MyInfo.MyNodeNum, 0, 0)
+				d.nodeHandler.ClassifyNode(pkt.MyInfo.MyNodeNum, "gotailme")
+			}
 		}
 
 	case serial.FromRadioNodeInfo:
 		if pkt.NodeInfo != nil && d.nodeHandler != nil {
 			d.nodeHandler.HandleNodeInfo(pkt.NodeInfo)
+			// The first NodeInfo in the wantConfig dump is the local node.
+			// Mark it as our own gotailme C2 gateway.
+			if !d.localNodeSeen && pkt.NodeInfo.Num != 0 {
+				d.localNodeSeen = true
+				d.localNodeNum = pkt.NodeInfo.Num
+				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
+			}
 		}
 
 	case serial.FromRadioMeshPacket:
@@ -169,6 +202,20 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 	// Every mesh packet tells us a node exists, even if we don't have its full info yet.
 	if d.nodeHandler != nil && mp.From != 0 {
 		d.nodeHandler.TouchNode(mp.From, mp.RxSNR, mp.RxRSSI)
+
+		// Classify node type based on message content.
+		// AntiHunter sensor nodes send STATUS:/DRONE:/TARGET:/DEVICE:/ATTACK: lines.
+		// Other C2 gateways (gotailme) send plain text messages or relay commands.
+		if portNum == PortNumTextMessage && len(mp.Payload) > 0 {
+			text := string(mp.Payload)
+			if isSensorData(text) {
+				d.nodeHandler.ClassifyNode(mp.From, "antihunter")
+			} else {
+				d.nodeHandler.ClassifyNode(mp.From, "gotailme")
+			}
+		} else if portNum == PortNumDetectionSensor {
+			d.nodeHandler.ClassifyNode(mp.From, "antihunter")
+		}
 	}
 
 	switch portNum {
