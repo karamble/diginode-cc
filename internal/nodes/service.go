@@ -37,8 +37,9 @@ type Node struct {
 	SiteID             string    `json:"siteId,omitempty"`
 	OriginSiteID       string    `json:"originSiteId,omitempty"`
 	LastMessage        string    `json:"lastMessage,omitempty"`
-	TemperatureC       float64   `json:"temperatureC,omitempty"`
-	TemperatureF       float64   `json:"temperatureF,omitempty"`
+	TemperatureC          float64    `json:"temperatureC,omitempty"`
+	TemperatureF          float64    `json:"temperatureF,omitempty"`
+	TemperatureUpdatedAt  *time.Time `json:"temperatureUpdatedAt,omitempty"`
 }
 
 // Service manages mesh node state.
@@ -203,7 +204,9 @@ func (s *Service) HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
 	node.Temperature = float64(env.Temperature)
 	node.TemperatureC = float64(env.Temperature)
 	node.TemperatureF = float64(env.Temperature)*9.0/5.0 + 32.0
-	node.LastHeard = time.Now()
+	now := time.Now()
+	node.TemperatureUpdatedAt = &now
+	node.LastHeard = now
 	node.IsOnline = true
 
 	s.hub.Broadcast(ws.Event{
