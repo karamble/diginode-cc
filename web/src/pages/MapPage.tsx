@@ -417,6 +417,7 @@ export default function MapPage() {
                       key={`coverage-${n.id}`}
                       center={[n.lat!, n.lon!]}
                       radius={50}
+                      interactive={false}
                       pathOptions={{
                         fillColor: c.fill,
                         fillOpacity: 0.1,
