@@ -29,12 +29,15 @@ type nodeResponse struct {
 	ChannelUtilization float32   `json:"channelUtilization,omitempty"`
 	AirUtilTx          float32   `json:"airUtilTx,omitempty"`
 	Temperature        float64   `json:"temperature,omitempty"`
-	TemperatureC       float64   `json:"temperatureC,omitempty"`
-	TemperatureF       float64   `json:"temperatureF,omitempty"`
-	SNR                float32   `json:"snr,omitempty"`
-	RSSI               int32     `json:"rssi,omitempty"`
-	LastHeard          time.Time `json:"lastHeard"`
-	IsOnline           bool      `json:"isOnline"`
+	TemperatureC          float64    `json:"temperatureC,omitempty"`
+	TemperatureF          float64    `json:"temperatureF,omitempty"`
+	TemperatureUpdatedAt  *time.Time `json:"temperatureUpdatedAt,omitempty"`
+	SNR                   float32    `json:"snr,omitempty"`
+	RSSI                  int32      `json:"rssi,omitempty"`
+	Ts                    time.Time  `json:"ts"`
+	LastHeard             time.Time  `json:"lastHeard"`
+	LastSeen              *time.Time `json:"lastSeen,omitempty"`
+	IsOnline              bool       `json:"isOnline"`
 	SiteID             string    `json:"siteId,omitempty"`
 	OriginSiteID       string    `json:"originSiteId,omitempty"`
 	SiteName           string    `json:"siteName,omitempty"`
@@ -67,7 +70,9 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		TemperatureF:       n.TemperatureF,
 		SNR:                n.SNR,
 		RSSI:               n.RSSI,
+		Ts:                 n.LastHeard,
 		LastHeard:          n.LastHeard,
+		LastSeen:           &n.LastHeard,
 		IsOnline:           n.IsOnline,
 		SiteID:             n.SiteID,
 		OriginSiteID:       n.OriginSiteID,

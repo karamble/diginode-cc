@@ -102,6 +102,7 @@ func (s *Server) setupRoutes() chi.Router {
 
 	// Health check (no auth)
 	r.Get("/api/health", s.handleHealth)
+	r.Get("/healthz", s.handleHealth) // gotailme compat alias
 
 	// WebSocket endpoint (auth checked on connect)
 	r.Get("/ws", s.handleWebSocket)
@@ -269,6 +270,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/position", s.handleSendSerialPosition)
 				r.Post("/device-metrics", s.handleSendSerialDeviceMetrics)
 				r.Post("/display-config", s.handleSendSerialDisplayConfig)
+				r.Post("/bluetooth-config", s.handleSendSerialBluetoothConfig)
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/simulate", s.handleSerialSimulate)
 			})
