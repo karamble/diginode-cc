@@ -76,6 +76,17 @@ func (s *Service) GetByNodeNum(nodeNum uint32) *Node {
 	return s.nodes[nodeNum]
 }
 
+// LookupNodeIDAndSite returns the hex node ID and site ID for a mesh node number.
+func (s *Service) LookupNodeIDAndSite(nodeNum uint32) (nodeID, siteID string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		return "", ""
+	}
+	return node.NodeID, node.SiteID
+}
+
 // UpdateLongName changes a node's display name.
 func (s *Service) UpdateLongName(nodeNum uint32, longName string) error {
 	s.mu.Lock()
@@ -167,6 +178,31 @@ func (s *Service) HandleTelemetry(from uint32, metrics *serial.DeviceMetrics) {
 	node.Voltage = metrics.Voltage
 	node.ChannelUtilization = metrics.ChannelUtilization
 	node.AirUtilTx = metrics.AirUtilTx
+	node.LastHeard = time.Now()
+	node.IsOnline = true
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+
+	go s.persistNode(node)
+}
+
+// HandleEnvironment processes environment metrics (temperature, humidity, pressure).
+func (s *Service) HandleEnvironment(from uint32, env *serial.EnvironmentMetrics) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[from]
+	if !exists {
+		node = &Node{NodeNum: from}
+		s.nodes[from] = node
+	}
+
+	node.Temperature = float64(env.Temperature)
+	node.TemperatureC = float64(env.Temperature)
+	node.TemperatureF = float64(env.Temperature)*9.0/5.0 + 32.0
 	node.LastHeard = time.Now()
 	node.IsOnline = true
 

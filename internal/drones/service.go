@@ -53,10 +53,16 @@ type Drone struct {
 
 // Service manages drone detection and tracking.
 type Service struct {
-	db     *database.DB
-	hub    *ws.Hub
-	drones map[string]*Drone // keyed by MAC or serial
-	mu     sync.RWMutex
+	db         *database.DB
+	hub        *ws.Hub
+	drones     map[string]*Drone // keyed by MAC or serial
+	mu         sync.RWMutex
+	nodeLookup func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
+}
+
+// SetNodeLookup sets the function to resolve mesh node numbers to node IDs and site IDs.
+func (s *Service) SetNodeLookup(fn func(nodeNum uint32) (nodeID, siteID string)) {
+	s.nodeLookup = fn
 }
 
 // NewService creates a new drone tracking service.
@@ -145,6 +151,17 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 			"source", detection.Source)
 	}
 
+	// Resolve detecting node's ID and site
+	if s.nodeLookup != nil && detection.NodeNum > 0 {
+		nodeID, siteID := s.nodeLookup(detection.NodeNum)
+		if nodeID != "" {
+			drone.NodeRefID = nodeID
+		}
+		if siteID != "" {
+			drone.SiteID = siteID
+		}
+	}
+
 	// Update telemetry
 	drone.Latitude = detection.Latitude
 	drone.Longitude = detection.Longitude
@@ -182,6 +199,7 @@ func (s *Service) HandleDroneDetection(from uint32, payload []byte) {
 		return
 	}
 	detection.Source = "mesh"
+	detection.NodeNum = from
 	s.HandleDetection(detection)
 }
 

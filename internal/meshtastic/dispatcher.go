@@ -25,6 +25,7 @@ type NodeHandler interface {
 	HandleNodeInfo(info *serial.NodeInfoLite)
 	HandleTelemetry(from uint32, metrics *serial.DeviceMetrics)
 	HandlePosition(from uint32, pos *serial.PositionData)
+	HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
 }
 
 // DroneHandler processes drone detection events.
@@ -127,9 +128,12 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 
 	case PortNumTelemetry:
 		if d.nodeHandler != nil && len(mp.Payload) > 0 {
-			metrics := decodeTelemetryPayload(mp.Payload)
-			if metrics != nil {
-				d.nodeHandler.HandleTelemetry(mp.From, metrics)
+			dm, em := decodeTelemetryPayload(mp.Payload)
+			if dm != nil {
+				d.nodeHandler.HandleTelemetry(mp.From, dm)
+			}
+			if em != nil {
+				d.nodeHandler.HandleEnvironment(mp.From, em)
 			}
 		}
 
@@ -204,8 +208,10 @@ func decodePositionPayload(data []byte) *serial.PositionData {
 }
 
 // decodeTelemetryPayload decodes a Telemetry protobuf payload.
-func decodeTelemetryPayload(data []byte) *serial.DeviceMetrics {
-	// Telemetry is a wrapper: field 2 = device_metrics (sub-message)
+// Returns device_metrics (field 2) and environment_metrics (field 3).
+func decodeTelemetryPayload(data []byte) (*serial.DeviceMetrics, *serial.EnvironmentMetrics) {
+	var dm *serial.DeviceMetrics
+	var em *serial.EnvironmentMetrics
 	p := 0
 	for p < len(data) {
 		tag, n := decodeVarint(data[p:])
@@ -229,7 +235,9 @@ func decodeTelemetryPayload(data []byte) *serial.DeviceMetrics {
 			p += int(length)
 
 			if fieldNum == 2 { // device_metrics
-				return decodeDeviceMetricsPayload(subData)
+				dm = decodeDeviceMetricsPayload(subData)
+			} else if fieldNum == 3 { // environment_metrics
+				em = decodeEnvironmentMetricsPayload(subData)
 			}
 		} else {
 			p = skipField(data, p, wireType)
@@ -238,7 +246,7 @@ func decodeTelemetryPayload(data []byte) *serial.DeviceMetrics {
 			}
 		}
 	}
-	return nil
+	return dm, em
 }
 
 func decodeDeviceMetricsPayload(data []byte) *serial.DeviceMetrics {
@@ -288,6 +296,43 @@ func decodeDeviceMetricsPayload(data []byte) *serial.DeviceMetrics {
 		}
 	}
 	return dm
+}
+
+func decodeEnvironmentMetricsPayload(data []byte) *serial.EnvironmentMetrics {
+	em := &serial.EnvironmentMetrics{}
+	p := 0
+	for p < len(data) {
+		tag, n := decodeVarint(data[p:])
+		if n == 0 {
+			break
+		}
+		p += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+
+		if wireType == 5 { // fixed32 (float)
+			if p+4 > len(data) {
+				break
+			}
+			bits := binary.LittleEndian.Uint32(data[p : p+4])
+			f := math.Float32frombits(bits)
+			p += 4
+			switch fieldNum {
+			case 1:
+				em.Temperature = f
+			case 2:
+				em.RelativeHumidity = f
+			case 3:
+				em.BarometricPressure = f
+			}
+		} else {
+			p = skipField(data, p, wireType)
+			if p < 0 {
+				break
+			}
+		}
+	}
+	return em
 }
 
 // Protobuf helpers (duplicated from serial for package independence)
