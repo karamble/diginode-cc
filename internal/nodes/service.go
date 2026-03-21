@@ -103,6 +103,18 @@ func (s *Service) GetAll() []*Node {
 	return result
 }
 
+// GetLocalNodeNum returns the mesh node number of the local C2 gateway, or 0 if unknown.
+func (s *Service) GetLocalNodeNum() uint32 {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, n := range s.nodes {
+		if n.IsLocal {
+			return n.NodeNum
+		}
+	}
+	return 0
+}
+
 // GetByNodeNum returns a node by its mesh number.
 func (s *Service) GetByNodeNum(nodeNum uint32) *Node {
 	s.mu.RLock()

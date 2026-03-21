@@ -93,6 +93,63 @@ func (s *Service) GetMessages(limit int) ([]*Message, error) {
 	return messages, nil
 }
 
+// GetBroadcastMessages retrieves recent broadcast-only chat messages.
+func (s *Service) GetBroadcastMessages(limit int) ([]*Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, from_node, to_node, channel, message, timestamp
+		FROM chat_messages
+		WHERE to_node = 4294967295
+		ORDER BY timestamp DESC
+		LIMIT $1`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.FromNode, &m.ToNode, &m.Channel, &m.Text, &m.Timestamp); err != nil {
+			continue
+		}
+		messages = append(messages, &m)
+	}
+	return messages, nil
+}
+
+// GetDMMessages retrieves the DM conversation between the local node and a peer.
+// localNodeNum is this C2's mesh node number; peerNodeNum is the remote node.
+// Matches: sent DMs (from_node=0, to_node=peer) and received DMs (from_node=peer, to_node=local).
+func (s *Service) GetDMMessages(limit int, peerNodeNum, localNodeNum uint32) ([]*Message, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, from_node, to_node, channel, message, timestamp
+		FROM chat_messages
+		WHERE (from_node = 0 AND to_node = $2)
+		   OR (from_node = $2 AND to_node = $3)
+		ORDER BY timestamp DESC
+		LIMIT $1`, limit, peerNodeNum, localNodeNum)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var messages []*Message
+	for rows.Next() {
+		var m Message
+		if err := rows.Scan(&m.ID, &m.FromNode, &m.ToNode, &m.Channel, &m.Text, &m.Timestamp); err != nil {
+			continue
+		}
+		messages = append(messages, &m)
+	}
+	return messages, nil
+}
+
 // ClearAll deletes all chat messages from the database.
 func (s *Service) ClearAll(ctx context.Context) error {
 	_, err := s.db.Pool.Exec(ctx, `DELETE FROM chat_messages`)

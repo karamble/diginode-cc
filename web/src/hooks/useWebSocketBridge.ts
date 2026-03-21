@@ -66,8 +66,20 @@ export function useWebSocketBridge() {
 
       // Chat
       'chat.message': (p) => {
-        useChatStore.getState().addMessage(p as ChatMessage)
+        const msg = p as ChatMessage
+        useChatStore.getState().addMessage(msg)
         useTerminalStore.getState().addEntry('chat.message', p)
+
+        // Track unread DMs: if this is a DM and we're not viewing that conversation
+        const BROADCAST = 0xFFFFFFFF
+        const isDM = msg.toNode !== 0 && msg.toNode !== BROADCAST
+        if (isDM) {
+          const peerNodeNum = msg.fromNode === 0 ? msg.toNode : msg.fromNode
+          const { activeChat } = useChatStore.getState()
+          if (activeChat.mode !== 'dm' || activeChat.peerNodeNum !== peerNodeNum) {
+            useChatStore.getState().incrementUnread(peerNodeNum)
+          }
+        }
       },
 
       // Geofence
