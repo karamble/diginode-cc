@@ -26,6 +26,41 @@ interface AlertEvent {
   createdAt: string
 }
 
+type Severity = 'INFO' | 'NOTICE' | 'ALERT' | 'CRITICAL'
+type MatchMode = 'ANY' | 'ALL'
+
+interface RuleFormState {
+  name: string
+  description: string
+  severity: Severity
+  matchMode: MatchMode
+  macAddresses: string
+  ouiPrefixes: string
+  ssids: string
+  channels: string
+  minRssi: string
+  maxRssi: string
+  messageTemplate: string
+  cooldownSeconds: number
+  enabled: boolean
+}
+
+const defaultForm: RuleFormState = {
+  name: '',
+  description: '',
+  severity: 'ALERT',
+  matchMode: 'ANY',
+  macAddresses: '',
+  ouiPrefixes: '',
+  ssids: '',
+  channels: '',
+  minRssi: '',
+  maxRssi: '',
+  messageTemplate: '',
+  cooldownSeconds: 300,
+  enabled: true,
+}
+
 function severityBadge(s: string) {
   switch (s) {
     case 'CRITICAL': return 'badge-critical'
@@ -52,9 +87,51 @@ function formatCooldown(secs: number): string {
   return `${Math.floor(secs / 3600)}h`
 }
 
+const inputClass = 'w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500 placeholder-dark-500'
+const labelClass = 'block text-xs font-medium text-dark-400 mb-1'
+
+function splitTrimFilter(val: string): string[] {
+  return val.split(',').map(s => s.trim()).filter(Boolean)
+}
+
+function buildCondition(form: RuleFormState): Record<string, unknown> {
+  const cond: Record<string, unknown> = {
+    matchMode: form.matchMode,
+  }
+
+  const macs = splitTrimFilter(form.macAddresses)
+  if (macs.length > 0) cond.macAddresses = macs
+
+  const ouis = splitTrimFilter(form.ouiPrefixes)
+  if (ouis.length > 0) cond.ouiPrefixes = ouis
+
+  const ssids = splitTrimFilter(form.ssids)
+  if (ssids.length > 0) cond.ssids = ssids
+
+  const channels = splitTrimFilter(form.channels).map(Number).filter(n => !isNaN(n))
+  if (channels.length > 0) cond.channels = channels
+
+  if (form.minRssi !== '') {
+    const v = Number(form.minRssi)
+    if (!isNaN(v)) cond.minRssi = v
+  }
+  if (form.maxRssi !== '') {
+    const v = Number(form.maxRssi)
+    if (!isNaN(v)) cond.maxRssi = v
+  }
+
+  if (form.messageTemplate.trim()) {
+    cond.messageTemplate = form.messageTemplate.trim()
+  }
+
+  return cond
+}
+
 export default function AlertsPage() {
   const queryClient = useQueryClient()
   const [eventsLimit, setEventsLimit] = useState(50)
+  const [showCreate, setShowCreate] = useState(false)
+  const [form, setForm] = useState<RuleFormState>({ ...defaultForm })
 
   // Fetch alert rules
   const { data: rules = [], isLoading: rulesLoading } = useQuery({
@@ -89,20 +166,275 @@ export default function AlertsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['alertEvents'] }),
   })
 
+  // Create rule
+  const createRule = useMutation({
+    mutationFn: (body: { name: string; description: string; condition: Record<string, unknown>; severity: Severity; enabled: boolean; cooldownSeconds: number }) =>
+      api.post('/alerts/rules', body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['alertRules'] })
+      setShowCreate(false)
+      setForm({ ...defaultForm })
+    },
+  })
+
+  const handleCreate = () => {
+    createRule.mutate({
+      name: form.name,
+      description: form.description,
+      condition: buildCondition(form),
+      severity: form.severity,
+      enabled: form.enabled,
+      cooldownSeconds: form.cooldownSeconds,
+    })
+  }
+
+  const updateField = <K extends keyof RuleFormState>(key: K, value: RuleFormState[K]) => {
+    setForm(prev => ({ ...prev, [key]: value }))
+  }
+
   const unackedCount = events.filter(e => !e.acknowledged).length
 
   return (
     <div className="p-6 space-y-6">
       {/* Page header */}
-      <div>
-        <h2 className="text-lg font-semibold text-dark-100">Alerts</h2>
-        <p className="text-xs text-dark-400 mt-1">
-          {rules.length} rule{rules.length !== 1 ? 's' : ''} configured
-          {unackedCount > 0 && (
-            <span className="ml-2 text-alert-alert">{unackedCount} unacknowledged event{unackedCount !== 1 ? 's' : ''}</span>
-          )}
-        </p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-lg font-semibold text-dark-100">Alerts</h2>
+          <p className="text-xs text-dark-400 mt-1">
+            {rules.length} rule{rules.length !== 1 ? 's' : ''} configured
+            {unackedCount > 0 && (
+              <span className="ml-2 text-alert-alert">{unackedCount} unacknowledged event{unackedCount !== 1 ? 's' : ''}</span>
+            )}
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCreate(!showCreate)}
+          className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded font-medium transition-colors"
+        >
+          {showCreate ? 'Cancel' : 'New Rule'}
+        </button>
       </div>
+
+      {/* Create Rule Form */}
+      {showCreate && (
+        <div className="bg-surface rounded-xl border border-dark-700/50 overflow-hidden">
+          <div className="px-4 py-3 border-b border-dark-700/50">
+            <h3 className="text-sm font-medium text-dark-200 flex items-center gap-2">
+              <svg className="w-4 h-4 text-primary-400" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
+              </svg>
+              Create Alert Rule
+            </h3>
+          </div>
+          <div className="p-4 space-y-4">
+            {/* Row 1: Name, Description */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className={labelClass}>Name *</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Known Device Alert"
+                  value={form.name}
+                  onChange={e => updateField('name', e.target.value)}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <label className={labelClass}>Description</label>
+                <textarea
+                  placeholder="Optional description of this rule"
+                  value={form.description}
+                  onChange={e => updateField('description', e.target.value)}
+                  rows={1}
+                  className={inputClass + ' resize-none'}
+                />
+              </div>
+            </div>
+
+            {/* Row 2: Severity, Match Mode, Cooldown, Enabled */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              <div>
+                <label className={labelClass}>Severity</label>
+                <div className="flex gap-1">
+                  {(['INFO', 'NOTICE', 'ALERT', 'CRITICAL'] as Severity[]).map(s => (
+                    <button
+                      key={s}
+                      onClick={() => updateField('severity', s)}
+                      className={`flex-1 px-1.5 py-1.5 rounded text-[10px] font-medium border transition-colors ${
+                        form.severity === s
+                          ? severityBadge(s) + ' border-current'
+                          : 'bg-dark-800 text-dark-500 border-dark-700 hover:border-dark-500'
+                      }`}
+                    >
+                      {s}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className={labelClass}>Match Mode</label>
+                <div className="flex rounded overflow-hidden border border-dark-600">
+                  {(['ANY', 'ALL'] as MatchMode[]).map(m => (
+                    <button
+                      key={m}
+                      onClick={() => updateField('matchMode', m)}
+                      className={`flex-1 px-3 py-2 text-xs font-medium transition-colors ${
+                        form.matchMode === m
+                          ? 'bg-primary-600 text-white'
+                          : 'bg-dark-800 text-dark-400 hover:text-dark-200'
+                      }`}
+                    >
+                      {m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div>
+                <label className={labelClass}>Cooldown (seconds)</label>
+                <input
+                  type="number"
+                  min={0}
+                  value={form.cooldownSeconds}
+                  onChange={e => updateField('cooldownSeconds', Math.max(0, Number(e.target.value)))}
+                  className={inputClass}
+                />
+              </div>
+              <div>
+                <label className={labelClass}>Enabled</label>
+                <button
+                  onClick={() => updateField('enabled', !form.enabled)}
+                  className={`relative inline-flex h-9 w-16 items-center rounded transition-colors ${
+                    form.enabled ? 'bg-primary-600' : 'bg-dark-700'
+                  }`}
+                >
+                  <span
+                    className={`inline-block w-6 h-6 rounded bg-white shadow transform transition-transform ${
+                      form.enabled ? 'translate-x-8' : 'translate-x-1.5'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {/* Conditions Section */}
+            <div>
+              <div className="text-xs font-medium text-dark-300 mb-2 uppercase tracking-wider">Conditions</div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                <div>
+                  <label className={labelClass}>MAC Addresses</label>
+                  <input
+                    type="text"
+                    placeholder="AA:BB:CC:DD:EE:FF, ..."
+                    value={form.macAddresses}
+                    onChange={e => updateField('macAddresses', e.target.value)}
+                    className={inputClass + ' font-mono'}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Comma-separated</p>
+                </div>
+                <div>
+                  <label className={labelClass}>OUI Prefixes</label>
+                  <input
+                    type="text"
+                    placeholder="DC:A6:32, B8:27:EB, ..."
+                    value={form.ouiPrefixes}
+                    onChange={e => updateField('ouiPrefixes', e.target.value)}
+                    className={inputClass + ' font-mono'}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Comma-separated, e.g. DC:A6:32</p>
+                </div>
+                <div>
+                  <label className={labelClass}>SSIDs</label>
+                  <input
+                    type="text"
+                    placeholder="MyNetwork, Guest-WiFi, ..."
+                    value={form.ssids}
+                    onChange={e => updateField('ssids', e.target.value)}
+                    className={inputClass}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Comma-separated</p>
+                </div>
+                <div>
+                  <label className={labelClass}>Channels</label>
+                  <input
+                    type="text"
+                    placeholder="1, 6, 11, 36, ..."
+                    value={form.channels}
+                    onChange={e => updateField('channels', e.target.value)}
+                    className={inputClass + ' font-mono'}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Comma-separated numbers</p>
+                </div>
+                <div>
+                  <label className={labelClass}>Min RSSI (dBm)</label>
+                  <input
+                    type="number"
+                    min={-100}
+                    max={0}
+                    placeholder="-80"
+                    value={form.minRssi}
+                    onChange={e => updateField('minRssi', e.target.value)}
+                    className={inputClass + ' font-mono'}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Range: -100 to 0</p>
+                </div>
+                <div>
+                  <label className={labelClass}>Max RSSI (dBm)</label>
+                  <input
+                    type="number"
+                    min={-100}
+                    max={0}
+                    placeholder="-30"
+                    value={form.maxRssi}
+                    onChange={e => updateField('maxRssi', e.target.value)}
+                    className={inputClass + ' font-mono'}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Range: -100 to 0</p>
+                </div>
+              </div>
+            </div>
+
+            {/* Message Template */}
+            <div>
+              <label className={labelClass}>Message Template</label>
+              <input
+                type="text"
+                placeholder="Device {mac} detected on {ssid} (RSSI: {rssi}) - Rule: {rule}"
+                value={form.messageTemplate}
+                onChange={e => updateField('messageTemplate', e.target.value)}
+                className={inputClass}
+              />
+              <p className="text-[10px] text-dark-600 mt-0.5">
+                Placeholders: {'{mac}'} {'{ssid}'} {'{rssi}'} {'{channel}'} {'{oui}'} {'{nodeId}'} {'{nodeName}'} {'{rule}'} {'{severity}'}
+              </p>
+            </div>
+
+            {/* Actions */}
+            <div className="flex items-center justify-between pt-2 border-t border-dark-700/50">
+              <p className="text-[10px] text-dark-500">
+                Match mode <span className="text-dark-300 font-medium">{form.matchMode}</span>: triggers when {form.matchMode === 'ANY' ? 'any one' : 'all'} condition{form.matchMode === 'ALL' ? 's match' : ' matches'}
+              </p>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => { setShowCreate(false); setForm({ ...defaultForm }) }}
+                  className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-dark-300 text-sm rounded font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleCreate}
+                  disabled={!form.name.trim() || createRule.isPending}
+                  className="px-4 py-2 bg-primary-600 hover:bg-primary-700 disabled:opacity-50 text-white text-sm rounded font-medium transition-colors"
+                >
+                  {createRule.isPending ? 'Creating...' : 'Create Rule'}
+                </button>
+              </div>
+            </div>
+            {createRule.isError && (
+              <p className="text-sm text-red-400">{(createRule.error as Error).message}</p>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Alert Rules Section */}
       <div>
