@@ -2,6 +2,7 @@ package serial
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -50,7 +51,7 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 		cfg:        cfg,
 		hub:        hub,
 		stopCh:     make(chan struct{}),
-		protocol:   "text", // Binary protobuf mode (sends wantConfig, reads FromRadio frames)
+		protocol:   "binary", // Binary protobuf mode (sends wantConfig, reads FromRadio frames)
 		textParser: NewTextParser(),
 	}
 }
@@ -198,10 +199,14 @@ func (m *Manager) readLoop() {
 	m.readLoopBinary()
 }
 
-// readLoopBinary is the existing binary protobuf frame reader.
+// readLoopBinary is a hybrid reader: it parses binary protobuf frames (0x94 0xC3)
+// AND accumulates non-frame bytes as text lines for the text parser.
+// The Heltec outputs both binary FromRadio frames and text debug console lines
+// on the same USB serial port.
 func (m *Manager) readLoopBinary() {
 	buf := make([]byte, 4096)
 	decoder := NewFrameDecoder()
+	var textBuf []byte // accumulates bytes between binary frames
 
 	for {
 		select {
@@ -219,6 +224,7 @@ func (m *Manager) readLoopBinary() {
 			continue
 		}
 
+		// Feed all bytes to the frame decoder for binary frame extraction
 		frames := decoder.Feed(buf[:n])
 		for _, frame := range frames {
 			packet, err := DecodeFromRadio(frame)
@@ -228,7 +234,62 @@ func (m *Manager) readLoopBinary() {
 			}
 			m.dispatchPacket(packet)
 		}
+
+		// Also accumulate bytes for text line parsing.
+		// Binary frame bytes (0x94 0xC3 ...) won't form valid text lines,
+		// but debug console text lines (terminated by \n) will.
+		textBuf = append(textBuf, buf[:n]...)
+
+		// Extract complete text lines from the buffer
+		for {
+			idx := bytes.IndexByte(textBuf, '\n')
+			if idx < 0 {
+				break
+			}
+			line := string(textBuf[:idx])
+			textBuf = textBuf[idx+1:]
+
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+
+			// Skip lines that look like binary garbage (contain non-printable chars)
+			if !isPrintableText(line) {
+				continue
+			}
+
+			// Parse as text event
+			if m.textParser != nil {
+				events := m.textParser.ParseLine(line)
+				for _, evt := range events {
+					if evt.Kind != "raw" { // Only dispatch meaningful events
+						m.dispatchTextEvent(evt)
+					}
+				}
+			}
+		}
+
+		// Prevent text buffer from growing unbounded
+		if len(textBuf) > 4096 {
+			textBuf = textBuf[len(textBuf)-2048:]
+		}
 	}
+}
+
+// isPrintableText checks if a string is mostly printable ASCII (not binary garbage).
+func isPrintableText(s string) bool {
+	if len(s) == 0 {
+		return false
+	}
+	printable := 0
+	for _, c := range s {
+		if c >= 0x20 && c <= 0x7E {
+			printable++
+		}
+	}
+	// At least 70% printable characters
+	return float64(printable)/float64(len(s)) > 0.7
 }
 
 // readLoopText reads newline-delimited text from the Heltec debug console.
