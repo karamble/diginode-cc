@@ -247,6 +247,16 @@ func (s *Service) HandlePosition(from uint32, pos *serial.PositionData) {
 	go s.persistPosition(node)
 }
 
+// ClearAll removes all nodes from memory and the database.
+func (s *Service) ClearAll(ctx context.Context) error {
+	s.mu.Lock()
+	s.nodes = make(map[uint32]*Node)
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM nodes`)
+	return err
+}
+
 // Remove deletes a node from tracking and broadcasts removal.
 func (s *Service) Remove(nodeNum uint32) {
 	s.mu.Lock()

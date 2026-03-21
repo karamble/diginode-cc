@@ -212,6 +212,16 @@ func (s *Service) HandleDroneDetection(from uint32, payload []byte) {
 	s.HandleDetection(detection)
 }
 
+// ClearAll removes all drones from memory and the database.
+func (s *Service) ClearAll(ctx context.Context) error {
+	s.mu.Lock()
+	s.drones = make(map[string]*Drone)
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM drones`)
+	return err
+}
+
 // Remove deletes a drone from tracking and broadcasts removal.
 func (s *Service) Remove(key string) {
 	s.mu.Lock()

@@ -77,6 +77,19 @@ func (s *Service) SendPasswordReset(to, resetURL string) error {
 	return s.Send(to, "Password Reset - DigiNode CC", body)
 }
 
+// SendPasswordResetAdmin sends a password reset email triggered by an admin.
+func (s *Service) SendPasswordResetAdmin(to, resetURL, adminName string) error {
+	body := fmt.Sprintf(`
+		<h2>DigiNode CC - Password Reset</h2>
+		<p>An administrator (%s) has requested a password reset for your account.</p>
+		<p>Click the link below to set a new password:</p>
+		<p><a href="%s">Reset Password</a></p>
+		<p>This link expires in 1 hour.</p>
+		<p>If you didn't expect this, contact your administrator.</p>
+	`, adminName, resetURL)
+	return s.Send(to, "Password Reset - DigiNode CC", body)
+}
+
 // SendInvitation sends a user invitation email.
 func (s *Service) SendInvitation(to, inviteURL, invitedBy string) error {
 	body := fmt.Sprintf(`

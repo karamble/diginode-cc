@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/karamble/diginode-cc/internal/serial"
+	goserial "go.bug.st/serial"
 )
 
 // handleGetTextMessages returns text messages since a given sequence number.
@@ -302,6 +303,32 @@ func (s *Server) handleSerialSimulate(w http.ResponseWriter, r *http.Request) {
 	s.serialMgr.SimulatePacket(&pkt)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "simulated"})
+}
+
+// handleListSerialPorts returns the available serial ports on the system.
+func (s *Server) handleListSerialPorts(w http.ResponseWriter, r *http.Request) {
+	ports, err := goserial.GetPortsList()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list ports: "+err.Error())
+		return
+	}
+	if ports == nil {
+		ports = []string{}
+	}
+	writeJSON(w, http.StatusOK, ports)
+}
+
+// handleResetSerialConfig resets serial configuration to defaults.
+func (s *Server) handleResetSerialConfig(w http.ResponseWriter, r *http.Request) {
+	s.cfg.SerialDevice = ""
+	s.cfg.SerialBaud = 115200
+
+	slog.Info("serial config reset to defaults")
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "serial config reset to defaults",
+	})
 }
 
 func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.Request) {

@@ -124,6 +124,33 @@ func (s *Service) Update(ctx context.Context, id string, t *Target) error {
 	return nil
 }
 
+// ClearAll removes all targets from memory and the database.
+func (s *Service) ClearAll(ctx context.Context) error {
+	s.mu.Lock()
+	s.targets = make(map[string]*Target)
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM targets`)
+	return err
+}
+
+// Resolve marks a target as resolved.
+func (s *Service) Resolve(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE targets SET status = 'resolved', updated_at = NOW()
+		WHERE id = $1`, id)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	if existing, ok := s.targets[id]; ok {
+		existing.Status = "resolved"
+		existing.UpdatedAt = time.Now()
+	}
+	s.mu.Unlock()
+	return nil
+}
+
 // UpdatePosition records a new position fix for a target.
 func (s *Service) UpdatePosition(ctx context.Context, targetID string, fix *PositionFix) error {
 	s.mu.Lock()

@@ -103,6 +103,23 @@ func (s *Service) GetAll() []*Device {
 	return result
 }
 
+// GetByMAC returns a device by its MAC address.
+func (s *Service) GetByMAC(mac string) *Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.devices[mac]
+}
+
+// ClearAll removes all devices from memory and the database.
+func (s *Service) ClearAll(ctx context.Context) error {
+	s.mu.Lock()
+	s.devices = make(map[string]*Device)
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `DELETE FROM inventory_devices`)
+	return err
+}
+
 // LookupOUI returns the manufacturer for a MAC prefix.
 func LookupOUI(mac string) string {
 	if len(mac) < 8 {

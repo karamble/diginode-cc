@@ -125,3 +125,38 @@ func (s *Service) Update(ctx context.Context, id string, a *AlarmConfig) error {
 func (s *Service) GetAll() []*AlarmConfig {
 	return s.alarms
 }
+
+// SetSoundFile stores a sound file reference for the given alarm level.
+func (s *Service) SetSoundFile(ctx context.Context, level string, soundFile string) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		INSERT INTO alarm_sounds (level, sound_file)
+		VALUES ($1, $2)
+		ON CONFLICT (level) DO UPDATE SET sound_file = EXCLUDED.sound_file`,
+		level, soundFile,
+	)
+	return err
+}
+
+// DeleteSoundFile removes the sound file reference for the given alarm level.
+func (s *Service) DeleteSoundFile(ctx context.Context, level string) error {
+	tag, err := s.db.Pool.Exec(ctx, `DELETE FROM alarm_sounds WHERE level = $1`, level)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return errAlarmSoundNotFound
+	}
+	return nil
+}
+
+var errAlarmSoundNotFound = &alarmSoundNotFoundError{}
+
+type alarmSoundNotFoundError struct{}
+
+func (e *alarmSoundNotFoundError) Error() string { return "alarm sound not found" }
+
+// IsAlarmSoundNotFound reports whether err is an alarm-sound-not-found error.
+func IsAlarmSoundNotFound(err error) bool {
+	_, ok := err.(*alarmSoundNotFoundError)
+	return ok
+}

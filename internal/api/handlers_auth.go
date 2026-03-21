@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/karamble/diginode-cc/internal/auth"
+	"github.com/karamble/diginode-cc/internal/permissions"
+	"github.com/karamble/diginode-cc/internal/users"
 )
 
 // --- Request types ---
@@ -308,4 +312,269 @@ func (s *Server) handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 		"status":  "ok",
 		"message": "2FA enabled successfully",
 	})
+}
+
+// handleLegalAck marks the current user as having accepted the Terms of Service.
+func (s *Server) handleLegalAck(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	// Accept empty body or {}
+	_ = readJSON(r, &struct{}{})
+
+	if err := s.svc.Users.AcceptTOS(r.Context(), claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to accept terms of service")
+		return
+	}
+
+	// Return updated user
+	user, err := s.svc.Auth.GetUser(r.Context(), claims.UserID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, "user not found")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, buildUserResponse(user))
+}
+
+// handle2FAConfirm confirms 2FA setup by validating a code against the temp secret.
+// This is an alias for handle2FAVerify — VerifyTOTP already validates the code and enables 2FA.
+func (s *Server) handle2FAConfirm(w http.ResponseWriter, r *http.Request) {
+	s.handle2FAVerify(w, r)
+}
+
+// handle2FADisable disables 2FA for the current user after verifying a TOTP code or password.
+func (s *Server) handle2FADisable(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	var req struct {
+		Code     string `json:"code"`
+		Password string `json:"password"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	// Must provide either TOTP code or password
+	if req.Code == "" && req.Password == "" {
+		writeError(w, http.StatusBadRequest, "code or password is required")
+		return
+	}
+
+	// Verify via TOTP code if provided (validate only, don't enable)
+	if req.Code != "" {
+		err := s.svc.Auth.ValidateTOTP(r.Context(), claims.UserID, req.Code)
+		if err != nil {
+			if errors.Is(err, auth.ErrInvalidTOTP) {
+				writeError(w, http.StatusUnauthorized, "invalid 2FA code")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "verification failed")
+			return
+		}
+	} else {
+		// Verify via password
+		err := s.svc.Auth.VerifyPassword(r.Context(), claims.UserID, req.Password)
+		if err != nil {
+			if errors.Is(err, auth.ErrInvalidCredentials) {
+				writeError(w, http.StatusUnauthorized, "invalid password")
+				return
+			}
+			writeError(w, http.StatusInternalServerError, "verification failed")
+			return
+		}
+	}
+
+	if err := s.svc.Auth.DisableTOTP(r.Context(), claims.UserID); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to disable 2FA")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":  "ok",
+		"message": "2FA disabled successfully",
+	})
+}
+
+// handle2FARecoveryRegenerate generates new recovery codes for the current user.
+func (s *Server) handle2FARecoveryRegenerate(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	codes, err := s.svc.Auth.RegenerateRecoveryCodes(r.Context(), claims.UserID)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":        "ok",
+		"recoveryCodes": codes,
+	})
+}
+
+// handleUnlockUser clears the lockout state for a user (admin only).
+func (s *Server) handleUnlockUser(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	if err := s.svc.Auth.UnlockUser(r.Context(), id); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to unlock user")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "user unlocked"})
+}
+
+// handleUpdateUserPermissions sets feature-level permissions for a user.
+func (s *Server) handleUpdateUserPermissions(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var body struct {
+		Features []string `json:"features"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	features := make([]permissions.Feature, len(body.Features))
+	for i, f := range body.Features {
+		features[i] = permissions.Feature(f)
+	}
+
+	if err := s.svc.Permissions.SetUserFeatures(r.Context(), id, features); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update permissions")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleUpdateUserSites sets site access for a user.
+func (s *Server) handleUpdateUserSites(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	var body struct {
+		SiteAccess []users.SiteAccess `json:"siteAccess"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := s.svc.Users.SetSiteAccess(r.Context(), id, body.SiteAccess); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to update site access")
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleAdminPasswordReset triggers a password reset for a user (admin action).
+func (s *Server) handleAdminPasswordReset(w http.ResponseWriter, r *http.Request) {
+	claims := auth.GetClaims(r.Context())
+	if claims == nil {
+		writeError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+	if claims.Role != auth.RoleAdmin {
+		writeError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+
+	token, err := s.svc.Auth.GeneratePasswordResetToken(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, auth.ErrUserNotFound) {
+			writeError(w, http.StatusNotFound, "user not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to generate reset token")
+		return
+	}
+
+	// Build reset URL
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		host = r.Host
+	}
+	scheme := "https"
+	if r.TLS == nil {
+		scheme = "http"
+	}
+	resetURL := fmt.Sprintf("%s://%s/reset-password?token=%s", scheme, host, token)
+
+	// Send email if configured
+	if s.svc.Mail != nil && s.svc.Mail.IsConfigured() {
+		// Look up the target user's email
+		targetUser, err := s.svc.Auth.GetUser(r.Context(), id)
+		if err == nil {
+			adminName := "An administrator"
+			adminUser, err := s.svc.Auth.GetUser(r.Context(), claims.UserID)
+			if err == nil && adminUser.Name != "" {
+				adminName = adminUser.Name
+			}
+			go func() {
+				if err := s.svc.Mail.SendPasswordResetAdmin(targetUser.Email, resetURL, adminName); err != nil {
+					slog.Error("failed to send admin password reset email", "email", targetUser.Email, "error", err)
+				}
+			}()
+		}
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{
+		"status":   "ok",
+		"message":  "password reset initiated",
+		"resetUrl": resetURL,
+		"token":    token,
+	})
+}
+
+// handleGetUserAudit returns recent audit log entries for a user.
+func (s *Server) handleGetUserAudit(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+
+	limit := 50
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil {
+			limit = parsed
+		}
+	}
+
+	entries, err := s.svc.Users.GetAuditLogs(r.Context(), id, limit)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to fetch audit logs")
+		return
+	}
+
+	if entries == nil {
+		entries = []*users.AuditEntry{}
+	}
+
+	writeJSON(w, http.StatusOK, entries)
 }

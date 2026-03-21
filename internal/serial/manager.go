@@ -220,6 +220,14 @@ func (m *Manager) AddTextMessage(nodeID, message, siteID string) {
 	}
 }
 
+// ClearTextMessages removes all messages from the ring buffer.
+func (m *Manager) ClearTextMessages() {
+	m.textMu.Lock()
+	defer m.textMu.Unlock()
+	m.textMessages = nil
+	m.textSeq = 0
+}
+
 // GetTextMessages returns messages with seq > sinceSeq.
 func (m *Manager) GetTextMessages(sinceSeq int64) []TextMessage {
 	m.textMu.RLock()

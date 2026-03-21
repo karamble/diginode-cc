@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/alarms"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/auth"
@@ -22,11 +23,13 @@ import (
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
+	"github.com/karamble/diginode-cc/internal/mqtt"
 	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/permissions"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
 	"github.com/karamble/diginode-cc/internal/targets"
+	"github.com/karamble/diginode-cc/internal/updates"
 	"github.com/karamble/diginode-cc/internal/users"
 	"github.com/karamble/diginode-cc/internal/webhooks"
 	"github.com/karamble/diginode-cc/internal/ws"
@@ -53,6 +56,9 @@ type Services struct {
 	Mail      *mail.Service
 	AppCfg      *config.AppConfig
 	Permissions *permissions.Service
+	ADSB        *adsb.Service
+	MQTT        *mqtt.Service
+	Updates     *updates.Service
 }
 
 // Server is the HTTP API server.
@@ -122,18 +128,28 @@ func (s *Server) setupRoutes() chi.Router {
 			// Auth
 			r.Post("/auth/logout", s.handleLogout)
 			r.Get("/auth/me", s.handleMe)
+			r.Post("/auth/legal-ack", s.handleLegalAck)
 			r.Post("/auth/2fa/setup", s.handle2FASetup)
 			r.Post("/auth/2fa/verify", s.handle2FAVerify)
+			r.Post("/auth/2fa/confirm", s.handle2FAConfirm)
+			r.Post("/auth/2fa/disable", s.handle2FADisable)
+			r.Post("/auth/2fa/recovery/regenerate", s.handle2FARecoveryRegenerate)
 
 			// Users
 			r.Route("/users", func(r chi.Router) {
+				r.Get("/me", s.handleMe) // Alias for /auth/me
 				r.Get("/", s.handleListUsers)
 				r.Post("/", s.handleCreateUser)
+				r.Get("/features", s.handleListFeatures)
+				r.Post("/invite", s.handleInviteUser)
 				r.Get("/{id}", s.handleGetUser)
 				r.Put("/{id}", s.handleUpdateUser)
 				r.Delete("/{id}", s.handleDeleteUser)
-				r.Post("/invite", s.handleInviteUser)
-				r.Get("/features", s.handleListFeatures)
+				r.Post("/{id}/unlock", s.handleUnlockUser)
+				r.Patch("/{id}/permissions", s.handleUpdateUserPermissions)
+				r.Patch("/{id}/sites", s.handleUpdateUserSites)
+				r.Post("/{id}/password-reset", s.handleAdminPasswordReset)
+				r.Get("/{id}/audit", s.handleGetUserAudit)
 			})
 
 			// Sites
@@ -148,6 +164,7 @@ func (s *Server) setupRoutes() chi.Router {
 			// Nodes
 			r.Route("/nodes", func(r chi.Router) {
 				r.Get("/", s.handleListNodes)
+				r.Post("/clear", s.handleClearNodes)
 				r.Get("/{id}", s.handleGetNode)
 				r.Get("/{id}/positions", s.handleGetNodePositions)
 				r.Put("/{id}", s.handleUpdateNode)
@@ -157,6 +174,7 @@ func (s *Server) setupRoutes() chi.Router {
 			// Drones
 			r.Route("/drones", func(r chi.Router) {
 				r.Get("/", s.handleListDrones)
+				r.Post("/clear", s.handleClearDrones)
 				r.Get("/{id}", s.handleGetDrone)
 				r.Put("/{id}/status", s.handleUpdateDroneStatus)
 				r.Get("/{id}/detections", s.handleGetDroneDetections)
@@ -175,6 +193,7 @@ func (s *Server) setupRoutes() chi.Router {
 			r.Route("/chat", func(r chi.Router) {
 				r.Get("/messages", s.handleGetChatMessages)
 				r.Post("/send", s.handleSendChatMessage)
+				r.Delete("/messages", s.handleClearChatMessages)
 			})
 
 			// Alerts
@@ -199,14 +218,18 @@ func (s *Server) setupRoutes() chi.Router {
 			r.Route("/targets", func(r chi.Router) {
 				r.Get("/", s.handleListTargets)
 				r.Post("/", s.handleCreateTarget)
+				r.Post("/clear", s.handleClearTargets)
 				r.Put("/{id}", s.handleUpdateTarget)
 				r.Delete("/{id}", s.handleDeleteTarget)
 				r.Get("/{id}/positions", s.handleGetTargetPositions)
+				r.Post("/{id}/resolve", s.handleResolveTarget)
 			})
 
 			// Inventory
 			r.Route("/inventory", func(r chi.Router) {
 				r.Get("/", s.handleListInventory)
+				r.Post("/clear", s.handleClearInventory)
+				r.Post("/{mac}/promote", s.handlePromoteToTarget)
 				r.Put("/{id}", s.handleUpdateInventoryDevice)
 			})
 
@@ -233,19 +256,29 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/", s.handleCreateAlarm)
 				r.Put("/{id}", s.handleUpdateAlarm)
 				r.Delete("/{id}", s.handleDeleteAlarm)
+				r.Post("/sounds/{level}", s.handleUploadAlarmSound)
+				r.Delete("/sounds/{level}", s.handleDeleteAlarmSound)
 			})
 
 			// Firewall
 			r.Route("/firewall", func(r chi.Router) {
+				r.Get("/", s.handleFirewallStatus)
+				r.Put("/", s.handleUpdateFirewallConfig)
 				r.Get("/rules", s.handleListFirewallRules)
 				r.Post("/rules", s.handleCreateFirewallRule)
 				r.Delete("/rules/{id}", s.handleDeleteFirewallRule)
+				r.Get("/jailed", s.handleListJailedIPs)
+				r.Delete("/jailed/{id}", s.handleUnjailIP)
+				r.Get("/logs", s.handleFirewallLogs)
 			})
 
 			// FAA
 			r.Route("/faa", func(r chi.Router) {
 				r.Get("/lookup/{serial}", s.handleFAALookup)
 				r.Post("/import", s.handleFAAImport)
+				r.Get("/status", s.handleFAAStatus)
+				r.Post("/sync", s.handleFAASync)
+				r.Post("/upload", s.handleFAAUpload)
 			})
 
 			// Exports
@@ -253,16 +286,19 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/drones", s.handleExportDrones)
 				r.Get("/nodes", s.handleExportNodes)
 				r.Get("/alerts", s.handleExportAlerts)
+				r.Get("/{type}", s.handleExportByType)
 			})
 
 			// Serial
 			r.Route("/serial", func(r chi.Router) {
+				r.Get("/ports", s.handleListSerialPorts)
 				r.Get("/status", s.handleSerialStatus)
 				r.Get("/state", s.handleSerialStatus) // CC PRO compat alias
 				r.Get("/text-messages", s.handleGetTextMessages)
 				r.Get("/device-time", s.handleGetDeviceTime)
 				r.Get("/config", s.handleGetSerialConfig)
 				r.Put("/config", s.handleUpdateSerialConfig)
+				r.Post("/config/reset", s.handleResetSerialConfig)
 				r.Post("/connect", s.handleSerialConnect)
 				r.Post("/disconnect", s.handleSerialDisconnect)
 				r.Post("/text-message", s.handleSendSerialTextMessage)
@@ -273,6 +309,40 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/bluetooth-config", s.handleSendSerialBluetoothConfig)
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/simulate", s.handleSerialSimulate)
+			})
+
+			// ADS-B
+			r.Route("/adsb", func(r chi.Router) {
+				r.Get("/status", s.handleADSBStatus)
+				r.Get("/tracks", s.handleADSBTracks)
+				r.Get("/config", s.handleGetADSBConfig)
+				r.Put("/config", s.handleUpdateADSBConfig)
+				r.Get("/log", s.handleADSBLog)
+				r.Post("/database/upload", s.handleADSBDatabaseUpload)
+				r.Get("/alerts/rules", s.handleListADSBAlertRules)
+				r.Post("/alerts/rules", s.handleCreateADSBAlertRule)
+				r.Put("/alerts/rules/{id}", s.handleUpdateADSBAlertRule)
+				r.Delete("/alerts/rules/{id}", s.handleDeleteADSBAlertRule)
+			})
+
+			// MQTT
+			r.Route("/mqtt", func(r chi.Router) {
+				r.Get("/sites", s.handleListMQTTSites)
+				r.Put("/sites/{siteId}", s.handleUpdateMQTTSite)
+				r.Get("/sites-status", s.handleMQTTSitesStatus)
+				r.Post("/sites/{siteId}/test", s.handleTestMQTTSite)
+				r.Post("/sites/{siteId}/restart", s.handleRestartMQTTSite)
+				r.Get("/config", s.handleGetMQTTConfig)
+				r.Put("/config", s.handleUpdateMQTTConfig)
+			})
+
+			// Updates
+			r.Route("/updates", func(r chi.Router) {
+				r.Get("/check", s.handleCheckUpdate)
+				r.Get("/status", s.handleUpdateStatus)
+				r.Post("/trigger", s.handleTriggerUpdate)
+				r.Get("/history", s.handleUpdateHistory)
+				r.Post("/rollback/{id}", s.handleRollbackUpdate)
 			})
 
 			// System

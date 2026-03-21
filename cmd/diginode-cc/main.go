@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/alarms"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/api"
@@ -26,11 +27,13 @@ import (
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
 	"github.com/karamble/diginode-cc/internal/meshtastic"
+	"github.com/karamble/diginode-cc/internal/mqtt"
 	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/permissions"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
 	"github.com/karamble/diginode-cc/internal/targets"
+	"github.com/karamble/diginode-cc/internal/updates"
 	"github.com/karamble/diginode-cc/internal/users"
 	"github.com/karamble/diginode-cc/internal/webhooks"
 	"github.com/karamble/diginode-cc/internal/ws"
@@ -102,6 +105,24 @@ func main() {
 	})
 	appCfg := config.NewAppConfig(db.Pool)
 
+	// ADS-B service (optional)
+	var adsbSvc *adsb.Service
+	if cfg.ADSBEnabled {
+		adsbSvc = adsb.NewService(hub, cfg.ADSBURL)
+	} else {
+		// Create a service with empty URL so handlers can still return empty data
+		adsbSvc = adsb.NewService(hub, "")
+	}
+
+	// MQTT service (optional)
+	var mqttSvc *mqtt.Service
+	if cfg.MQTTEnabled {
+		mqttSvc = mqtt.NewService(hub, cfg.MQTTBrokerURL, "local")
+	}
+
+	// Updates service
+	updatesSvc := updates.NewService(".")
+
 	// Wire Meshtastic dispatcher → domain services
 	dispatcher := meshtastic.NewDispatcher(hub)
 	dispatcher.SetNodeHandler(nodesSvc)
@@ -142,6 +163,18 @@ func main() {
 		slog.Info("no serial device configured, serial disabled")
 	}
 
+	// Start ADS-B poller
+	if cfg.ADSBEnabled {
+		go adsbSvc.Start(ctx)
+	}
+
+	// Start MQTT service
+	if mqttSvc != nil {
+		if err := mqttSvc.Start(); err != nil {
+			slog.Warn("failed to start MQTT service", "error", err)
+		}
+	}
+
 	// Bundle services for the API server
 	svc := &api.Services{
 		Auth:      authSvc,
@@ -163,6 +196,9 @@ func main() {
 		Mail:      mailSvc,
 		AppCfg:      appCfg,
 		Permissions: permsSvc,
+		ADSB:        adsbSvc,
+		MQTT:        mqttSvc,
+		Updates:     updatesSvc,
 	}
 
 	// HTTP server
@@ -194,6 +230,12 @@ func main() {
 	defer cancel()
 
 	serialMgr.Stop()
+	if cfg.ADSBEnabled {
+		adsbSvc.Stop()
+	}
+	if mqttSvc != nil {
+		mqttSvc.Stop()
+	}
 	hub.Stop()
 
 	if err := httpServer.Shutdown(shutdownCtx); err != nil {
