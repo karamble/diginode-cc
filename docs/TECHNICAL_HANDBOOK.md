@@ -2,18 +2,16 @@
 
 ## 1. Overview
 
-DigiNode CC (Command Center) is a standalone Go backend that replaces AntiHunter CC PRO (NestJS). It manages Meshtastic mesh network devices, drone detection, WiFi surveillance, geofencing, and multi-site operations. A single binary serves the REST API, WebSocket events, and embedded React frontend.
+DigiNode CC (Command Center) is a Go backend that manages Meshtastic mesh network devices, drone detection, WiFi surveillance, geofencing, and multi-site operations. A single binary serves the REST API, WebSocket events, and embedded React frontend.
 
 **Key metrics:**
 
-| | DigiNode CC | CC PRO |
-|--|-------------|--------|
-| Language | Go 1.23 | TypeScript (NestJS) |
-| LOC | ~12,000 | ~29,000 |
-| Docker containers | 2 (Go + PostgreSQL) | 4 (Node + Nginx + PostgreSQL + Prisma) |
-| Build time (ARM64) | ~30s | ~6min |
-| API routes | 165+ | 130+ |
-| Database | PostgreSQL 16 (pgx) | PostgreSQL 16 (Prisma) |
+| | |
+|--|-------------|
+| Language | Go 1.23 |
+| Docker containers | 2 (Go + PostgreSQL) |
+| API routes | 165+ |
+| Database | PostgreSQL 16 (pgx) |
 
 ---
 
@@ -635,7 +633,7 @@ services:
 ### Production (Raspberry Pi)
 
 1. Push image: `make docker-prod-push`
-2. Watchtower auto-updates hourly, or force: `curl -H 'Authorization: Bearer gotailme-update-token' localhost:8081/v1/update`
+2. Watchtower auto-updates hourly, or force-update via Watchtower HTTP API
 
 ---
 
@@ -655,19 +653,11 @@ github.com/eclipse/paho.mqtt.golang  # MQTT client
 
 ---
 
-## 14. gotailme Integration
+## 14. Service Token Authentication
 
-gotailme connects to DigiNode CC via REST polling (not WebSocket):
+External services can authenticate via service token instead of user login:
 
-| Operation | Endpoint | Interval |
-|-----------|----------|----------|
-| Login | `POST /api/auth/login` | Once |
-| Drone sync | `GET /api/drones` | 30s |
-| Text messages | `GET /api/serial/text-messages?sinceSeq=N` | 10s |
-| Device time | `GET /api/serial/device-time` | 5min |
-| Send alert | `POST /api/serial/text-alert` | On demand |
-| Send position | `POST /api/serial/position` | 30s |
-| Send battery | `POST /api/serial/device-metrics` | 30s |
-| Health check | `GET /healthz` | On connect |
-
-All responses use CC PRO-compatible field names and types for seamless backend replacement.
+- Set `CC_JWT_SECRET` environment variable on both DigiNode CC and the connecting service
+- Send `Authorization: Bearer <CC_JWT_SECRET>` — the auth middleware grants synthetic admin claims
+- No `/api/auth/login` roundtrip needed; user password changes don't break machine-to-machine connections
+- Username/password login remains available as a fallback
