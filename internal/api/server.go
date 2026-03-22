@@ -460,6 +460,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			"nodes":     s.svc.Nodes.GetAll(),
 			"drones":    s.svc.Drones.GetAll(),
 			"geofences": s.svc.Geofences.GetAll(),
+			"serial": map[string]interface{}{
+				"connected": s.serialMgr.IsConnected(),
+				"device":    s.cfg.SerialDevice,
+			},
 		},
 	}
 	data, err := json.Marshal(initPayload)

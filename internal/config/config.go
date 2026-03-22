@@ -52,7 +52,7 @@ func Load() (*Config, error) {
 		ListenAddr:   envOrDefault("LISTEN_ADDR", ":3000"),
 		JWTSecret:    envOrDefault("JWT_SECRET", ""),
 		DatabaseURL:  envOrDefault("DATABASE_URL", "postgres://diginode:diginode@localhost:5432/diginode?sslmode=disable"),
-		SerialDevice: envOrDefault("SERIAL_DEVICE", ""),
+		SerialDevice: envOrDefault("SERIAL_DEVICE", "/dev/lora"),
 		SerialBaud:   envOrDefaultInt("SERIAL_BAUD", 115200),
 		MQTTEnabled:  envOrDefaultBool("MQTT_ENABLED", false),
 		MQTTBrokerURL: envOrDefault("MQTT_BROKER_URL", "tcp://localhost:1883"),

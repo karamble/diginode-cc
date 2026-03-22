@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import wsClient from '../api/websocket'
@@ -32,41 +32,76 @@ const ROLE_BADGE: Record<string, string> = {
 export default function Header() {
   const location = useLocation()
   const { user, logout } = useAuthStore()
-  const [wsConnected, setWsConnected] = useState(false)
+  const [serialConnected, setSerialConnected] = useState(false)
+  const [heartbeat, setHeartbeat] = useState(false)
+  const localNodeNum = useRef<number | null>(null)
 
   useEffect(() => {
-    const onConnect = () => setWsConnected(true)
-    const onDisconnect = () => setWsConnected(false)
-
-    // Check initial state by listening for any init event
-    const onInit = () => setWsConnected(true)
-    wsClient.on('init', onInit)
-
-    // Poll connection state via a simple heuristic:
-    // we mark connected when we get any event, disconnected on a timer
-    const allEvents = [
-      'init', 'drone.telemetry', 'drone.status', 'drone.remove',
-      'node.update', 'node.remove', 'node.position',
-      'alert', 'chat.message', 'health',
-    ]
-    allEvents.forEach((evt) => wsClient.on(evt, onConnect))
-
-    // Heartbeat check: if no events for 35s, mark disconnected
+    // Heartbeat: track REMOTE mesh data activity only
     let timeout: ReturnType<typeof setTimeout>
-    const resetTimeout = () => {
+    const triggerHeartbeat = () => {
       clearTimeout(timeout)
-      setWsConnected(true)
-      timeout = setTimeout(onDisconnect, 35000)
+      setHeartbeat(true)
+      timeout = setTimeout(() => setHeartbeat(false), 35000)
     }
-    allEvents.forEach((evt) => wsClient.on(evt, resetTimeout))
+
+    // Track serial (Heltec) connection state from init + health events
+    const onInit = (payload: any) => {
+      if (payload?.serial?.connected !== undefined) {
+        setSerialConnected(payload.serial.connected)
+      }
+      // Cache the local gateway node number for heartbeat filtering
+      if (Array.isArray(payload?.nodes)) {
+        const local = payload.nodes.find((n: any) => n.isLocal)
+        if (local?.nodeNum) {
+          localNodeNum.current = local.nodeNum
+        }
+      }
+    }
+    const onHealth = (payload: any) => {
+      if (payload?.serial?.connected !== undefined) {
+        setSerialConnected(payload.serial.connected)
+      }
+    }
+    wsClient.on('init', onInit)
+    wsClient.on('health', onHealth)
+
+    // Node events: only from remote nodes (skip local gateway)
+    const onNodeEvent = (payload: any) => {
+      if (payload?.isLocal) return
+      if (localNodeNum.current && payload?.nodeNum === localNodeNum.current) return
+      triggerHeartbeat()
+    }
+    wsClient.on('node.update', onNodeEvent)
+    wsClient.on('node.remove', onNodeEvent)
+    wsClient.on('node.position', onNodeEvent)
+
+    // Chat: only from remote nodes
+    const onChat = (payload: any) => {
+      if (localNodeNum.current && payload?.fromNode === localNodeNum.current) return
+      triggerHeartbeat()
+    }
+    wsClient.on('chat.message', onChat)
+
+    // Drones and alerts: always count (external detections)
+    const onAlways = () => triggerHeartbeat()
+    wsClient.on('drone.telemetry', onAlways)
+    wsClient.on('drone.status', onAlways)
+    wsClient.on('drone.remove', onAlways)
+    wsClient.on('alert', onAlways)
 
     return () => {
       clearTimeout(timeout)
       wsClient.off('init', onInit)
-      allEvents.forEach((evt) => {
-        wsClient.off(evt, onConnect)
-        wsClient.off(evt, resetTimeout)
-      })
+      wsClient.off('health', onHealth)
+      wsClient.off('node.update', onNodeEvent)
+      wsClient.off('node.remove', onNodeEvent)
+      wsClient.off('node.position', onNodeEvent)
+      wsClient.off('chat.message', onChat)
+      wsClient.off('drone.telemetry', onAlways)
+      wsClient.off('drone.status', onAlways)
+      wsClient.off('drone.remove', onAlways)
+      wsClient.off('alert', onAlways)
     }
   }, [])
 
@@ -87,18 +122,37 @@ export default function Header() {
 
       {/* Right: connection status, user info, logout */}
       <div className="flex items-center gap-4">
-        {/* Connection status */}
-        <div className="flex items-center gap-1.5" title={wsConnected ? 'WebSocket connected' : 'WebSocket disconnected'}>
-          <span
-            className={`inline-block w-2 h-2 rounded-full ${
-              wsConnected
-                ? 'bg-status-friendly animate-pulse'
-                : 'bg-dark-600'
-            }`}
-          />
-          <span className="text-[10px] text-dark-500">
-            {wsConnected ? 'Live' : 'Offline'}
-          </span>
+        {/* Status indicators */}
+        <div className="flex items-center gap-3">
+          {/* Primary: Heltec serial connection */}
+          <div className="flex items-center gap-1.5" title={serialConnected ? 'Heltec LoRa connected' : 'Heltec LoRa disconnected'}>
+            <span
+              className={`inline-block w-2 h-2 rounded-full ${
+                serialConnected
+                  ? 'bg-status-friendly animate-pulse'
+                  : 'bg-dark-600'
+              }`}
+            />
+            <span className="text-[10px] text-dark-500">
+              {serialConnected ? 'Mesh Online' : 'Mesh Offline'}
+            </span>
+          </div>
+
+          {/* Secondary: remote mesh data activity (only when serial is connected) */}
+          {serialConnected && (
+            <div className="flex items-center gap-1" title={heartbeat ? 'Receiving data from remote mesh nodes' : 'Waiting for remote mesh data'}>
+              <span
+                className={`inline-block w-1.5 h-1.5 rounded-full ${
+                  heartbeat
+                    ? 'bg-blue-400 animate-pulse'
+                    : 'bg-dark-700'
+                }`}
+              />
+              <span className="text-[10px] text-dark-600">
+                {heartbeat ? 'Data' : 'Idle'}
+              </span>
+            </div>
+          )}
         </div>
 
         {/* User info */}

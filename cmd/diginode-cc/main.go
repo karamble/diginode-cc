@@ -180,16 +180,12 @@ func main() {
 	// Audit logging service
 	auditSvc := audit.NewService(db)
 
-	// Start serial manager
-	if cfg.SerialDevice != "" {
-		go func() {
-			if err := serialMgr.Start(); err != nil {
-				slog.Error("serial manager failed", "error", err)
-			}
-		}()
-	} else {
-		slog.Info("no serial device configured, serial disabled")
-	}
+	// Start serial manager (always runs; retries until device appears)
+	go func() {
+		if err := serialMgr.Start(); err != nil {
+			slog.Error("serial manager failed", "error", err)
+		}
+	}()
 
 	// Start ADS-B poller
 	if cfg.ADSBEnabled {
