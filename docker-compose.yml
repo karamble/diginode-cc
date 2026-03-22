@@ -9,7 +9,7 @@ services:
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U diginode"]
       interval: 5s
@@ -36,10 +36,9 @@ services:
       TAK_ENABLED: ${TAK_ENABLED:-false}
     ports:
       - "3000:3000"
-    devices:
-      - "${SERIAL_DEVICE:-/dev/null}:${SERIAL_DEVICE:-/dev/null}"
-    group_add:
-      - dialout
+    privileged: true
+    volumes:
+      - /dev:/dev
 
 volumes:
   pgdata:

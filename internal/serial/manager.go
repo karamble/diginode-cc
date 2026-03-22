@@ -3,7 +3,9 @@ package serial
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -88,6 +90,11 @@ func (m *Manager) IsConnected() bool {
 func (m *Manager) Start() error {
 	slog.Info("starting serial manager", "device", m.cfg.SerialDevice, "baud", m.cfg.SerialBaud)
 
+	// Log once if the device file doesn't exist yet (avoids noisy retries).
+	if _, err := os.Stat(m.cfg.SerialDevice); errors.Is(err, os.ErrNotExist) {
+		slog.Info("serial device not present, will retry when available", "device", m.cfg.SerialDevice)
+	}
+
 	baseDelay := 500 * time.Millisecond
 	maxDelay := 15 * time.Second
 	delay := baseDelay
@@ -101,7 +108,12 @@ func (m *Manager) Start() error {
 
 		err := m.connect()
 		if err != nil {
-			slog.Warn("serial connection failed, retrying", "error", err, "delay", delay)
+			// Quiet log for missing device file; warn only for unexpected errors.
+			if errors.Is(err, os.ErrNotExist) {
+				slog.Debug("serial device not present, retrying", "device", m.cfg.SerialDevice, "delay", delay)
+			} else {
+				slog.Warn("serial connection failed, retrying", "error", err, "delay", delay)
+			}
 			select {
 			case <-time.After(delay):
 				// Exponential backoff with jitter
@@ -140,6 +152,7 @@ func (m *Manager) Start() error {
 		m.mu.Unlock()
 
 		slog.Warn("serial connection lost, reconnecting", "delay", delay)
+		m.broadcastSerialState(false)
 		select {
 		case <-time.After(delay):
 			delay = time.Duration(float64(delay) * 1.5)
@@ -152,7 +165,7 @@ func (m *Manager) Start() error {
 	}
 }
 
-// Stop shuts down the serial manager.
+// Stop shuts down the serial manager. The manager can be restarted via Start().
 func (m *Manager) Stop() {
 	close(m.stopCh)
 	m.mu.Lock()
@@ -162,6 +175,25 @@ func (m *Manager) Stop() {
 		m.port = nil
 	}
 	m.connected = false
+	// Recreate stopCh so Start() can be called again (e.g., via POST /serial/connect).
+	m.stopCh = make(chan struct{})
+}
+
+// broadcastSerialState sends a health event to all WebSocket clients
+// so the frontend can update the serial connection indicator.
+func (m *Manager) broadcastSerialState(connected bool) {
+	if m.hub == nil {
+		return
+	}
+	m.hub.Broadcast(ws.Event{
+		Type: ws.EventHealth,
+		Payload: map[string]any{
+			"serial": map[string]any{
+				"connected": connected,
+				"device":    m.cfg.SerialDevice,
+			},
+		},
+	})
 }
 
 func (m *Manager) connect() error {
@@ -183,6 +215,9 @@ func (m *Manager) connect() error {
 	m.mu.Unlock()
 
 	slog.Info("serial port connected", "device", m.cfg.SerialDevice, "protocol", m.protocol)
+
+	// Notify frontend of serial connection state change.
+	m.broadcastSerialState(true)
 
 	// Send wantConfig to activate the Meshtastic serial API session.
 	// Required for the firmware to process ToRadio packets (sending messages).
