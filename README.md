@@ -58,7 +58,7 @@ Command center for Meshtastic mesh networks. Manages nodes, drone detection, WiF
 
 ## Quick Start
 
-### Docker Compose (recommended)
+### Docker Compose
 
 ```bash
 docker compose up -d
@@ -69,6 +69,41 @@ Open `http://localhost:3000` and log in with:
 - **Password:** `admin`
 
 > Change the default credentials immediately after first login.
+
+### Without Docker
+
+Prerequisites: Go 1.23+, Node.js 20+, PostgreSQL 16
+
+```bash
+# 1. Start PostgreSQL (or use an existing instance)
+createdb diginode
+
+# 2. Build frontend + backend
+make all
+
+# 3. Run
+export JWT_SECRET="your-secret"
+export DATABASE_URL="postgres://user:pass@localhost:5432/diginode?sslmode=disable"
+make run
+```
+
+The server starts on `http://localhost:3000`, serving both the API and the built frontend.
+
+### Development (hot-reload)
+
+Run the Go backend and Vite dev server separately for live frontend reloading:
+
+```bash
+# Terminal 1 — Go backend on :3000
+export JWT_SECRET="dev-secret"
+export DATABASE_URL="postgres://diginode:diginode@localhost:5432/diginode?sslmode=disable"
+make build && ./diginode-cc
+
+# Terminal 2 — Vite dev server on :5173 (proxies /api and /ws to :3000)
+cd web && npm install && npm run dev
+```
+
+Open `http://localhost:5173` for hot-reloading frontend development. API calls and WebSocket connections are automatically proxied to the Go backend.
 
 ### Environment Variables
 
@@ -86,22 +121,17 @@ Open `http://localhost:3000` and log in with:
 
 See the [Technical Handbook](docs/TECHNICAL_HANDBOOK.md) for the full configuration reference including SMTP, GeoIP, and runtime AppConfig keys.
 
-## Building from Source
+## Building
 
-### Prerequisites
-
-- Go 1.23+
-- Node.js 20+
-- PostgreSQL 16
-
-### Build
+### Makefile Targets
 
 ```bash
-# Build frontend + backend
-make all
-
-# Run locally (requires PostgreSQL)
-make run
+make all                # Build frontend + backend
+make build              # Build Go binary only
+make build-frontend     # Build React frontend only
+make run                # Build + run locally
+make test               # Run Go tests
+make clean              # Remove binary + dist/
 ```
 
 ### Docker
