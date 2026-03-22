@@ -216,4 +216,4 @@ Connect to `GET /ws` with JWT token (query param `?token=` or `Authorization` he
 
 ## License
 
-Proprietary. All rights reserved.
+This project is licensed under the [ISC License](LICENSE).
