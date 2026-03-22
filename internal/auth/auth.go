@@ -61,18 +61,22 @@ type Claims struct {
 
 // Service handles authentication and user management.
 type Service struct {
-	db        *database.DB
-	jwtSecret []byte
+	db           *database.DB
+	jwtSecret    []byte
+	serviceToken string // shared secret for machine-to-machine auth (gotailme → DigiNode CC)
 }
 
 // DB returns the underlying database for direct queries (e.g., password reset tokens).
 func (s *Service) DB() *database.DB { return s.db }
 
 // NewService creates a new auth service.
+// The jwtSecret doubles as the service token for machine-to-machine auth,
+// allowing gotailme to authenticate without user credentials.
 func NewService(db *database.DB, jwtSecret string) *Service {
 	return &Service{
-		db:        db,
-		jwtSecret: []byte(jwtSecret),
+		db:           db,
+		jwtSecret:    []byte(jwtSecret),
+		serviceToken: jwtSecret,
 	}
 }
 

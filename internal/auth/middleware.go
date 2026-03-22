@@ -13,6 +13,9 @@ const (
 )
 
 // Middleware returns an HTTP middleware that validates JWT tokens.
+// It also accepts the shared service token (JWT_SECRET) for machine-to-machine
+// auth from gotailme, injecting synthetic admin claims so the request is treated
+// as a fully privileged service call.
 func (s *Service) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
@@ -27,7 +30,22 @@ func (s *Service) Middleware(next http.Handler) http.Handler {
 			return
 		}
 
-		claims, err := s.ValidateToken(parts[1])
+		token := parts[1]
+
+		// Check for service token (machine-to-machine auth from gotailme)
+		if s.serviceToken != "" && token == s.serviceToken {
+			claims := &Claims{
+				UserID: "service",
+				Email:  "service@diginode.cc",
+				Role:   RoleAdmin,
+			}
+			ctx := context.WithValue(r.Context(), claimsKey, claims)
+			next.ServeHTTP(w, r.WithContext(ctx))
+			return
+		}
+
+		// Normal JWT validation
+		claims, err := s.ValidateToken(token)
 		if err != nil {
 			http.Error(w, `{"error":"invalid or expired token"}`, http.StatusUnauthorized)
 			return
