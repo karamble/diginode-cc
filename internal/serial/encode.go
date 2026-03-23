@@ -220,6 +220,15 @@ func BuildAdminBluetoothConfig(enabled bool, mode uint32, fixedPin uint32) []byt
 	return buildToRadio(mp)
 }
 
+// BuildAdminNodedbReset builds a ToRadio containing an admin command to reset the node database.
+//   AdminMessage: field 100 = nodedb_reset (bool)
+func BuildAdminNodedbReset() []byte {
+	admin := encodeVarintField(100, 1) // nodedb_reset = true
+	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(BroadcastAddr, data)
+	return buildToRadio(mp)
+}
+
 // EncodeSFixed32Field is an exported wrapper for building protobuf sfixed32 fields.
 func EncodeSFixed32Field(fieldNum uint64, val int32) []byte {
 	return encodeSFixed32Field(fieldNum, val)

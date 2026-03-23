@@ -237,6 +237,16 @@ func (s *Server) handleSendSerialDisplayConfig(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]string{"status": "display config sent"})
 }
 
+func (s *Server) handleSendSerialNodedbReset(w http.ResponseWriter, r *http.Request) {
+	data := serial.BuildAdminNodedbReset()
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "nodedb reset sent"})
+}
+
 func (s *Server) handleSendSerialShutdown(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Seconds         uint32 `json:"seconds"`
