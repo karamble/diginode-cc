@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useRef } from 'react'
 import wsClient from '../api/websocket'
 import { useDronesStore, type Drone } from '../stores/dronesStore'
 import { useNodesStore, type MeshNode } from '../stores/nodesStore'
@@ -7,6 +7,7 @@ import { useAlertStore } from '../stores/alertStore'
 import { useChatStore } from '../stores/chatStore'
 import { useTargetStore } from '../stores/targetStore'
 import { useTerminalStore } from '../stores/terminalStore'
+import { useNotificationStore } from '../stores/notificationStore'
 import type { AlertEvent, ChatMessage, Geofence, Target } from '../types/api'
 
 /**
@@ -15,7 +16,12 @@ import type { AlertEvent, ChatMessage, Geofence, Target } from '../types/api'
  * Mount once in the authenticated section of App.tsx.
  */
 export function useWebSocketBridge() {
+  const seenDronesRef = useRef(new Set<string>())
+
   useEffect(() => {
+    const notify = useNotificationStore.getState().addNotification
+    const seenDrones = seenDronesRef.current
+
     const handlers: Record<string, (payload: unknown) => void> = {
       // Initial state snapshot
       'init': (payload) => {
@@ -30,8 +36,22 @@ export function useWebSocketBridge() {
 
       // Drone events
       'drone.telemetry': (p) => {
-        useDronesStore.getState().updateDrone(p as Partial<Drone> & { id: string })
+        const drone = p as Partial<Drone> & { id: string }
+        useDronesStore.getState().updateDrone(drone)
         useTerminalStore.getState().addEntry('drone.telemetry', p)
+
+        // Notify only on first sighting of a drone
+        if (drone.id && !seenDrones.has(drone.id)) {
+          seenDrones.add(drone.id)
+          const label = (drone as Record<string, unknown>).uasId || (drone as Record<string, unknown>).mac || drone.id
+          notify({
+            type: 'drone',
+            severity: 'alert',
+            title: 'New drone detected',
+            message: `Drone ${label}`,
+            timestamp: new Date().toISOString(),
+          })
+        }
       },
       'drone.status': (p) => {
         useDronesStore.getState().updateDrone(p as Partial<Drone> & { id: string })
@@ -60,8 +80,20 @@ export function useWebSocketBridge() {
 
       // Alert
       'alert': (p) => {
-        useAlertStore.getState().addEvent(p as AlertEvent)
+        const evt = p as AlertEvent
+        useAlertStore.getState().addEvent(evt)
         useTerminalStore.getState().addEntry('alert', p)
+        // Skip notification for geofence-sourced alerts (already notified via geofence.event)
+        const isGeofence = evt.title?.startsWith('Geofence breach:') || evt.data?.geofenceId
+        if (!isGeofence) {
+          notify({
+            type: 'alert',
+            severity: (evt.severity || 'alert').toLowerCase(),
+            title: evt.title || 'Alert',
+            message: evt.message || '',
+            timestamp: evt.createdAt || new Date().toISOString(),
+          })
+        }
       },
 
       // Chat
@@ -80,11 +112,34 @@ export function useWebSocketBridge() {
             useChatStore.getState().incrementUnread(peerNodeNum)
           }
         }
+
+        // Notify for remote messages (not sent by us)
+        if (msg.fromNode !== 0) {
+          const nodeHex = `!${msg.fromNode.toString(16).padStart(8, '0')}`
+          const preview = msg.text.length > 60 ? msg.text.slice(0, 57) + '...' : msg.text
+          notify({
+            type: 'chat',
+            severity: 'info',
+            title: isDM ? `DM from ${nodeHex}` : `Chat from ${nodeHex}`,
+            message: preview,
+            timestamp: msg.timestamp || new Date().toISOString(),
+          })
+        }
       },
 
       // Geofence
       'geofence.event': (p) => {
         useTerminalStore.getState().addEntry('geofence.event', p)
+        const data = p as Record<string, unknown>
+        const geofenceName = (data.geofence as Record<string, unknown>)?.name || data.geofenceName || 'Unknown'
+        const level = ((data.alarmLevel as string) || 'alert').toLowerCase()
+        notify({
+          type: 'geofence',
+          severity: level,
+          title: `Geofence: ${geofenceName}`,
+          message: (data.message as string) || `${data.entityType}/${data.entityId} entered geofence`,
+          timestamp: new Date().toISOString(),
+        })
       },
 
       // Target

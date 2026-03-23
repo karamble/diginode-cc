@@ -49,6 +49,7 @@ type Geofence struct {
 	AppliesToDrones  bool    `json:"appliesToDrones"`
 	AppliesToTargets bool    `json:"appliesToTargets"`
 	AppliesToDevices bool    `json:"appliesToDevices"`
+	NotifyWebhook    bool    `json:"notifyWebhook"`
 	SiteID           string  `json:"siteId,omitempty"`
 	OriginSiteID     string  `json:"originSiteId,omitempty"`
 }
@@ -77,7 +78,7 @@ func (s *Service) Load(ctx context.Context) error {
 			color, alarm_enabled, alarm_level, alarm_message,
 			trigger_on_entry, trigger_on_exit,
 			applies_to_adsb, applies_to_drones, applies_to_targets, applies_to_devices,
-			site_id, origin_site_id
+			notify_webhook, site_id, origin_site_id
 		FROM geofences WHERE enabled = true`)
 	if err != nil {
 		return err
@@ -96,7 +97,7 @@ func (s *Service) Load(ctx context.Context) error {
 			&color, &g.AlarmEnabled, &alarmLevel, &alarmMessage,
 			&g.TriggerOnEntry, &g.TriggerOnExit,
 			&g.AppliesToADSB, &g.AppliesToDrones, &g.AppliesToTargets, &g.AppliesToDevices,
-			&siteID, &originSiteID,
+			&g.NotifyWebhook, &siteID, &originSiteID,
 		); err != nil {
 			slog.Warn("failed to scan geofence row", "error", err)
 			continue
@@ -125,7 +126,7 @@ func (s *Service) CheckPoint(lat, lng float64, entityType string) []*Geofence {
 	pt := Point{Lat: lat, Lng: lng}
 
 	for _, g := range s.geofences {
-		if !g.Enabled {
+		if !g.Enabled || !g.AlarmEnabled {
 			continue
 		}
 		// Filter by entity type
@@ -198,14 +199,14 @@ func (s *Service) Create(ctx context.Context, g *Geofence) error {
 			color, alarm_enabled, alarm_level, alarm_message,
 			trigger_on_entry, trigger_on_exit,
 			applies_to_adsb, applies_to_drones, applies_to_targets, applies_to_devices,
-			site_id, origin_site_id)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+			notify_webhook, site_id, origin_site_id)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
 		RETURNING id`,
 		g.Name, g.Description, polygonJSON, string(g.Action), g.Enabled,
 		nullIfEmpty(g.Color), g.AlarmEnabled, nullIfEmpty(g.AlarmLevel), nullIfEmpty(g.AlarmMessage),
 		g.TriggerOnEntry, g.TriggerOnExit,
 		g.AppliesToADSB, g.AppliesToDrones, g.AppliesToTargets, g.AppliesToDevices,
-		nullIfEmpty(g.SiteID), nullIfEmpty(g.OriginSiteID),
+		g.NotifyWebhook, nullIfEmpty(g.SiteID), nullIfEmpty(g.OriginSiteID),
 	).Scan(&g.ID)
 	if err != nil {
 		return err
@@ -241,13 +242,13 @@ func (s *Service) Update(ctx context.Context, id string, g *Geofence) error {
 			color = $7, alarm_enabled = $8, alarm_level = $9, alarm_message = $10,
 			trigger_on_entry = $11, trigger_on_exit = $12,
 			applies_to_adsb = $13, applies_to_drones = $14, applies_to_targets = $15, applies_to_devices = $16,
-			site_id = $17, origin_site_id = $18
+			notify_webhook = $17, site_id = $18, origin_site_id = $19
 		WHERE id = $1`,
 		id, g.Name, g.Description, polygonJSON, string(g.Action), g.Enabled,
 		nullIfEmpty(g.Color), g.AlarmEnabled, nullIfEmpty(g.AlarmLevel), nullIfEmpty(g.AlarmMessage),
 		g.TriggerOnEntry, g.TriggerOnExit,
 		g.AppliesToADSB, g.AppliesToDrones, g.AppliesToTargets, g.AppliesToDevices,
-		nullIfEmpty(g.SiteID), nullIfEmpty(g.OriginSiteID),
+		g.NotifyWebhook, nullIfEmpty(g.SiteID), nullIfEmpty(g.OriginSiteID),
 	)
 	if err != nil {
 		return err
@@ -257,6 +258,13 @@ func (s *Service) Update(ctx context.Context, id string, g *Geofence) error {
 	s.geofences[id] = g
 	s.mu.Unlock()
 	return nil
+}
+
+// GetByID returns a single geofence by ID, or nil if not found.
+func (s *Service) GetByID(id string) *Geofence {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.geofences[id]
 }
 
 // GetAll returns all geofences.

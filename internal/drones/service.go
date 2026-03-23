@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +60,22 @@ type Drone struct {
 	LastSeen       time.Time              `json:"lastSeen"`
 }
 
+// GeofenceHit represents a triggered geofence with its alarm metadata.
+type GeofenceHit struct {
+	ID             string
+	Name           string
+	AlarmLevel     string
+	AlarmMessage   string
+	NotifyWebhook  bool
+}
+
+// GeofenceChecker tests a coordinate against active geofences and returns hits.
+// The drone service calls this on every telemetry update.
+type GeofenceChecker func(lat, lon float64, entityType string) []GeofenceHit
+
+// GeofenceNotifier broadcasts a geofence violation event.
+type GeofenceNotifier func(geofenceID, geofenceName, entityType, entityID string, lat, lon float64, alarmLevel, message string, notifyWebhook bool)
+
 // Service manages drone detection and tracking.
 type Service struct {
 	db          *database.DB
@@ -68,6 +85,11 @@ type Service struct {
 	nodeLookup  func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
 	onInventory func(mac, manufacturer, ssid string, rssi int)
 	faaLookup   func(ctx context.Context, serial string) (map[string]interface{}, error)
+
+	// Geofence integration
+	geofenceCheck  GeofenceChecker
+	geofenceNotify GeofenceNotifier
+	geofenceState  map[string]map[string]bool // droneKey → geofenceID → wasInside
 
 	// Persistence debouncing
 	persistQueue map[string]struct{} // keys pending persist
@@ -90,12 +112,23 @@ func (s *Service) SetFAALookup(fn func(ctx context.Context, serial string) (map[
 	s.faaLookup = fn
 }
 
+// SetGeofenceChecker sets the function to check drone coordinates against geofences.
+func (s *Service) SetGeofenceChecker(fn GeofenceChecker) {
+	s.geofenceCheck = fn
+}
+
+// SetGeofenceNotifier sets the function to broadcast geofence violation events.
+func (s *Service) SetGeofenceNotifier(fn GeofenceNotifier) {
+	s.geofenceNotify = fn
+}
+
 // NewService creates a new drone tracking service.
 func NewService(db *database.DB, hub *ws.Hub) *Service {
 	return &Service{
-		db:     db,
-		hub:    hub,
-		drones: make(map[string]*Drone),
+		db:            db,
+		hub:           hub,
+		drones:        make(map[string]*Drone),
+		geofenceState: make(map[string]map[string]bool),
 	}
 }
 
@@ -218,6 +251,11 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 		Payload: drone,
 	})
 
+	// Geofence evaluation
+	if s.geofenceCheck != nil && drone.Latitude != 0 && drone.Longitude != 0 {
+		s.evaluateGeofences(key, drone)
+	}
+
 	// FAA enrichment (async, only if no FAA data yet)
 	if s.faaLookup != nil && drone.FAAData == nil && drone.SerialNumber != "" {
 		go func() {
@@ -236,6 +274,67 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 
 	s.enqueuePersist(key)
 	go s.persistDetection(drone, detection)
+}
+
+// evaluateGeofences checks if a drone has entered or exited any geofence.
+// Tracks state transitions and fires notifications on enter/exit.
+// Must be called with s.mu held (Lock).
+func (s *Service) evaluateGeofences(droneKey string, drone *Drone) {
+	hits := s.geofenceCheck(drone.Latitude, drone.Longitude, "drone")
+
+	// Build set of currently-inside geofence IDs
+	nowInside := make(map[string]*GeofenceHit, len(hits))
+	for i := range hits {
+		nowInside[hits[i].ID] = &hits[i]
+	}
+
+	// Get previous state
+	prevState := s.geofenceState[droneKey]
+	if prevState == nil {
+		prevState = make(map[string]bool)
+	}
+
+	entityID := drone.UASID
+	if entityID == "" {
+		entityID = drone.MAC
+	}
+
+	// Check for entries (not previously inside, now inside)
+	for id, hit := range nowInside {
+		if !prevState[id] {
+			slog.Info("geofence breach: drone entered",
+				"drone", entityID,
+				"geofence", hit.Name,
+				"lat", drone.Latitude,
+				"lon", drone.Longitude)
+			if s.geofenceNotify != nil {
+				// Format the alarm message template
+				msg := strings.Replace(hit.AlarmMessage, "{entity}", "drone/"+entityID, 1)
+				msg = strings.Replace(msg, "{geofence}", hit.Name, 1)
+				if msg == "" {
+					msg = fmt.Sprintf("drone/%s entered geofence %s", entityID, hit.Name)
+				}
+				s.geofenceNotify(hit.ID, hit.Name, "drone", entityID,
+					drone.Latitude, drone.Longitude, hit.AlarmLevel, msg, hit.NotifyWebhook)
+			}
+		}
+	}
+
+	// Check for exits (previously inside, now not inside)
+	for id, wasInside := range prevState {
+		if wasInside && nowInside[id] == nil {
+			slog.Info("geofence: drone exited",
+				"drone", entityID,
+				"geofenceId", id)
+		}
+	}
+
+	// Update state
+	newState := make(map[string]bool, len(nowInside))
+	for id := range nowInside {
+		newState[id] = true
+	}
+	s.geofenceState[droneKey] = newState
 }
 
 // HandleDroneDetection implements DroneHandler for the dispatcher.

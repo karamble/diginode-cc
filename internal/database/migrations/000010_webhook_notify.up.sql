@@ -1,0 +1,2 @@
+ALTER TABLE geofences ADD COLUMN IF NOT EXISTS notify_webhook BOOLEAN DEFAULT false;
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS notify_webhook BOOLEAN DEFAULT false;

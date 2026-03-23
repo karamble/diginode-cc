@@ -276,7 +276,12 @@ func (s *Server) handleSendSerialShutdown(w http.ResponseWriter, r *http.Request
 
 func (s *Server) handleSerialSimulate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Type    string  `json:"type"`    // "text", "position", "telemetry", "drone"
+		// Lines mode (CC PRO compatible): raw text lines fed through the text parser.
+		// Used by drone simulators and dev tools.
+		Lines []string `json:"lines,omitempty"`
+
+		// Packet mode: build a synthetic FromRadio packet.
+		Type    string  `json:"type,omitempty"` // "text", "position"
 		From    uint32  `json:"from"`
 		To      uint32  `json:"to"`
 		Text    string  `json:"text,omitempty"`
@@ -290,8 +295,18 @@ func (s *Server) handleSerialSimulate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Lines mode: feed raw text through the text parser (CC PRO compatible)
+	if len(req.Lines) > 0 {
+		processed := s.serialMgr.SimulateLines(req.Lines)
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"status":    "simulated",
+			"processed": processed,
+		})
+		return
+	}
+
 	if req.Type == "" {
-		writeError(w, http.StatusBadRequest, "type is required (text, position, telemetry)")
+		writeError(w, http.StatusBadRequest, "type is required (text, position) or provide lines[]")
 		return
 	}
 

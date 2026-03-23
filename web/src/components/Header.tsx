@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useLocation } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
+import { useNotificationStore } from '../stores/notificationStore'
+import NotificationPanel from './NotificationPanel'
 import wsClient from '../api/websocket'
 
 const PAGE_TITLES: Record<string, string> = {
@@ -34,7 +36,9 @@ export default function Header() {
   const { user, logout } = useAuthStore()
   const [serialConnected, setSerialConnected] = useState(false)
   const [heartbeat, setHeartbeat] = useState(false)
+  const [showNotifications, setShowNotifications] = useState(false)
   const localNodeNum = useRef<number | null>(null)
+  const unreadCount = useNotificationStore((s) => s.unreadCount)
 
   useEffect(() => {
     // Heartbeat: track REMOTE mesh data activity only
@@ -152,6 +156,27 @@ export default function Header() {
                 {heartbeat ? 'Data' : 'Idle'}
               </span>
             </div>
+          )}
+        </div>
+
+        {/* Notification bell */}
+        <div className="relative">
+          <button
+            onClick={() => setShowNotifications((v) => !v)}
+            className="relative p-1.5 text-dark-400 hover:text-dark-200 hover:bg-dark-800/50 rounded transition-colors"
+            title="Notifications"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M14.857 17.082a23.848 23.848 0 005.454-1.31A8.967 8.967 0 0118 9.75v-.7V9A6 6 0 006 9v.75a8.967 8.967 0 01-2.312 6.022c1.733.64 3.56 1.085 5.455 1.31m5.714 0a24.255 24.255 0 01-5.714 0m5.714 0a3 3 0 11-5.714 0" />
+            </svg>
+            {unreadCount > 0 && (
+              <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 flex items-center justify-center text-[10px] font-bold text-white bg-red-500 rounded-full">
+                {unreadCount > 99 ? '99+' : unreadCount}
+              </span>
+            )}
+          </button>
+          {showNotifications && (
+            <NotificationPanel onClose={() => setShowNotifications(false)} />
           )}
         </div>
 
