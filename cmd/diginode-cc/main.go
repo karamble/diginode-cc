@@ -87,19 +87,24 @@ func main() {
 	inventorySvc := inventory.NewService(db, hub)
 	dronesSvc.SetInventoryCallback(inventorySvc.Track)
 	faaSvc := faa.NewService(db)
-	dronesSvc.SetFAALookup(func(ctx context.Context, serial string) (map[string]interface{}, error) {
-		entry, err := faaSvc.Lookup(ctx, serial)
-		if err != nil {
+	dronesSvc.SetFAALookup(func(ctx context.Context, droneID, mac, serial string) (map[string]interface{}, error) {
+		entry, err := faaSvc.LookupMultiKey(ctx, droneID, mac, serial)
+		if err != nil || entry == nil {
 			return nil, err
 		}
 		data := map[string]interface{}{
 			"serialNumber":    entry.SerialNumber,
 			"registration":    entry.Registration,
+			"nNumber":         entry.Registration,
 			"manufacturer":    entry.Manufacturer,
+			"makeName":        entry.Manufacturer,
 			"model":           entry.Model,
+			"modelName":       entry.Model,
 			"registrantName":  entry.RegistrantName,
 			"registrantCity":  entry.RegistrantCity,
 			"registrantState": entry.RegistrantState,
+			"fccIdentifier":   entry.FccIdentifier,
+			"modeSCodeHex":    entry.ModeSCodeHex,
 		}
 		return data, nil
 	})
@@ -211,7 +216,7 @@ func main() {
 	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {
 		// 1. Inventory upsert with OUI lookup
 		manufacturer := inventory.LookupOUI(mac)
-		inventorySvc.TrackFull(mac, manufacturer, ssid, deviceType, rssi, nodeID, lat, lon)
+		inventorySvc.TrackFull(mac, manufacturer, ssid, deviceType, rssi, nodeID, lat, lon, channel)
 
 		// 2. Alert rule evaluation
 		oui := ""
@@ -267,6 +272,12 @@ func main() {
 	}
 	if err := inventorySvc.Load(ctx); err != nil {
 		slog.Warn("failed to load inventory", "error", err)
+	}
+	// Load IEEE OUI database (try data/oui.csv, non-fatal if missing)
+	if n, err := inventory.LoadOUIFromFile("data/oui.csv"); err != nil {
+		slog.Warn("OUI database not loaded (run GET /api/oui/import to download)", "error", err)
+	} else {
+		slog.Info("OUI database loaded", "entries", n)
 	}
 	if err := targetsSvc.Load(ctx); err != nil {
 		slog.Warn("failed to load targets", "error", err)

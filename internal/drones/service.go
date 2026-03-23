@@ -84,7 +84,7 @@ type Service struct {
 	mu          sync.RWMutex
 	nodeLookup  func(nodeNum uint32) (nodeID, siteID string) // resolve mesh node → nodeID + siteID
 	onInventory func(mac, manufacturer, ssid string, rssi int)
-	faaLookup   func(ctx context.Context, serial string) (map[string]interface{}, error)
+	faaLookup   func(ctx context.Context, droneID, mac, serial string) (map[string]interface{}, error)
 
 	// Geofence integration
 	geofenceCheck  GeofenceChecker
@@ -108,7 +108,8 @@ func (s *Service) SetInventoryCallback(fn func(mac, manufacturer, ssid string, r
 }
 
 // SetFAALookup sets the function used to asynchronously enrich drones with FAA registry data.
-func (s *Service) SetFAALookup(fn func(ctx context.Context, serial string) (map[string]interface{}, error)) {
+// The lookup function receives droneID, MAC, and serial number for multi-key resolution.
+func (s *Service) SetFAALookup(fn func(ctx context.Context, droneID, mac, serial string) (map[string]interface{}, error)) {
 	s.faaLookup = fn
 }
 
@@ -130,6 +131,28 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 		drones:        make(map[string]*Drone),
 		geofenceState: make(map[string]map[string]bool),
 	}
+}
+
+// loadPersistedFAA checks if a drone MAC already has FAA data stored in the DB
+// from a previous detection. Returns the FAA data if found, avoiding redundant lookups.
+func (s *Service) loadPersistedFAA(ctx context.Context, mac string) map[string]interface{} {
+	if mac == "" {
+		return nil
+	}
+	var faaJSON []byte
+	err := s.db.Pool.QueryRow(ctx, `
+		SELECT faa_data FROM drones
+		WHERE mac = $1 AND faa_data IS NOT NULL
+		LIMIT 1`, mac).Scan(&faaJSON)
+	if err != nil || len(faaJSON) == 0 {
+		return nil
+	}
+	var data map[string]interface{}
+	if json.Unmarshal(faaJSON, &data) != nil {
+		return nil
+	}
+	slog.Debug("loaded persisted FAA data for drone", "mac", mac)
+	return data
 }
 
 // GetAll returns all tracked drones.
@@ -271,18 +294,44 @@ func (s *Service) HandleDetection(detection *DroneDetection) {
 		s.evaluateGeofences(key, drone)
 	}
 
-	// FAA enrichment (async, only if no FAA data yet)
-	if s.faaLookup != nil && drone.FAAData == nil && drone.SerialNumber != "" {
+	// FAA enrichment (async, multi-key: droneId, MAC, serial)
+	hasAnyKey := drone.SerialNumber != "" || drone.MAC != "" || drone.UASID != ""
+	if drone.FAAData == nil && hasAnyKey {
+		droneID := drone.UASID
+		mac := drone.MAC
+		serial := drone.SerialNumber
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
-			data, err := s.faaLookup(ctx, drone.SerialNumber)
+
+			// First check if we already have FAA data persisted from a prior detection
+			if data := s.loadPersistedFAA(ctx, mac); data != nil {
+				s.mu.Lock()
+				drone.FAAData = data
+				s.mu.Unlock()
+				s.hub.Broadcast(ws.Event{
+					Type:    ws.EventDroneTelemetry,
+					Payload: drone,
+				})
+				return
+			}
+
+			// Otherwise do a fresh lookup (offline DB + online API)
+			if s.faaLookup == nil {
+				return
+			}
+			data, err := s.faaLookup(ctx, droneID, mac, serial)
 			if err != nil || data == nil {
 				return
 			}
 			s.mu.Lock()
 			drone.FAAData = data
 			s.mu.Unlock()
+			// Re-broadcast with FAA data so frontend gets it immediately
+			s.hub.Broadcast(ws.Event{
+				Type:    ws.EventDroneTelemetry,
+				Payload: drone,
+			})
 			go s.persistDrone(drone)
 		}()
 	}
@@ -420,6 +469,7 @@ func (s *Service) persistDrone(drone *Drone) {
 			pilot_latitude = EXCLUDED.pilot_latitude,
 			pilot_longitude = EXCLUDED.pilot_longitude,
 			rssi = EXCLUDED.rssi,
+			faa_data = COALESCE(EXCLUDED.faa_data, drones.faa_data),
 			last_seen = EXCLUDED.last_seen,
 			updated_at = NOW()`,
 		drone.MAC, drone.SerialNumber, drone.UASID, drone.OperatorID, drone.UAType,
@@ -463,6 +513,61 @@ func (s *Service) flushPersistQueue() {
 		}
 	}
 	s.mu.RUnlock()
+}
+
+// DetectionRecord represents a stored drone detection for trail rendering.
+type DetectionRecord struct {
+	ID            string    `json:"id"`
+	MAC           string    `json:"mac,omitempty"`
+	SerialNumber  string    `json:"serialNumber,omitempty"`
+	Latitude      float64   `json:"lat"`
+	Longitude     float64   `json:"lon"`
+	Altitude      float64   `json:"altitude,omitempty"`
+	Speed         float64   `json:"speed,omitempty"`
+	Heading       float64   `json:"heading,omitempty"`
+	RSSI          int       `json:"rssi,omitempty"`
+	Source        string    `json:"source,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+}
+
+// GetDetections returns recent detection records for a given drone MAC or serial.
+func (s *Service) GetDetections(ctx context.Context, droneKey string, limit int) ([]DetectionRecord, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, mac, serial_number, latitude, longitude, altitude,
+			speed, heading, rssi, source, timestamp
+		FROM drone_detections
+		WHERE mac = $1 OR serial_number = $1
+		ORDER BY timestamp DESC
+		LIMIT $2`, droneKey, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var records []DetectionRecord
+	for rows.Next() {
+		var r DetectionRecord
+		var mac, serial, source *string
+		var lat, lon, alt, spd, hdg *float64
+		var rssi *int
+		if err := rows.Scan(&r.ID, &mac, &serial, &lat, &lon, &alt, &spd, &hdg, &rssi, &source, &r.Timestamp); err != nil {
+			continue
+		}
+		if mac != nil { r.MAC = *mac }
+		if serial != nil { r.SerialNumber = *serial }
+		if lat != nil { r.Latitude = *lat }
+		if lon != nil { r.Longitude = *lon }
+		if alt != nil { r.Altitude = *alt }
+		if spd != nil { r.Speed = *spd }
+		if hdg != nil { r.Heading = *hdg }
+		if rssi != nil { r.RSSI = *rssi }
+		if source != nil { r.Source = *source }
+		records = append(records, r)
+	}
+	return records, nil
 }
 
 // PruneDetections removes drone detection records older than the retention period.

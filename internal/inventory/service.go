@@ -13,24 +13,27 @@ import (
 
 // Device represents a WiFi device in the inventory.
 type Device struct {
-	ID           string    `json:"id"`
-	MAC          string    `json:"mac"`
-	Manufacturer string    `json:"manufacturer,omitempty"`
-	DeviceName   string    `json:"deviceName,omitempty"`
-	DeviceType   string    `json:"deviceType,omitempty"`
-	RSSI         int       `json:"rssi,omitempty"`
-	LastSSID     string    `json:"lastSsid,omitempty"`
-	FirstSeen    time.Time `json:"firstSeen"`
-	LastSeen     time.Time `json:"lastSeen"`
-	IsKnown      bool      `json:"isKnown"`
-	Notes        string    `json:"notes,omitempty"`
-	Hits         int       `json:"hits"`
-	MinRSSI      int       `json:"minRssi,omitempty"`
-	MaxRSSI      int       `json:"maxRssi,omitempty"`
-	AvgRSSI      float64   `json:"avgRssi,omitempty"`
-	LastNodeID   string    `json:"lastNodeId,omitempty"`
-	LastLat      float64   `json:"lastLat,omitempty"`
-	LastLon      float64   `json:"lastLon,omitempty"`
+	ID                  string    `json:"id"`
+	MAC                 string    `json:"mac"`
+	Manufacturer        string    `json:"manufacturer,omitempty"`
+	DeviceName          string    `json:"deviceName,omitempty"`
+	DeviceType          string    `json:"deviceType,omitempty"`
+	RSSI                int       `json:"rssi,omitempty"`
+	LastSSID            string    `json:"lastSsid,omitempty"`
+	FirstSeen           time.Time `json:"firstSeen"`
+	LastSeen            time.Time `json:"lastSeen"`
+	IsKnown             bool      `json:"isKnown"`
+	Notes               string    `json:"notes,omitempty"`
+	Hits                int       `json:"hits"`
+	MinRSSI             int       `json:"minRssi,omitempty"`
+	MaxRSSI             int       `json:"maxRssi,omitempty"`
+	AvgRSSI             float64   `json:"avgRssi,omitempty"`
+	LastNodeID          string    `json:"lastNodeId,omitempty"`
+	LastLat             float64   `json:"lastLat,omitempty"`
+	LastLon             float64   `json:"lastLon,omitempty"`
+	Channel             int       `json:"channel,omitempty"`
+	LocallyAdministered bool      `json:"locallyAdministered"`
+	Multicast           bool      `json:"multicast"`
 }
 
 // Service manages WiFi device inventory.
@@ -56,7 +59,8 @@ func (s *Service) Load(ctx context.Context) error {
 		SELECT mac, manufacturer, device_name, device_type, rssi, last_ssid,
 			first_seen, last_seen, is_known, notes, hits,
 			rssi_min, rssi_max, rssi_avg,
-			last_node_id, last_latitude, last_longitude
+			last_node_id, last_latitude, last_longitude,
+			channel, locally_administered, multicast
 		FROM inventory_devices`)
 	if err != nil {
 		return err
@@ -71,13 +75,15 @@ func (s *Service) Load(ctx context.Context) error {
 		var d Device
 		var manufacturer, deviceName, deviceType, lastSSID, notes, lastNodeID sql.NullString
 		var lastLat, lastLon sql.NullFloat64
-		var rssiMin, rssiMax sql.NullInt32
+		var rssiMin, rssiMax, channel sql.NullInt32
 		var avgRSSI sql.NullFloat64
+		var locallyAdmin, multicast sql.NullBool
 		if err := rows.Scan(
 			&d.MAC, &manufacturer, &deviceName, &deviceType, &d.RSSI, &lastSSID,
 			&d.FirstSeen, &d.LastSeen, &d.IsKnown, &notes, &d.Hits,
 			&rssiMin, &rssiMax, &avgRSSI,
 			&lastNodeID, &lastLat, &lastLon,
+			&channel, &locallyAdmin, &multicast,
 		); err != nil {
 			slog.Warn("failed to scan inventory device", "error", err)
 			continue
@@ -103,6 +109,15 @@ func (s *Service) Load(ctx context.Context) error {
 		if avgRSSI.Valid {
 			d.AvgRSSI = avgRSSI.Float64
 		}
+		if channel.Valid {
+			d.Channel = int(channel.Int32)
+		}
+		if locallyAdmin.Valid {
+			d.LocallyAdministered = locallyAdmin.Bool
+		}
+		if multicast.Valid {
+			d.Multicast = multicast.Bool
+		}
 		s.devices[d.MAC] = &d
 		count++
 	}
@@ -119,8 +134,10 @@ func (s *Service) Track(mac, manufacturer, ssid string, rssi int) {
 	dev, exists := s.devices[mac]
 	if !exists {
 		dev = &Device{
-			MAC:       mac,
-			FirstSeen: time.Now(),
+			MAC:                 mac,
+			FirstSeen:           time.Now(),
+			LocallyAdministered: IsLocallyAdministered(mac),
+			Multicast:           IsMulticast(mac),
 		}
 		s.devices[mac] = dev
 		slog.Debug("new inventory device", "mac", mac, "manufacturer", manufacturer)
@@ -155,15 +172,17 @@ func (s *Service) Track(mac, manufacturer, ssid string, rssi int) {
 }
 
 // TrackFull adds or updates a device with full detection data from mesh sensors.
-func (s *Service) TrackFull(mac, manufacturer, ssid, deviceType string, rssi int, nodeID string, lat, lon float64) {
+func (s *Service) TrackFull(mac, manufacturer, ssid, deviceType string, rssi int, nodeID string, lat, lon float64, channel ...int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	dev, exists := s.devices[mac]
 	if !exists {
 		dev = &Device{
-			MAC:       mac,
-			FirstSeen: time.Now(),
+			MAC:                 mac,
+			FirstSeen:           time.Now(),
+			LocallyAdministered: IsLocallyAdministered(mac),
+			Multicast:           IsMulticast(mac),
 		}
 		s.devices[mac] = dev
 		slog.Info("new inventory device", "mac", mac, "type", deviceType, "nodeId", nodeID)
@@ -184,6 +203,9 @@ func (s *Service) TrackFull(mac, manufacturer, ssid, deviceType string, rssi int
 	if lat != 0 && lon != 0 {
 		dev.LastLat = lat
 		dev.LastLon = lon
+	}
+	if len(channel) > 0 && channel[0] > 0 {
+		dev.Channel = channel[0]
 	}
 	dev.RSSI = rssi
 	dev.LastSeen = time.Now()
@@ -234,27 +256,15 @@ func (s *Service) ClearAll(ctx context.Context) error {
 	return err
 }
 
-// LookupOUI returns the manufacturer for a MAC prefix.
-func LookupOUI(mac string) string {
-	if len(mac) < 8 {
-		return ""
-	}
-	// OUI prefix is first 3 bytes (XX:XX:XX)
-	prefix := mac[:8]
-	if name, ok := ouiDB[prefix]; ok {
-		return name
-	}
-	return ""
-}
-
 func (s *Service) persist(dev *Device) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	_, err := s.db.Pool.Exec(ctx, `
 		INSERT INTO inventory_devices (mac, manufacturer, rssi, last_ssid, first_seen, last_seen,
-			hits, rssi_min, rssi_max, rssi_avg, last_node_id, last_latitude, last_longitude)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			hits, rssi_min, rssi_max, rssi_avg, last_node_id, last_latitude, last_longitude,
+			channel, locally_administered, multicast)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (mac) DO UPDATE SET
 			manufacturer = COALESCE(EXCLUDED.manufacturer, inventory_devices.manufacturer),
 			rssi = EXCLUDED.rssi,
@@ -266,10 +276,14 @@ func (s *Service) persist(dev *Device) {
 			rssi_avg = EXCLUDED.rssi_avg,
 			last_node_id = COALESCE(EXCLUDED.last_node_id, inventory_devices.last_node_id),
 			last_latitude = COALESCE(EXCLUDED.last_latitude, inventory_devices.last_latitude),
-			last_longitude = COALESCE(EXCLUDED.last_longitude, inventory_devices.last_longitude)`,
+			last_longitude = COALESCE(EXCLUDED.last_longitude, inventory_devices.last_longitude),
+			channel = COALESCE(EXCLUDED.channel, inventory_devices.channel),
+			locally_administered = EXCLUDED.locally_administered,
+			multicast = EXCLUDED.multicast`,
 		dev.MAC, dev.Manufacturer, dev.RSSI, dev.LastSSID, dev.FirstSeen, dev.LastSeen,
 		dev.Hits, dev.MinRSSI, dev.MaxRSSI, dev.AvgRSSI,
 		nilIfEmpty(dev.LastNodeID), nilIfZero(dev.LastLat), nilIfZero(dev.LastLon),
+		nilIfZero(float64(dev.Channel)), dev.LocallyAdministered, dev.Multicast,
 	)
 	if err != nil {
 		slog.Error("failed to persist inventory device", "mac", dev.MAC, "error", err)
@@ -312,19 +326,3 @@ func nilIfZero(f float64) interface{} {
 	return f
 }
 
-// GetOUIDB returns the OUI vendor database.
-func GetOUIDB() map[string]string {
-	return ouiDB
-}
-
-// Common OUI prefixes (top entries — full DB would be loaded from file)
-var ouiDB = map[string]string{
-	"00:17:88": "Philips Lighting",
-	"AC:23:3F": "Shenzhen Minew",
-	"DC:A6:32": "Raspberry Pi",
-	"B8:27:EB": "Raspberry Pi",
-	"E4:5F:01": "Raspberry Pi",
-	"48:1C:B9": "DJI",
-	"60:60:1F": "DJI",
-	"34:D2:62": "DJI",
-}
