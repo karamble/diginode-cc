@@ -41,12 +41,12 @@ export default function Header() {
   const unreadCount = useNotificationStore((s) => s.unreadCount)
 
   useEffect(() => {
-    // Heartbeat: track REMOTE mesh data activity only
+    // Heartbeat: brief blink on meaningful mesh data, then back to idle
     let timeout: ReturnType<typeof setTimeout>
     const triggerHeartbeat = () => {
       clearTimeout(timeout)
       setHeartbeat(true)
-      timeout = setTimeout(() => setHeartbeat(false), 35000)
+      timeout = setTimeout(() => setHeartbeat(false), 2000)
     }
 
     // Track serial (Heltec) connection state from init + health events
@@ -87,12 +87,14 @@ export default function Header() {
     }
     wsClient.on('chat.message', onChat)
 
-    // Drones and alerts: always count (external detections)
+    // Drones, alerts, inventory, targets: always blink (external detections)
     const onAlways = () => triggerHeartbeat()
     wsClient.on('drone.telemetry', onAlways)
     wsClient.on('drone.status', onAlways)
     wsClient.on('drone.remove', onAlways)
     wsClient.on('alert', onAlways)
+    wsClient.on('inventory.update', onAlways)
+    wsClient.on('target.update', onAlways)
 
     return () => {
       clearTimeout(timeout)
@@ -106,6 +108,8 @@ export default function Header() {
       wsClient.off('drone.status', onAlways)
       wsClient.off('drone.remove', onAlways)
       wsClient.off('alert', onAlways)
+      wsClient.off('inventory.update', onAlways)
+      wsClient.off('target.update', onAlways)
     }
   }, [])
 
