@@ -14,8 +14,8 @@ export const useTargetStore = create<TargetState>((set) => ({
   updateTarget: (t) =>
     set((s) => ({
       targets: s.targets.some((x) => x.id === t.id)
-        ? s.targets.map((x) => (x.id === t.id ? t : x))
-        : [...s.targets, t],
+        ? s.targets.map((x) => (x.id === t.id ? { ...t, lastDataAt: new Date().toISOString() } : x))
+        : [...s.targets, { ...t, lastDataAt: new Date().toISOString() }],
     })),
   removeTarget: (id) =>
     set((s) => ({

@@ -255,7 +255,8 @@ func (s *Service) EnsureTargetExists(ctx context.Context, mac, nodeID string) *T
 	t := &Target{
 		Name:        "Auto: " + mac,
 		MAC:         mac,
-		Status:      "active",
+		TargetType:  "wifi", // default; will be refined by detection data
+		Status:      "triangulating",
 		FirstNodeID: nodeID,
 		CreatedAt:   time.Now(),
 		UpdatedAt:   time.Now(),
