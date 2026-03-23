@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useCallback } from 'react'
 import api from '../api/client'
+import { useAuthStore } from '../stores/authStore'
 
 type ConfigMap = Record<string, unknown>
 
@@ -59,9 +60,13 @@ const categoryOrder = ['system', 'serial', 'detection', 'map', 'retention', 'aut
 
 export default function ConfigPage() {
   const queryClient = useQueryClient()
+  const { user } = useAuthStore()
+  const isAdmin = user?.role === 'ADMIN'
   const [editingKey, setEditingKey] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
   const [collapsedSections, setCollapsedSections] = useState<Record<string, boolean>>({})
+  const [pruneDays, setPruneDays] = useState('30')
+  const [pruneResult, setPruneResult] = useState<string | null>(null)
 
   const { data: config, isLoading, error } = useQuery<ConfigMap>({
     queryKey: ['config'],
@@ -244,6 +249,120 @@ export default function ConfigPage() {
           {updateMutation.isError && (
             <p className="text-sm text-red-400">Failed to update: {(updateMutation.error as Error).message}</p>
           )}
+        </div>
+      )}
+
+      {/* Data Management (ADMIN only) */}
+      {isAdmin && (
+        <div className="mt-8 space-y-4">
+          <h2 className="text-lg font-semibold text-dark-100">Data Management</h2>
+          <p className="text-sm text-dark-400 -mt-2">Database maintenance operations. These actions are irreversible.</p>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {/* Clear Detection Data */}
+            <div className="bg-surface rounded-lg border border-dark-700/50 p-4">
+              <h3 className="text-sm font-medium text-dark-200 mb-1">Clear Detection Data</h3>
+              <p className="text-xs text-dark-500 mb-3">
+                Remove all drones, targets, inventory devices, positions, and detection history.
+                Keeps config, users, alert rules, geofences, and webhooks.
+              </p>
+              <button
+                onClick={() => {
+                  if (confirm('Clear all detection data? This cannot be undone.')) {
+                    api.post('/admin/clear-detections').then(() => {
+                      queryClient.invalidateQueries()
+                      alert('Detection data cleared.')
+                    }).catch((e: Error) => alert('Failed: ' + e.message))
+                  }
+                }}
+                className="px-4 py-2 bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border border-orange-500/30 text-xs rounded font-medium transition-colors"
+              >
+                Clear Detections
+              </button>
+            </div>
+
+            {/* Clear All Operational Data */}
+            <div className="bg-surface rounded-lg border border-dark-700/50 p-4">
+              <h3 className="text-sm font-medium text-dark-200 mb-1">Clear Operational Data</h3>
+              <p className="text-xs text-dark-500 mb-3">
+                Remove all detection data plus chat messages, commands, alert events, and audit log.
+                Keeps users, config, rules, and geofences.
+              </p>
+              <button
+                onClick={() => {
+                  if (confirm('Clear ALL operational data? This cannot be undone.')) {
+                    api.post('/admin/clear-operational').then(() => {
+                      queryClient.invalidateQueries()
+                      alert('Operational data cleared.')
+                    }).catch((e: Error) => alert('Failed: ' + e.message))
+                  }
+                }}
+                className="px-4 py-2 bg-orange-600/20 hover:bg-orange-600/30 text-orange-400 border border-orange-500/30 text-xs rounded font-medium transition-colors"
+              >
+                Clear Operational Data
+              </button>
+            </div>
+
+            {/* Prune Old Data */}
+            <div className="bg-surface rounded-lg border border-dark-700/50 p-4">
+              <h3 className="text-sm font-medium text-dark-200 mb-1">Prune Old Data</h3>
+              <p className="text-xs text-dark-500 mb-3">
+                Delete detection history, positions, chat, commands, alerts, and audit records
+                older than the specified number of days.
+              </p>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={pruneDays}
+                  onChange={e => setPruneDays(e.target.value)}
+                  min="1" max="365"
+                  className="w-20 px-2 py-2 bg-dark-800 border border-dark-600 rounded text-sm text-dark-200 focus:outline-none focus:border-primary-500"
+                />
+                <span className="text-xs text-dark-500">days</span>
+                <button
+                  onClick={() => {
+                    const days = parseInt(pruneDays) || 30
+                    if (confirm(`Delete all records older than ${days} days?`)) {
+                      api.post('/admin/prune', { days }).then((r: unknown) => {
+                        const res = r as Record<string, unknown>
+                        setPruneResult(`Deleted ${res.deleted} records older than ${days} days`)
+                        queryClient.invalidateQueries()
+                      }).catch((e: Error) => alert('Failed: ' + e.message))
+                    }
+                  }}
+                  className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-dark-300 text-xs rounded font-medium transition-colors"
+                >
+                  Prune
+                </button>
+              </div>
+              {pruneResult && <p className="text-xs text-green-400 mt-2">{pruneResult}</p>}
+            </div>
+
+            {/* Factory Reset */}
+            <div className="bg-surface rounded-lg border border-red-700/30 p-4">
+              <h3 className="text-sm font-medium text-red-400 mb-1">Factory Reset</h3>
+              <p className="text-xs text-dark-500 mb-3">
+                Delete ALL data — users, sites, config, rules, detections, everything.
+                Re-seeds the default admin account (admin@example.com / admin).
+              </p>
+              <button
+                onClick={() => {
+                  if (confirm('FACTORY RESET: This will delete ALL data and cannot be undone. Continue?')) {
+                    if (confirm('Are you absolutely sure? Type OK in the next prompt.')) {
+                      api.post('/admin/factory-reset', { confirm: 'FACTORY_RESET' }).then(() => {
+                        alert('Factory reset complete. You will be logged out.')
+                        localStorage.removeItem('cc_token')
+                        window.location.href = '/'
+                      }).catch((e: Error) => alert('Failed: ' + e.message))
+                    }
+                  }
+                }}
+                className="px-4 py-2 bg-red-600/20 hover:bg-red-600/30 text-red-400 border border-red-500/30 text-xs rounded font-medium transition-colors"
+              >
+                Factory Reset
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>
