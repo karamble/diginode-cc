@@ -32,12 +32,13 @@ interface DroneRow {
 
 const STATUS_OPTIONS: DroneRow['status'][] = ['UNKNOWN', 'FRIENDLY', 'NEUTRAL', 'HOSTILE']
 
-function statusColor(s: string) {
+function statusColor(s: string, active = false) {
+  const suffix = active ? '-active' : ''
   switch (s) {
-    case 'HOSTILE': return 'badge-hostile'
-    case 'FRIENDLY': return 'badge-friendly'
-    case 'NEUTRAL': return 'badge-neutral'
-    default: return 'badge-unknown'
+    case 'HOSTILE': return `badge-hostile${suffix}`
+    case 'FRIENDLY': return `badge-friendly${suffix}`
+    case 'NEUTRAL': return `badge-neutral${suffix}`
+    default: return `badge-unknown${suffix}`
   }
 }
 
@@ -254,8 +255,8 @@ export default function DronesPage() {
                                   onClick={() => updateStatus.mutate({ id: d.id, status: s })}
                                   className={`px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
                                     d.status === s
-                                      ? statusColor(s) + ' ring-1 ring-current'
-                                      : 'bg-dark-700/50 text-dark-400 hover:bg-dark-700'
+                                      ? statusColor(s, true)
+                                      : 'bg-dark-700/50 text-dark-400 hover:bg-dark-700 border border-transparent'
                                   }`}
                                 >
                                   {s}

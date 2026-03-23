@@ -163,12 +163,27 @@ func (s *Service) GetByKey(key string) *Drone {
 	return s.drones[key]
 }
 
-// UpdateStatus changes a drone's status.
+// findByID looks up a drone by its UUID (iterates the map).
+func (s *Service) findByID(id string) (*Drone, string) {
+	for key, d := range s.drones {
+		if d.ID == id {
+			return d, key
+		}
+	}
+	return nil, ""
+}
+
+// UpdateStatus changes a drone's status. Accepts either the map key (MAC/serial) or UUID.
 func (s *Service) UpdateStatus(key string, status Status) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	drone, exists := s.drones[key]
+	if !exists {
+		// Try lookup by UUID
+		drone, _ = s.findByID(key)
+		exists = drone != nil
+	}
 	if !exists {
 		return ErrDroneNotFound
 	}

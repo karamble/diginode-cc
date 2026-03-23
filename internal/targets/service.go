@@ -54,6 +54,37 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 	}
 }
 
+// Load populates the in-memory cache from the database on startup.
+func (s *Service) Load(ctx context.Context) error {
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT id, name, description, target_type, mac, latitude, longitude, status, created_at, updated_at
+		FROM targets`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for rows.Next() {
+		var t Target
+		if err := rows.Scan(
+			&t.ID, &t.Name, &t.Description, &t.TargetType, &t.MAC,
+			&t.Latitude, &t.Longitude, &t.Status, &t.CreatedAt, &t.UpdatedAt,
+		); err != nil {
+			slog.Warn("failed to scan target", "error", err)
+			continue
+		}
+		s.targets[t.ID] = &t
+		count++
+	}
+
+	slog.Info("loaded targets", "count", count)
+	return nil
+}
+
 // GetAll returns all targets.
 func (s *Service) GetAll() []*Target {
 	s.mu.RLock()
