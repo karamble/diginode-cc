@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useState, useMemo } from 'react'
 import api from '../api/client'
 
 interface Device {
@@ -21,7 +21,13 @@ interface Device {
   lastNodeId?: string
   lastLat?: number
   lastLon?: number
+  channel?: number
+  locallyAdministered?: boolean
+  multicast?: boolean
 }
+
+type SortKey = 'mac' | 'manufacturer' | 'lastSsid' | 'deviceType' | 'rssi' | 'hits' | 'channel' | 'lastNodeId' | 'lastSeen' | 'firstSeen' | 'avgRssi' | 'minRssi' | 'maxRssi' | 'lastLat'
+type SortDir = 'asc' | 'desc'
 
 function RSSIBar({ rssi }: { rssi: number | undefined }) {
   if (rssi === undefined || rssi === 0) {
@@ -58,9 +64,17 @@ function formatDate(dateStr: string) {
   return d.toLocaleDateString()
 }
 
+function SortIcon({ active, dir }: { active: boolean; dir: SortDir }) {
+  if (!active) return <span className="text-dark-600 ml-1">&#x2195;</span>
+  return <span className="text-primary-400 ml-1">{dir === 'asc' ? '\u2191' : '\u2193'}</span>
+}
+
 export default function InventoryPage() {
   const queryClient = useQueryClient()
   const [promotedMAC, setPromotedMAC] = useState<string | null>(null)
+  const [search, setSearch] = useState('')
+  const [sortKey, setSortKey] = useState<SortKey>('lastSeen')
+  const [sortDir, setSortDir] = useState<SortDir>('desc')
 
   const { data: devices, isLoading, error } = useQuery<Device[]>({
     queryKey: ['inventory'],
@@ -83,10 +97,58 @@ export default function InventoryPage() {
     },
   })
 
-  // Sort by lastSeen descending
-  const sorted = devices ? [...devices].sort((a, b) =>
-    new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime()
-  ) : []
+  const handleSort = (key: SortKey) => {
+    if (sortKey === key) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc')
+    } else {
+      setSortKey(key)
+      setSortDir(key === 'lastSeen' || key === 'firstSeen' ? 'desc' : 'asc')
+    }
+  }
+
+  const filtered = useMemo(() => {
+    if (!devices) return []
+    const q = search.toLowerCase().trim()
+    if (!q) return devices
+    return devices.filter(d =>
+      d.mac.toLowerCase().includes(q) ||
+      (d.manufacturer || '').toLowerCase().includes(q) ||
+      (d.lastSsid || '').toLowerCase().includes(q) ||
+      (d.deviceName || '').toLowerCase().includes(q) ||
+      (d.deviceType || '').toLowerCase().includes(q) ||
+      (d.lastNodeId || '').toLowerCase().includes(q)
+    )
+  }, [devices, search])
+
+  const sorted = useMemo(() => {
+    const list = [...filtered]
+    const dir = sortDir === 'asc' ? 1 : -1
+
+    list.sort((a, b) => {
+      let cmp = 0
+      switch (sortKey) {
+        case 'mac': cmp = a.mac.localeCompare(b.mac); break
+        case 'manufacturer': cmp = (a.manufacturer || '').localeCompare(b.manufacturer || ''); break
+        case 'lastSsid': cmp = (a.lastSsid || a.deviceName || '').localeCompare(b.lastSsid || b.deviceName || ''); break
+        case 'deviceType': cmp = (a.deviceType || '').localeCompare(b.deviceType || ''); break
+        case 'rssi': cmp = (a.rssi || -999) - (b.rssi || -999); break
+        case 'avgRssi': cmp = (a.avgRssi || -999) - (b.avgRssi || -999); break
+        case 'minRssi': cmp = (a.minRssi || -999) - (b.minRssi || -999); break
+        case 'maxRssi': cmp = (a.maxRssi || -999) - (b.maxRssi || -999); break
+        case 'hits': cmp = a.hits - b.hits; break
+        case 'channel': cmp = (a.channel || 0) - (b.channel || 0); break
+        case 'lastNodeId': cmp = (a.lastNodeId || '').localeCompare(b.lastNodeId || ''); break
+        case 'lastLat': cmp = (a.lastLat || 0) - (b.lastLat || 0); break
+        case 'lastSeen': cmp = new Date(a.lastSeen).getTime() - new Date(b.lastSeen).getTime(); break
+        case 'firstSeen': cmp = new Date(a.firstSeen).getTime() - new Date(b.firstSeen).getTime(); break
+      }
+      return cmp * dir
+    })
+    return list
+  }, [filtered, sortKey, sortDir])
+
+  const thClass = "text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3 cursor-pointer select-none hover:text-dark-200 transition-colors whitespace-nowrap"
+  const thClassRight = "text-right text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3 cursor-pointer select-none hover:text-dark-200 transition-colors whitespace-nowrap"
 
   return (
     <div className="p-6">
@@ -95,20 +157,32 @@ export default function InventoryPage() {
           <h2 className="text-lg font-semibold text-dark-100">Device Inventory</h2>
           <p className="text-sm text-dark-400 mt-1">
             {sorted.length} device{sorted.length !== 1 ? 's' : ''} tracked
+            {devices && sorted.length !== devices.length && (
+              <span> (of {devices.length} total)</span>
+            )}
             {sorted.filter(d => d.isKnown).length > 0 && (
-              <span> ({sorted.filter(d => d.isKnown).length} known)</span>
+              <span> &middot; {sorted.filter(d => d.isKnown).length} known</span>
             )}
           </p>
         </div>
-        <button
-          onClick={() => {
-            if (confirm('Clear all inventory devices?')) clearMutation.mutate()
-          }}
-          disabled={clearMutation.isPending}
-          className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-dark-300 text-sm rounded font-medium transition-colors"
-        >
-          Clear All
-        </button>
+        <div className="flex items-center gap-3">
+          <input
+            type="text"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+            placeholder="Search MAC, manufacturer, SSID..."
+            className="px-3 py-2 bg-dark-800 border border-dark-600 rounded text-sm text-dark-200 placeholder-dark-500 focus:outline-none focus:border-primary-500 w-64"
+          />
+          <button
+            onClick={() => {
+              if (confirm('Clear all inventory devices?')) clearMutation.mutate()
+            }}
+            disabled={clearMutation.isPending}
+            className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-dark-300 text-sm rounded font-medium transition-colors"
+          >
+            Clear All
+          </button>
+        </div>
       </div>
 
       <div className="bg-surface rounded-lg border border-dark-700/50 overflow-hidden">
@@ -123,22 +197,45 @@ export default function InventoryPage() {
           </div>
         ) : sorted.length === 0 ? (
           <div className="p-8 text-center">
-            <p className="text-sm text-dark-400">No devices in inventory</p>
+            <p className="text-sm text-dark-400">
+              {search ? 'No devices match your search' : 'No devices in inventory'}
+            </p>
           </div>
         ) : (
           <div className="overflow-x-auto">
             <table className="w-full">
               <thead>
                 <tr className="border-b border-dark-700/50">
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">MAC</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Manufacturer</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Name/SSID</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Type</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">RSSI</th>
-                  <th className="text-right text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Hits</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Location</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Node</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Last Seen</th>
+                  <th className={thClass} onClick={() => handleSort('mac')}>
+                    MAC<SortIcon active={sortKey === 'mac'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('manufacturer')}>
+                    Manufacturer<SortIcon active={sortKey === 'manufacturer'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('lastSsid')}>
+                    Name/SSID<SortIcon active={sortKey === 'lastSsid'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('deviceType')}>
+                    Type<SortIcon active={sortKey === 'deviceType'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('channel')}>
+                    Ch<SortIcon active={sortKey === 'channel'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('rssi')}>
+                    RSSI<SortIcon active={sortKey === 'rssi'} dir={sortDir} />
+                  </th>
+                  <th className={thClassRight} onClick={() => handleSort('hits')}>
+                    Hits<SortIcon active={sortKey === 'hits'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('lastLat')}>
+                    Location<SortIcon active={sortKey === 'lastLat'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('lastNodeId')}>
+                    Node<SortIcon active={sortKey === 'lastNodeId'} dir={sortDir} />
+                  </th>
+                  <th className={thClass} onClick={() => handleSort('lastSeen')}>
+                    Last Seen<SortIcon active={sortKey === 'lastSeen'} dir={sortDir} />
+                  </th>
                   <th className="text-right text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Actions</th>
                 </tr>
               </thead>
@@ -147,13 +244,22 @@ export default function InventoryPage() {
                   <tr key={dev.mac} className="hover:bg-dark-800/30 transition-colors">
                     <td className="px-4 py-3">
                       <span className="text-sm text-dark-200 font-mono">{dev.mac}</span>
-                      {dev.deviceName && (
-                        <div className="text-xs text-dark-500 mt-0.5">{dev.deviceName}</div>
-                      )}
+                      <div className="flex gap-1 mt-0.5">
+                        {dev.locallyAdministered && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-yellow-500/20 text-yellow-400" title="Locally administered (randomized)">LA</span>
+                        )}
+                        {dev.multicast && (
+                          <span className="text-[10px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-400" title="Multicast address">MC</span>
+                        )}
+                        {dev.deviceName && (
+                          <span className="text-xs text-dark-500">{dev.deviceName}</span>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3 text-sm text-dark-300">{dev.manufacturer || '-'}</td>
                     <td className="px-4 py-3 text-sm text-dark-300 truncate max-w-[120px]">{dev.lastSsid || dev.deviceName || '-'}</td>
                     <td className="px-4 py-3 text-sm text-dark-300">{dev.deviceType || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-dark-400 font-mono">{dev.channel || '-'}</td>
                     <td className="px-4 py-3">
                       <RSSIBar rssi={dev.rssi} />
                     </td>

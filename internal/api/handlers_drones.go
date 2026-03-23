@@ -189,9 +189,15 @@ func (s *Server) handleDeleteDrone(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleGetDroneDetections returns detection history for a drone.
-// The drone service does not currently expose a detection query method,
-// so this returns an empty array as a placeholder.
 func (s *Server) handleGetDroneDetections(w http.ResponseWriter, r *http.Request) {
-	_ = chi.URLParam(r, "id") // acknowledge path param
-	writeJSON(w, http.StatusOK, []struct{}{})
+	id := chi.URLParam(r, "id")
+	records, err := s.svc.Drones.GetDetections(r.Context(), id, 80)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query detections")
+		return
+	}
+	if records == nil {
+		records = []drones.DetectionRecord{}
+	}
+	writeJSON(w, http.StatusOK, records)
 }

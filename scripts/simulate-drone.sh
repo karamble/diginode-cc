@@ -197,25 +197,32 @@ for d in $(seq 1 "$DRONE_COUNT"); do
       dist=$(distance_m "$drone_lat" "$drone_lon" "$TARGET_LAT" "$TARGET_LON")
       meters_per_step=$(python3 -c "print(f'{($SPEED_KMH * 1000.0 / 3600.0) * $INTERVAL:.1f}')")
 
-      # Bearing from drone to target
+      # Move toward target with zigzag (lateral oscillation)
       new_pos=$(python3 -c "
-import math
+import math, random
 lat1, lon1 = $drone_lat, $drone_lon
 lat2, lon2 = $TARGET_LAT, $TARGET_LON
+step_i = $i
 dlat = (lat2 - lat1) * 111320
 dlon = (lon2 - lon1) * 111320 * math.cos(math.radians((lat1 + lat2) / 2))
 dist = math.sqrt(dlat**2 + dlon**2)
-if dist < 20:
+if dist < 30:
     print(f'{lat2:.6f} {lon2:.6f}')
 else:
     step = min($meters_per_step, dist)
-    ratio = step / dist
-    # Add slight jitter for realism
-    import random
-    jlat = random.gauss(0, 0.000005)
-    jlon = random.gauss(0, 0.000005)
-    nlat = lat1 + (lat2 - lat1) * ratio + jlat
-    nlon = lon1 + (lon2 - lon1) * ratio + jlon
+    # Forward component (toward target)
+    fwd_ratio = step * 0.7 / dist
+    # Lateral zigzag: perpendicular to heading, alternating direction
+    # bearing to target
+    bearing = math.atan2(dlon, dlat)
+    # perpendicular offset oscillates with step number
+    zigzag_amplitude = min(80, dist * 0.12)  # meters, shrinks as drone gets close
+    lateral = zigzag_amplitude * math.sin(step_i * 1.3)  # oscillate
+    perp_bearing = bearing + math.pi / 2
+    lat_offset = lateral * math.cos(perp_bearing) / 111320
+    lon_offset = lateral * math.sin(perp_bearing) / (111320 * math.cos(math.radians(lat1)))
+    nlat = lat1 + (lat2 - lat1) * fwd_ratio + lat_offset + random.gauss(0, 0.000003)
+    nlon = lon1 + (lon2 - lon1) * fwd_ratio + lon_offset + random.gauss(0, 0.000003)
     print(f'{nlat:.6f} {nlon:.6f}')
 ")
       drone_lat=$(echo "$new_pos" | awk '{print $1}')

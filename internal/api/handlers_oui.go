@@ -8,9 +8,14 @@ import (
 )
 
 func (s *Server) handleOUIStats(w http.ResponseWriter, r *http.Request) {
+	count := inventory.GetOUICount()
+	source := "ieee-csv"
+	if count == 0 {
+		source = "none"
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"totalEntries": len(inventory.GetOUIDB()),
-		"source":       "embedded",
+		"totalEntries": count,
+		"source":       source,
 	})
 }
 
@@ -19,8 +24,18 @@ func (s *Server) handleOUICache(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOUIImport(w http.ResponseWriter, r *http.Request) {
-	// Accept CSV/TXT file with OUI mappings
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "OUI import not yet supported"})
+	n, err := inventory.LoadOUIFromFile("data/oui.csv")
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{
+			"status": "error",
+			"error":  err.Error(),
+		})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"entries": n,
+	})
 }
 
 func (s *Server) handleOUIExport(w http.ResponseWriter, r *http.Request) {

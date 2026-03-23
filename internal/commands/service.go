@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -39,10 +40,24 @@ type Command struct {
 	Status      CommandStatus          `json:"status"`
 	SentAt      *time.Time             `json:"sentAt,omitempty"`
 	AckedAt     *time.Time             `json:"ackedAt,omitempty"`
+	FinishedAt  *time.Time             `json:"finishedAt,omitempty"`
 	Result      map[string]interface{} `json:"result,omitempty"`
 	RetryCount  int                    `json:"retryCount"`
 	MaxRetries  int                    `json:"maxRetries"`
 	CreatedAt   time.Time              `json:"createdAt"`
+
+	// Structured command fields (CC PRO parity)
+	Target  string   `json:"target,omitempty"`  // @ALL, @NODE_22, etc.
+	Name    string   `json:"name,omitempty"`    // STATUS, SCAN_START, etc.
+	Params  []string `json:"params,omitempty"`  // command parameters
+	Line    string   `json:"line,omitempty"`    // formatted mesh text line
+
+	// ACK enrichment
+	AckKind   string `json:"ackKind,omitempty"`   // e.g. SCAN_ACK
+	AckStatus string `json:"ackStatus,omitempty"` // e.g. COMPLETE, ERROR
+	AckNode   string `json:"ackNode,omitempty"`   // node that sent ACK
+	ResultText string `json:"resultText,omitempty"`
+	ErrorText  string `json:"errorText,omitempty"`
 }
 
 // Service manages the command queue with rate limiting and ACK tracking.
@@ -109,6 +124,7 @@ func (s *Service) HandleACK(cmdID string, result map[string]interface{}) {
 	now := time.Now()
 	cmd.Status = StatusOK
 	cmd.AckedAt = &now
+	cmd.FinishedAt = &now
 	cmd.Result = result
 	delete(s.pending, cmdID)
 
@@ -120,6 +136,69 @@ func (s *Service) HandleACK(cmdID string, result map[string]interface{}) {
 	})
 
 	go s.persistCommand(cmd)
+}
+
+// HandleStructuredACK processes an ACK from a sensor node, matching by ACK type and target.
+func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result map[string]interface{}) {
+	cmdName, ok := ACKMap[ackKind]
+	if !ok {
+		slog.Debug("unknown ACK type", "ackKind", ackKind)
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Find the latest PENDING/SENT command matching this name + target
+	var match *Command
+	var matchKey string
+	for id, cmd := range s.pending {
+		if cmd.Name != cmdName && cmd.CommandType != cmdName {
+			continue
+		}
+		if cmd.Status != StatusPending && cmd.Status != StatusSent {
+			continue
+		}
+		if match == nil || cmd.CreatedAt.After(match.CreatedAt) {
+			match = cmd
+			matchKey = id
+		}
+	}
+
+	if match == nil {
+		slog.Debug("no pending command for ACK", "ackKind", ackKind, "cmdName", cmdName)
+		return
+	}
+
+	now := time.Now()
+	match.AckKind = ackKind
+	match.AckStatus = ackStatus
+	match.AckNode = ackNode
+
+	// Derive final status from ACK status
+	switch strings.ToUpper(ackStatus) {
+	case "COMPLETE", "STOPPED", "OK", "FINISHED", "SUCCESS":
+		match.Status = StatusOK
+	case "ERROR", "FAILED", "TIMEOUT":
+		match.Status = StatusError
+		match.ErrorText = ackStatus
+	default:
+		match.Status = StatusSent // keep as sent
+	}
+
+	match.AckedAt = &now
+	match.FinishedAt = &now
+	match.Result = result
+	delete(s.pending, matchKey)
+
+	slog.Info("structured ACK matched", "ackKind", ackKind, "cmdName", cmdName, "status", match.Status)
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventCommand,
+		Payload: match,
+	})
+
+	go s.persistCommand(match)
 }
 
 func (s *Service) send(cmd *Command) {
@@ -259,20 +338,39 @@ func (s *Service) persistCommand(cmd *Command) {
 
 	_, err := s.db.Pool.Exec(ctx, `
 		INSERT INTO commands (id, target_node, command_type, payload, status,
-			sent_at, acked_at, result, retry_count, max_retries, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW())
+			sent_at, acked_at, result, retry_count, max_retries, created_at, updated_at,
+			target, name, params, line, finished_at, ack_kind, ack_status, ack_node,
+			result_text, error_text)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, NOW(),
+			$12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
 		ON CONFLICT (id) DO UPDATE SET
 			status = EXCLUDED.status,
 			sent_at = EXCLUDED.sent_at,
 			acked_at = EXCLUDED.acked_at,
+			finished_at = EXCLUDED.finished_at,
 			result = EXCLUDED.result,
 			retry_count = EXCLUDED.retry_count,
+			ack_kind = EXCLUDED.ack_kind,
+			ack_status = EXCLUDED.ack_status,
+			ack_node = EXCLUDED.ack_node,
+			result_text = EXCLUDED.result_text,
+			error_text = EXCLUDED.error_text,
 			updated_at = NOW()`,
 		cmd.ID, cmd.TargetNode, cmd.CommandType, payloadJSON,
 		string(cmd.Status), cmd.SentAt, cmd.AckedAt, resultJSON,
 		cmd.RetryCount, cmd.MaxRetries, cmd.CreatedAt,
+		nilStr(cmd.Target), nilStr(cmd.Name), cmd.Params, nilStr(cmd.Line),
+		cmd.FinishedAt, nilStr(cmd.AckKind), nilStr(cmd.AckStatus), nilStr(cmd.AckNode),
+		nilStr(cmd.ResultText), nilStr(cmd.ErrorText),
 	)
 	if err != nil {
 		slog.Error("failed to persist command", "id", cmd.ID, "error", err)
 	}
+}
+
+func nilStr(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
