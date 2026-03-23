@@ -136,6 +136,7 @@ export interface Target {
   triangulationMethod?: string
   createdAt: string
   updatedAt: string
+  lastDataAt?: string
 }
 
 // Chat

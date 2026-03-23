@@ -1,6 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
-import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, CircleMarker, Polygon } from 'react-leaflet'
+import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, Polygon } from 'react-leaflet'
 import L from 'leaflet'
 import api from '../api/client'
 import { useDronesStore, type DroneStatus } from '../stores/dronesStore'
@@ -91,48 +91,8 @@ function statusBadgeClass(s: DroneStatus, active = false) {
   }
 }
 
-function droneIcon(status: DroneStatus) {
-  const color = STATUS_COLORS[status]
-  return L.divIcon({
-    className: 'custom-drone-icon',
-    html: `<div style="
-      width: 28px; height: 28px;
-      background: ${color}22;
-      border: 2px solid ${color};
-      border-radius: 50%;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 0 12px ${color}55;
-      animation: pulse 2s ease-in-out infinite;
-    ">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2">
-        <path d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2h6a2 2 0 002-2v-1a2 2 0 012-2h1.945M12 3v3m-4.243.757L6.343 5.343m11.314 1.414L16.243 5.343"/>
-      </svg>
-    </div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14],
-  })
-}
-
-function operatorIcon() {
-  return L.divIcon({
-    className: 'custom-operator-icon',
-    html: `<div style="
-      width: 22px; height: 22px;
-      background: #F5920022;
-      border: 2px solid #F59E0B;
-      border-radius: 4px;
-      display: flex; align-items: center; justify-content: center;
-    ">
-      <svg width="12" height="12" viewBox="0 0 24 24" fill="#F59E0B" stroke="none">
-        <path d="M12 12c2.21 0 4-1.79 4-4s-1.79-4-4-4-4 1.79-4 4 1.79 4 4 4zm0 2c-2.67 0-8 1.34-8 4v2h16v-2c0-2.66-5.33-4-8-4z"/>
-      </svg>
-    </div>`,
-    iconSize: [22, 22],
-    iconAnchor: [11, 11],
-    popupAnchor: [0, -11],
-  })
-}
+// Use shared icons from mapIcons utility
+import { droneMapIcon, operatorMapIcon, nodeMapIcon, shouldPulse } from '../utils/mapIcons'
 
 // Render FAA registry info matching CC PRO's renderRidInfo pattern
 function renderFaaInfo(faa: Record<string, unknown> | undefined, compact = false) {
@@ -229,6 +189,7 @@ export default function DronesPage() {
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const trails = useDronesStore((s) => s.trails)
   const appendTrail = useDronesStore((s) => s.appendTrail)
+  const storeDrones = useDronesStore((s) => s.drones)
 
   const { data: drones = [], isLoading } = useQuery({
     queryKey: ['drones'],
@@ -322,7 +283,7 @@ export default function DronesPage() {
             <Marker
               key={`drone-${d.id}`}
               position={[d.lat, d.lon]}
-              icon={droneIcon(d.status)}
+              icon={droneMapIcon(d.status, shouldPulse(storeDrones.get(d.id)?.lastDataAt, 3000))}
               eventHandlers={{ click: () => handleSelect(d.id) }}
             >
               <Popup>
@@ -350,7 +311,7 @@ export default function DronesPage() {
             <span key={`op-${d.id}`}>
               <Marker
                 position={[d.operatorLat!, d.operatorLon!]}
-                icon={operatorIcon()}
+                icon={operatorMapIcon()}
               >
                 <Popup>
                   <div className="text-xs" style={{ color: '#e2e8f0' }}>
@@ -386,17 +347,12 @@ export default function DronesPage() {
             )
           })}
 
-          {/* Mesh nodes (blue/orange dots) */}
-          {nodes.filter((n: NodeRow) => n.lat && n.lon && (n.lat !== 0 || n.lon !== 0)).map((n: NodeRow) => {
-            const isAH = n.nodeType === 'antihunter'
-            const fill = !n.isOnline ? '#475569' : isAH ? '#F97316' : '#3B82F6'
-            const stroke = !n.isOnline ? '#64748B' : isAH ? '#FB923C' : '#60A5FA'
-            return (
-              <CircleMarker
+          {/* Mesh nodes */}
+          {nodes.filter((n: NodeRow) => n.lat && n.lon && (n.lat !== 0 || n.lon !== 0)).map((n: NodeRow) => (
+              <Marker
                 key={`node-${n.id}`}
-                center={[n.lat!, n.lon!]}
-                radius={7}
-                pathOptions={{ fillColor: fill, fillOpacity: n.isOnline ? 0.7 : 0.4, color: stroke, weight: 2 }}
+                position={[n.lat!, n.lon!]}
+                icon={nodeMapIcon(n.nodeType, n.isOnline)}
               >
                 <Popup>
                   <div className="text-xs min-w-[140px]" style={{ color: '#e2e8f0' }}>
@@ -410,9 +366,8 @@ export default function DronesPage() {
                     </div>
                   </div>
                 </Popup>
-              </CircleMarker>
-            )
-          })}
+              </Marker>
+            ))}
 
           {/* Geofences */}
           {geofences.filter((g: GeofenceRow) => g.enabled && g.polygon && g.polygon.length >= 3).map((g: GeofenceRow) => (

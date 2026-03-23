@@ -31,6 +31,7 @@ export interface Drone {
   faa?: Record<string, unknown>
   firstSeen?: string
   lastSeen?: string
+  lastDataAt?: string
 }
 
 export interface TrailPoint {
@@ -60,7 +61,7 @@ export const useDronesStore = create<DronesState>((set) => ({
     set((state) => {
       const drones = new Map(state.drones)
       const existing = drones.get(update.id)
-      const merged = { ...existing, ...update } as Drone
+      const merged = { ...existing, ...update, lastDataAt: new Date().toISOString() } as Drone
       drones.set(update.id, merged)
 
       // Append trail point on position update

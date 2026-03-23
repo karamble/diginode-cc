@@ -21,6 +21,7 @@ export interface MeshNode {
   rssi?: number
   lastHeard?: string
   isOnline: boolean
+  lastDataAt?: string
 }
 
 interface NodesState {
@@ -38,7 +39,7 @@ export const useNodesStore = create<NodesState>((set) => ({
     set((state) => {
       const nodes = new Map(state.nodes)
       const existing = nodes.get(update.id)
-      nodes.set(update.id, { ...existing, ...update } as MeshNode)
+      nodes.set(update.id, { ...existing, ...update, lastDataAt: new Date().toISOString() } as MeshNode)
       return { nodes }
     }),
   removeNode: (id) =>
