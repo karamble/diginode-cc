@@ -253,6 +253,27 @@ func main() {
 		}
 	})
 
+	// Wire triangulation protocol (T_D / T_F / T_C) → target tracking service
+	trackingSvc := targets.NewTrackingService(targetsSvc)
+	serialMgr.SetTriangulationCallbacks(
+		// T_D: intermediate detection data → feed tracking sliding window
+		func(mac, nodeID string, rssi int, lat, lon float64) {
+			targetsSvc.EnsureTargetExists(context.Background(), mac, nodeID)
+			trackingSvc.AddDetection(context.Background(), mac, nodeID, lat, lon, rssi)
+		},
+		// T_F: final triangulation fix → apply position with confidence
+		func(mac string, lat, lon, confidence, uncertainty float64) {
+			if err := targetsSvc.ApplyTrackingEstimate(context.Background(), mac, lat, lon, confidence, uncertainty, "firmware-triangulation"); err != nil {
+				slog.Debug("T_F apply failed", "mac", mac, "error", err)
+			}
+		},
+		// T_C: triangulation complete → log
+		func(mac string, nodes int) {
+			slog.Info("triangulation complete", "mac", mac, "nodes", nodes)
+		},
+	)
+	_ = trackingSvc // used via callbacks
+
 	// Load startup data from DB
 	ctx := context.Background()
 	if err := alertsSvc.Load(ctx); err != nil {

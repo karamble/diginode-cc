@@ -16,16 +16,24 @@ var ErrTargetNotFound = errors.New("target not found")
 
 // Target represents a tracked entity.
 type Target struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	Description string    `json:"description,omitempty"`
-	TargetType  string    `json:"targetType,omitempty"`
-	MAC         string    `json:"mac,omitempty"`
-	Latitude    float64   `json:"latitude,omitempty"`
-	Longitude   float64   `json:"longitude,omitempty"`
-	Status      string    `json:"status"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID                    string    `json:"id"`
+	Name                  string    `json:"name"`
+	Description           string    `json:"description,omitempty"`
+	TargetType            string    `json:"targetType,omitempty"`
+	MAC                   string    `json:"mac,omitempty"`
+	Latitude              float64   `json:"latitude,omitempty"`
+	Longitude             float64   `json:"longitude,omitempty"`
+	Status                string    `json:"status"`
+	URL                   string    `json:"url,omitempty"`
+	Tags                  []string  `json:"tags,omitempty"`
+	Notes                 string    `json:"notes,omitempty"`
+	CreatedBy             string    `json:"createdBy,omitempty"`
+	FirstNodeID           string    `json:"firstNodeId,omitempty"`
+	TrackingConfidence    *float64  `json:"trackingConfidence,omitempty"`
+	TrackingUncertainty   *float64  `json:"trackingUncertainty,omitempty"`
+	TriangulationMethod   string    `json:"triangulationMethod,omitempty"`
+	CreatedAt             time.Time `json:"createdAt"`
+	UpdatedAt             time.Time `json:"updatedAt"`
 }
 
 // PositionFix represents a triangulated position.
@@ -57,7 +65,12 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 // Load populates the in-memory cache from the database on startup.
 func (s *Service) Load(ctx context.Context) error {
 	rows, err := s.db.Pool.Query(ctx, `
-		SELECT id, name, description, target_type, mac, latitude, longitude, status, created_at, updated_at
+		SELECT id, name, COALESCE(description,''), COALESCE(target_type,''), COALESCE(mac,''),
+			COALESCE(latitude,0), COALESCE(longitude,0), COALESCE(status,'active'),
+			COALESCE(url,''), tags, COALESCE(notes,''), COALESCE(created_by,''),
+			COALESCE(first_node_id,''), tracking_confidence, tracking_uncertainty,
+			COALESCE(triangulation_method,''),
+			created_at, updated_at
 		FROM targets`)
 	if err != nil {
 		return err
@@ -72,7 +85,11 @@ func (s *Service) Load(ctx context.Context) error {
 		var t Target
 		if err := rows.Scan(
 			&t.ID, &t.Name, &t.Description, &t.TargetType, &t.MAC,
-			&t.Latitude, &t.Longitude, &t.Status, &t.CreatedAt, &t.UpdatedAt,
+			&t.Latitude, &t.Longitude, &t.Status,
+			&t.URL, &t.Tags, &t.Notes, &t.CreatedBy,
+			&t.FirstNodeID, &t.TrackingConfidence, &t.TrackingUncertainty,
+			&t.TriangulationMethod,
+			&t.CreatedAt, &t.UpdatedAt,
 		); err != nil {
 			slog.Warn("failed to scan target", "error", err)
 			continue
@@ -98,12 +115,18 @@ func (s *Service) GetAll() []*Target {
 
 // Create adds a new target.
 func (s *Service) Create(ctx context.Context, t *Target) error {
+	if t.Status == "" {
+		t.Status = "active"
+	}
 	err := s.db.Pool.QueryRow(ctx, `
-		INSERT INTO targets (name, description, target_type, mac, latitude, longitude, status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		INSERT INTO targets (name, description, target_type, mac, latitude, longitude, status,
+			url, tags, notes, created_by, first_node_id, tracking_confidence, tracking_uncertainty, triangulation_method)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		RETURNING id`,
 		t.Name, t.Description, t.TargetType, t.MAC,
 		t.Latitude, t.Longitude, t.Status,
+		nilStr(t.URL), t.Tags, nilStr(t.Notes), nilStr(t.CreatedBy),
+		nilStr(t.FirstNodeID), t.TrackingConfidence, t.TrackingUncertainty, nilStr(t.TriangulationMethod),
 	).Scan(&t.ID)
 	if err != nil {
 		return err
@@ -137,9 +160,11 @@ func (s *Service) Delete(ctx context.Context, id string) error {
 func (s *Service) Update(ctx context.Context, id string, t *Target) error {
 	_, err := s.db.Pool.Exec(ctx, `
 		UPDATE targets SET name = $2, description = $3, target_type = $4,
-			mac = $5, status = $6, updated_at = NOW()
+			mac = $5, status = $6, url = $7, tags = $8, notes = $9,
+			updated_at = NOW()
 		WHERE id = $1`,
-		id, t.Name, t.Description, t.TargetType, t.MAC, t.Status)
+		id, t.Name, t.Description, t.TargetType, t.MAC, t.Status,
+		nilStr(t.URL), t.Tags, nilStr(t.Notes))
 	if err != nil {
 		return err
 	}
@@ -150,9 +175,97 @@ func (s *Service) Update(ctx context.Context, id string, t *Target) error {
 		existing.TargetType = t.TargetType
 		existing.MAC = t.MAC
 		existing.Status = t.Status
+		existing.URL = t.URL
+		existing.Tags = t.Tags
+		existing.Notes = t.Notes
 	}
 	s.mu.Unlock()
 	return nil
+}
+
+// ApplyTrackingEstimate updates a target's position and tracking confidence.
+// Called by the tracking service when a new position estimate is computed.
+func (s *Service) ApplyTrackingEstimate(ctx context.Context, mac string, lat, lon, confidence, uncertainty float64, method string) error {
+	s.mu.Lock()
+	// Find target by MAC
+	var target *Target
+	for _, t := range s.targets {
+		if t.MAC == mac {
+			target = t
+			break
+		}
+	}
+
+	if target == nil {
+		s.mu.Unlock()
+		return ErrTargetNotFound
+	}
+
+	target.Latitude = lat
+	target.Longitude = lon
+	target.TrackingConfidence = &confidence
+	target.TrackingUncertainty = &uncertainty
+	if method != "" {
+		target.TriangulationMethod = method
+	}
+	if confidence > 0.5 {
+		target.Status = "active"
+	}
+	target.UpdatedAt = time.Now()
+	id := target.ID
+	s.mu.Unlock()
+
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE targets SET latitude = $2, longitude = $3,
+			tracking_confidence = $4, tracking_uncertainty = $5,
+			triangulation_method = $6, status = $7, updated_at = NOW()
+		WHERE id = $1`,
+		id, lat, lon, confidence, uncertainty, nilStr(method), target.Status)
+	if err != nil {
+		return err
+	}
+
+	// Persist position history
+	s.db.Pool.Exec(ctx, `
+		INSERT INTO target_positions (target_id, latitude, longitude, accuracy_m, source)
+		VALUES ($1, $2, $3, $4, $5)`,
+		id, lat, lon, uncertainty, method)
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventTarget,
+		Payload: target,
+	})
+
+	return nil
+}
+
+// EnsureTargetExists creates a placeholder target for a MAC if one doesn't exist.
+// Used during T_D processing when triangulation detects a new MAC.
+func (s *Service) EnsureTargetExists(ctx context.Context, mac, nodeID string) *Target {
+	s.mu.RLock()
+	for _, t := range s.targets {
+		if t.MAC == mac {
+			s.mu.RUnlock()
+			return t
+		}
+	}
+	s.mu.RUnlock()
+
+	// Create placeholder
+	t := &Target{
+		Name:        "Auto: " + mac,
+		MAC:         mac,
+		Status:      "active",
+		FirstNodeID: nodeID,
+		CreatedAt:   time.Now(),
+		UpdatedAt:   time.Now(),
+	}
+	if err := s.Create(ctx, t); err != nil {
+		slog.Warn("failed to auto-create target", "mac", mac, "error", err)
+		return nil
+	}
+	slog.Info("auto-created target for triangulation", "mac", mac, "id", t.ID)
+	return t
 }
 
 // ClearAll removes all targets from memory and the database.
@@ -272,4 +385,11 @@ func estimateAccuracy(observations []Observation) float64 {
 	}
 	// Rough accuracy estimate based on number of observations
 	return math.Max(10, 500/float64(len(observations)))
+}
+
+func nilStr(s string) interface{} {
+	if s == "" {
+		return nil
+	}
+	return s
 }
