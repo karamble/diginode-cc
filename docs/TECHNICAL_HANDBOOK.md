@@ -66,12 +66,13 @@ FromRadio Protobuf Decoder
     v
 Meshtastic Dispatcher (port-based routing + dedup)
     |
-    +---> NodeHandler    --> nodes/service.go    --> DB + WS broadcast
-    +---> DroneHandler   --> drones/service.go   --> DB + WS + inventory + FAA
-    +---> ChatHandler    --> chat/service.go      --> DB + WS + ring buffer
-    +---> AlertCallback  --> alerts/evaluator.go  --> rule matching + trigger
-    +---> WebhookCallback --> webhooks/service.go --> HTTP dispatch
-    +---> DeviceTime     --> serial/manager.go    --> time tracking
+    +---> NodeHandler      --> nodes/service.go    --> DB + WS broadcast
+    +---> DroneHandler     --> drones/service.go   --> DB + WS + inventory + FAA + geofence check
+    +---> ChatHandler      --> chat/service.go     --> DB + WS + ring buffer
+    +---> TargetDetected   --> inventory + alerts + webhooks + geofence check
+    +---> AlertCallback    --> alerts/evaluator.go --> rule matching + trigger
+    +---> WebhookCallback  --> webhooks/service.go --> HTTP dispatch
+    +---> DeviceTime       --> serial/manager.go   --> time tracking
 ```
 
 ---
@@ -150,8 +151,11 @@ diginode-cc/
    - `dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)`
    - `dronesSvc.SetInventoryCallback(inventorySvc.Track)`
    - `dronesSvc.SetFAALookup(...)` (FAA registry enrichment)
+   - `dronesSvc.SetGeofenceChecker(...)` -- point-in-polygon for drone positions
+   - `dronesSvc.SetGeofenceNotifier(...)` -- WebSocket + alert event + webhook on breach
+   - `serialMgr.SetTargetDetectedCallback(...)` -- inventory upsert + alert rules + webhooks + geofences
    - `chatSvc.SetBufferCallback(serialMgr.AddTextMessage)`
-10. **Startup Data** -- Load from DB: alerts, geofences, webhooks, alarms, firewall, appConfig defaults
+10. **Startup Data** -- Load from DB: alerts, geofences, webhooks, alarms, firewall, inventory, targets, appConfig defaults
 11. **Optional Services** -- ADS-B poller, MQTT connection (if enabled)
 12. **HTTP Server** -- Chi router with all 165+ routes
 13. **Daily Pruning** -- Background goroutine: positions (30d), detections (30d), commands (180d)
@@ -207,6 +211,7 @@ BuildDeviceMetrics(batteryLevel uint32, voltage float32) []byte
 BuildAdminShutdown(seconds uint32) []byte
 BuildAdminDisplayConfig(screenOnSecs uint32) []byte
 BuildAdminBluetoothConfig(enabled bool, mode, fixedPin uint32) []byte
+BuildAdminNodedbReset() []byte  // AdminMessage field 100 = true
 ```
 
 Each builds a complete ToRadio protobuf (caller wraps with `EncodeFrame`).
@@ -234,18 +239,33 @@ Exponential backoff with jitter:
 ### 6.1 Drones
 
 **Detection lifecycle:**
-1. Meshtastic detection sensor packet arrives
+1. Meshtastic detection sensor packet arrives (port 10 binary or `DRONE:` text line)
 2. `HandleDroneDetection(from, payload)` parses JSON payload
 3. `HandleDetection(detection)` creates/updates in-memory drone
 4. `nodeLookup` resolves detecting node's ID and site
 5. FAA enrichment (async, if serial number present)
-6. Persistence debouncing (200ms batch writes)
-7. Detection history append (immediate)
-8. WebSocket broadcast `drone.telemetry`
-9. Inventory tracking callback
-10. Alert evaluation + webhook dispatch
+6. **Geofence evaluation** -- `CheckPoint(lat, lon, "drone")` tests all armed geofences
+   - Entry/exit state tracked per drone per geofence
+   - On breach: WebSocket `geofence.event` + alert event (persisted) + notification bell + optional webhook (`alert.geofence`)
+7. Persistence debouncing (200ms batch writes)
+8. Detection history append (immediate)
+9. WebSocket broadcast `drone.telemetry`
+10. Inventory tracking callback
+11. Alert evaluation + webhook dispatch
 
-**Status enum:** UNKNOWN, FRIENDLY, NEUTRAL, HOSTILE
+**Status enum:** UNKNOWN (grey), FRIENDLY (green), NEUTRAL (orange), HOSTILE (red)
+
+**Text parser `DRONE:` format** (from AntiHunter sensor firmware):
+```
+<nodeId>: DRONE: <MAC> ID:<droneId> R<rssi> GPS:<lat>,<lon> ALT:<alt> SPD:<spd> OP:<opLat>,<opLon>
+```
+Fields mapped to `DroneDetection` JSON tags: `uasId`, `mac`, `rssi`, `latitude`, `longitude`, `altitude`, `speed`, `pilotLatitude`, `pilotLongitude`
+
+**Drone simulation** (`scripts/simulate-drone.sh`):
+- Bash script using `curl` to POST simulated DRONE lines to `/api/serial/simulate`
+- Configurable coordinates (`--lat`, `--lon`), distance, speed, altitude, drone count
+- `--with-targets` flag also sends `Target:` lines for inventory testing
+- Drone approaches target coordinates with realistic RSSI progression
 
 **API response** uses CC PRO field names: `droneId`, `lat`, `lon`, `operatorLat`, `operatorLon`, `faa`, `ts`, `nodeId`, `siteId`, `siteName`, `siteColor`, `siteCountry`, `siteCity`
 
@@ -273,13 +293,64 @@ Exponential backoff with jitter:
 
 **Severity levels:** INFO, NOTICE, ALERT, CRITICAL
 
+**Alert sources:**
+- **Rule-based**: `Evaluate(DetectionEvent)` matches conditions → `Trigger(ruleID, ...)`
+- **Geofence breach**: `TriggerDirect(severity, title, message, data)` — no rule needed, persisted directly to `alert_events`
+- **Both** appear in Alerts > Recent Events and trigger WebSocket `alert` event + notification bell
+
 ### 6.4 Geofences
 
 - Polygon storage as JSON array of `{lat, lng}` points
 - Ray casting point-in-polygon algorithm
-- Entity filtering: ADSB, drones, targets, devices
-- Alarm config: level, message template, trigger on entry/exit
-- WebSocket notification with `geofence.event`
+- Entity filtering: ADSB, drones, targets, devices (per-geofence checkboxes)
+- Alarm config: enabled checkbox, level (INFO/NOTICE/ALERT/CRITICAL), message template with `{entity}` and `{geofence}` placeholders, trigger on entry/exit
+- **Notify webhook** checkbox: when enabled, breaches fire `alert.geofence` webhook event
+- Geofence map auto-centers on mesh nodes when no geofences exist (falls back to Zurich only if no nodes have GPS)
+- Mesh node markers displayed on geofence map (blue=online, grey=offline) with name tooltips
+
+**Breach detection flow:**
+1. `drones.Service.evaluateGeofences()` called on every drone telemetry update
+2. `geofences.CheckPoint(lat, lon, "drone")` tests all enabled + alarm-armed geofences
+3. Entry/exit state tracked per drone per geofence in `geofenceState` map
+4. On entry (was outside, now inside):
+   - `geofences.NotifyViolation()` → WebSocket `geofence.event` (shows in terminal + notification bell)
+   - `alerts.TriggerDirect()` → persisted to `alert_events` table (shows in Alerts > Recent Events)
+   - If `notifyWebhook=true`: `webhooks.Dispatch("alert.geofence", payload)`
+5. Target detections with GPS also checked against geofences (`appliesToTargets`)
+
+### 6.5 Inventory (Device Tracking)
+
+**Purpose:** Historical catalog of ALL detected WiFi/BLE devices from AntiHunter sensor nodes.
+
+**Detection pipeline:**
+1. Sensor sends `Target: WiFi AA:BB:CC:DD:EE:FF RSSI:-72 Name:device GPS:lat,lon` over mesh
+2. Text parser produces `target-detected` event with `{mac, rssi, type, name, channel, lat, lon}`
+3. `dispatchTextEvent` calls `onTargetDetected` callback
+4. Callback executes in parallel:
+   - **Inventory upsert**: `TrackFull(mac, manufacturer, ssid, deviceType, rssi, nodeID, lat, lon)`
+     - OUI vendor lookup from MAC prefix
+     - Running RSSI statistics (min/max/avg)
+     - Hit counter increments
+     - Location + detecting node tracked
+   - **Alert rule evaluation**: matches MAC, OUI, SSID, channel, RSSI against active rules
+   - **Webhook dispatch**: `target.detected` event to subscribed webhooks
+   - **Geofence check**: if target has GPS, tests against armed geofences
+
+**Persistence:** PostgreSQL `inventory_devices` table with upsert on MAC. Loaded into memory on startup via `Load()`.
+
+**Promote to target:** `POST /api/inventory/{mac}/promote` copies MAC, name, deviceType, GPS coordinates, and manufacturer info into a new Target record.
+
+### 6.6 Targets
+
+**Purpose:** Manually curated threats of interest. Created by user promotion from inventory or manual entry.
+
+**Status lifecycle:** `active` → `resolved`
+
+**Fields:** name, description, targetType (WiFi/BLE/Drone/Vehicle/Person), MAC, lat/lon, status
+
+**Position tracking:** `target_positions` table stores history; triangulation via weighted RSSI centroid from multiple observer nodes.
+
+**Persistence:** PostgreSQL `targets` table. Loaded into memory on startup via `Load()`.
 
 ### 6.5 Commands
 
@@ -290,13 +361,22 @@ Exponential backoff with jitter:
 - ACK handling via `HandleACK(cmdID, result)`
 - Persistence: immediate on state change
 
-### 6.6 Webhooks
+### 6.7 Webhooks
 
 - HMAC-SHA256 signing (`X-Signature-256` header)
 - Event matching with wildcard (`*`) support
-- Dispatch from Meshtastic events: `mesh.text_message`, `mesh.position`, `mesh.drone_detection`
-- Delivery tracking in `webhook_deliveries` table
 - Custom headers and HTTP method selection (POST/PUT/PATCH)
+- 10-second timeout, async delivery (goroutine per webhook)
+
+**Event types dispatched:**
+
+| Event | Trigger |
+|-------|---------|
+| `mesh.text_message` | Chat message over mesh |
+| `mesh.position` | GPS position update from node |
+| `mesh.drone_detection` | Raw drone detection packet |
+| `target.detected` | WiFi/BLE device detected by sensor |
+| `alert.geofence` | Drone or target entered geofence (if `notifyWebhook` enabled on geofence) |
 
 ---
 
@@ -345,7 +425,7 @@ ADMIN (3) > OPERATOR (2) > ANALYST (1) > VIEWER (0)
 
 ## 8. Database Schema
 
-7 migrations (`internal/database/migrations/`), 33 tables:
+10 migrations (`internal/database/migrations/`), 33+ tables:
 
 ### Core Tables
 
@@ -357,8 +437,8 @@ ADMIN (3) > OPERATOR (2) > ANALYST (1) > VIEWER (0)
 | `drones` | Detected drones | MAC, serial, lat/lon, pilot lat/lon, status, FAA data |
 | `targets` | Tracked entities | name, MAC, lat/lon, status, tracking confidence |
 | `inventory_devices` | WiFi devices | MAC, manufacturer, RSSI stats (min/max/avg/hits) |
-| `geofences` | Polygon boundaries | polygon (JSONB), alarm config, entity filtering |
-| `alert_rules` | Alert conditions | condition (JSONB), severity, cooldown, match mode |
+| `geofences` | Polygon boundaries | polygon (JSONB), alarm config, entity filtering, notify_webhook |
+| `alert_rules` | Alert conditions | condition (JSONB), severity, cooldown, match mode, notify_webhook |
 | `commands` | Command queue | target_node, status lifecycle, retry tracking |
 
 ### History & Audit
@@ -442,6 +522,21 @@ Sent per-client on connect:
 
 ---
 
+### Notification Bell (Frontend)
+
+Universal notification accumulator in the header. Memory-only (Zustand store, max 50 items).
+
+**Sources (dispatched in `useWebSocketBridge.ts`):**
+- `drone.telemetry` → "New drone detected" (first sighting only, tracked via `seenDrones` Set)
+- `alert` → title + message from alert event (skips geofence-sourced to avoid duplicates)
+- `chat.message` → "Chat from !nodeId" / "DM from !nodeId" (remote messages only)
+- `geofence.event` → "Geofence: {name}" with alarm level severity
+- `inventory.update` → "New device detected" (first hit only, `hits === 1`)
+
+**UI:** Bell icon in header with red badge count. Click opens dropdown panel with severity color bars, dismiss (x) per item, "Mark all read", "Clear".
+
+---
+
 ## 10. API Reference
 
 ### Authentication
@@ -500,7 +595,8 @@ Sent per-client on connect:
 | POST | `/api/serial/display-config` | Set screen-on duration |
 | POST | `/api/serial/bluetooth-config` | Set Bluetooth mode |
 | POST | `/api/serial/shutdown` | Shutdown Heltec device |
-| POST | `/api/serial/simulate` | Inject test packet |
+| POST | `/api/serial/nodedb-reset` | Reset Heltec node database |
+| POST | `/api/serial/simulate` | Inject test packet or `{lines:[]}` for text parser |
 
 ### Resources (CRUD pattern)
 
