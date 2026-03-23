@@ -38,6 +38,7 @@ NODE_ID="AH-SIM"
 DRONE_ID=""
 MAC=""
 WITH_TARGETS=false
+FAA_TEST=false
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -56,6 +57,7 @@ while [[ $# -gt 0 ]]; do
     --drone-id)       DRONE_ID="$2"; shift 2 ;;
     --mac)            MAC="$2"; shift 2 ;;
     --with-targets)   WITH_TARGETS=true; shift ;;
+    --faa-test)       FAA_TEST=true; shift ;;
     --email)          EMAIL="$2"; shift 2 ;;
     --password)       PASSWORD="$2"; shift 2 ;;
     -h|--help)
@@ -186,14 +188,30 @@ run_drones() {
   echo "═══ DRONES: ${DRONE_COUNT} drone(s), ${ITERATIONS} updates, ${INTERVAL}s interval, ${SPEED_KMH} km/h"
   echo ""
 
+  # Known FAA-resolvable drone IDs (from local faa_registry)
+  local FAA_IDS=("FA2RGE1234" "1581F5FSIMTEST001" "3NZEH9K00D001F" "5YPJK2M00B002A")
+  local FAA_MACS=("60:60:1F:D0:01:F0" "60:60:1F:B0:02:A0" "60:60:1F:AB:CD:EF" "60:60:1F:11:22:33")
+
   for d in $(seq 1 "$DRONE_COUNT"); do
     (
-      if [[ -n "$DRONE_ID" && "$DRONE_COUNT" -eq 1 ]]; then did="$DRONE_ID"
-      elif [[ -n "$DRONE_ID" ]]; then did="${DRONE_ID}-${d}"
-      else did=$(random_drone_id); fi
+      if [[ -n "$DRONE_ID" && "$DRONE_COUNT" -eq 1 ]]; then
+        did="$DRONE_ID"
+      elif [[ -n "$DRONE_ID" ]]; then
+        did="${DRONE_ID}-${d}"
+      elif [[ $d -le ${#FAA_IDS[@]} ]]; then
+        # Use known FAA IDs for first drones so FAA lookup works
+        did="${FAA_IDS[$((d-1))]}"
+      else
+        did=$(random_drone_id)
+      fi
 
-      if [[ -n "$MAC" && "$DRONE_COUNT" -eq 1 ]]; then mac="$MAC"
-      else mac=$(random_mac); fi
+      if [[ -n "$MAC" && "$DRONE_COUNT" -eq 1 ]]; then
+        mac="$MAC"
+      elif [[ $d -le ${#FAA_MACS[@]} && -z "$MAC" ]]; then
+        mac="${FAA_MACS[$((d-1))]}"
+      else
+        mac=$(random_mac)
+      fi
 
       heading=$(python3 -c "import random; print(f'{random.uniform(0, 360):.1f}')")
       start_pos=$(offset_position "$TARGET_LAT" "$TARGET_LON" "$START_DISTANCE" "$heading")
