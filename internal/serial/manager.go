@@ -39,9 +39,10 @@ type Manager struct {
 	textMu       sync.RWMutex
 	deviceTime   time.Time
 	deviceTimeMu sync.RWMutex
-	protocol     string      // "binary" or "text" (default "text")
-	textParser   *TextParser // text-mode line parser
-	syntheticID  atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
+	protocol          string      // "binary" or "text" (default "text")
+	textParser        *TextParser // text-mode line parser
+	syntheticID       atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
+	onTargetDetected  func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -56,6 +57,11 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 		protocol:   "text", // Text mode: reads debug console lines (like CC PRO meshtastic-rewrite)
 		textParser: NewTextParser(),
 	}
+}
+
+// SetTargetDetectedCallback sets the handler for target/device detection events from mesh sensors.
+func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)) {
+	m.onTargetDetected = fn
 }
 
 // SetProtocol switches the serial protocol mode ("binary" or "text").
@@ -456,8 +462,24 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 			h(pkt)
 		}
 
+	case "target-detected":
+		mac, _ := evt.Data["mac"].(string)
+		if mac == "" {
+			break
+		}
+		rssi, _ := evt.Data["rssi"].(int)
+		ssid, _ := evt.Data["name"].(string)
+		devType, _ := evt.Data["type"].(string)
+		channel, _ := evt.Data["channel"].(int)
+		lat, _ := evt.Data["lat"].(float64)
+		lon, _ := evt.Data["lon"].(float64)
+
+		if m.onTargetDetected != nil {
+			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID)
+		}
+
 	default:
-		// Other event types (alert, node-telemetry, command-ack, target-detected, raw)
+		// Other event types (alert, node-telemetry, command-ack, raw)
 		// are logged for debug; downstream consumers can be added later.
 		if evt.Kind != "raw" {
 			slog.Debug("text event", "kind", evt.Kind, "nodeId", evt.NodeID,

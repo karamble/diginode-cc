@@ -207,6 +207,47 @@ func main() {
 	dispatcher.SetWebhookCallback(webhooksSvc.Dispatch)
 	serialMgr.RegisterHandler(dispatcher.HandlePacket)
 
+	// Wire target-detected events → inventory + alerts + webhooks + geofences
+	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {
+		// 1. Inventory upsert with OUI lookup
+		manufacturer := inventory.LookupOUI(mac)
+		inventorySvc.TrackFull(mac, manufacturer, ssid, deviceType, rssi, nodeID, lat, lon)
+
+		// 2. Alert rule evaluation
+		oui := ""
+		if len(mac) >= 8 {
+			oui = mac[:8]
+		}
+		alertsSvc.Evaluate(context.Background(), alerts.DetectionEvent{
+			MAC:     mac,
+			OUI:     oui,
+			SSID:    ssid,
+			Channel: channel,
+			RSSI:    rssi,
+			NodeID:  nodeID,
+		})
+
+		// 3. Webhook dispatch
+		webhooksSvc.Dispatch("target.detected", map[string]interface{}{
+			"mac":        mac,
+			"ssid":       ssid,
+			"deviceType": deviceType,
+			"rssi":       rssi,
+			"channel":    channel,
+			"latitude":   lat,
+			"longitude":  lon,
+			"nodeId":     nodeID,
+		})
+
+		// 4. Geofence check (if target has GPS)
+		if lat != 0 && lon != 0 {
+			triggered := geofencesSvc.CheckPoint(lat, lon, "target")
+			for _, g := range triggered {
+				geofencesSvc.NotifyViolation(g, "target", mac, lat, lon)
+			}
+		}
+	})
+
 	// Load startup data from DB
 	ctx := context.Background()
 	if err := alertsSvc.Load(ctx); err != nil {

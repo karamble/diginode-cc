@@ -33,6 +33,7 @@ SPEED_KMH=55        # approach speed km/h
 NODE_ID="AH-SIM"
 DRONE_ID=""
 MAC=""
+WITH_TARGETS=false
 
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
@@ -49,6 +50,7 @@ while [[ $# -gt 0 ]]; do
     --node-id)        NODE_ID="$2"; shift 2 ;;
     --drone-id)       DRONE_ID="$2"; shift 2 ;;
     --mac)            MAC="$2"; shift 2 ;;
+    --with-targets)   WITH_TARGETS=true; shift ;;
     --email)          EMAIL="$2"; shift 2 ;;
     --password)       PASSWORD="$2"; shift 2 ;;
     -h|--help)
@@ -229,8 +231,18 @@ print(rssi)
       alt=$(python3 -c "import random; print(f'{$alt + random.uniform(-0.5, 0.5):.1f}')")
 
       LINE="${NODE_ID}: DRONE: ${mac} ID:${did} R${rssi} GPS:${drone_lat},${drone_lon} ALT:${alt} SPD:${spd} OP:${op_lat},${op_lon}"
-      send_lines "[\"${LINE}\"]"
-      echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} ${drone_lat},${drone_lon}"
+
+      # Optionally send simulated target detections (WiFi/BLE devices near the drone)
+      if [[ "$WITH_TARGETS" == "true" && $((i % 3)) -eq 1 ]]; then
+        TARGET_MAC=$(printf 'AA:BB:CC:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
+        TARGET_RSSI=$(( -60 - RANDOM % 30 ))
+        TARGET_LINE="${NODE_ID}: Target: WiFi ${TARGET_MAC} RSSI:${TARGET_RSSI} Name:DJI-RC2-SIM GPS:${drone_lat},${drone_lon}"
+        send_lines "[\"${LINE}\", \"${TARGET_LINE}\"]"
+        echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} ${drone_lat},${drone_lon} +target"
+      else
+        send_lines "[\"${LINE}\"]"
+        echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} ${drone_lat},${drone_lon}"
+      fi
 
       # Check if reached target
       if python3 -c "import sys; sys.exit(0 if $dist < 30 else 1)" 2>/dev/null; then
