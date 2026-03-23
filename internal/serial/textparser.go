@@ -426,12 +426,13 @@ func (p *TextParser) handleDrone(match []string, names []string, raw string) []*
 	g := extractGroups(match, names)
 	nodeID := g["id"]
 
+	// Keys must match DroneDetection JSON tags in drones/detection.go
 	data := map[string]interface{}{
-		"droneId": g["droneId"],
-		"mac":     strings.ToUpper(g["mac"]),
-		"rssi":    parseOptInt(g["rssi"]),
-		"lat":     parseOptFloat(g["lat"]),
-		"lon":     parseOptFloat(g["lon"]),
+		"uasId":    g["droneId"],
+		"mac":      strings.ToUpper(g["mac"]),
+		"rssi":     parseOptInt(g["rssi"]),
+		"latitude":  parseOptFloat(g["lat"]),
+		"longitude": parseOptFloat(g["lon"]),
 	}
 	if v := g["alt"]; v != "" {
 		data["altitude"] = parseOptFloat(v)
@@ -440,10 +441,10 @@ func (p *TextParser) handleDrone(match []string, names []string, raw string) []*
 		data["speed"] = parseOptFloat(v)
 	}
 	if v := g["opLat"]; v != "" {
-		data["operatorLat"] = parseOptFloat(v)
+		data["pilotLatitude"] = parseOptFloat(v)
 	}
 	if v := g["opLon"]; v != "" {
-		data["operatorLon"] = parseOptFloat(v)
+		data["pilotLongitude"] = parseOptFloat(v)
 	}
 
 	return []*ParsedEvent{{

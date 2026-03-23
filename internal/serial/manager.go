@@ -446,7 +446,7 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 		pkt := &FromRadioPacket{
 			Type: FromRadioMeshPacket,
 			MeshPacket: &MeshPacketData{
-				PortNum: 160, // DETECTION_SENSOR_APP
+				PortNum: 10, // DETECTION_SENSOR_APP (PortNumDetectionSensor)
 				Payload: jsonData,
 				From:    parseNodeNum(evt.NodeID),
 				ID:      dronePktID,
@@ -554,6 +554,26 @@ func (m *Manager) GetDeviceTime() (time.Time, bool) {
 // Used for testing without a real serial connection.
 func (m *Manager) SimulatePacket(pkt *FromRadioPacket) {
 	m.dispatchPacket(pkt)
+}
+
+// SimulateLines feeds raw text lines through the text parser and dispatcher,
+// as if they arrived on the serial port. Used by the drone simulator and dev tools.
+// Returns the number of lines that produced non-raw events.
+func (m *Manager) SimulateLines(lines []string) int {
+	if m.textParser == nil {
+		return 0
+	}
+	processed := 0
+	for _, line := range lines {
+		events := m.textParser.ParseLine(line)
+		for _, evt := range events {
+			if evt.Kind != "raw" {
+				m.dispatchTextEvent(evt)
+				processed++
+			}
+		}
+	}
+	return processed
 }
 
 // periodicConfigRefresh sends heartbeats every 15 seconds to keep the firmware's

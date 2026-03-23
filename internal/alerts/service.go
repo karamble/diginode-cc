@@ -2,6 +2,7 @@ package alerts
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"log/slog"
 	"sync"
@@ -155,12 +156,14 @@ func (s *Service) TriggerDirect(ctx context.Context, severity Severity, title, m
 	}
 
 	dataJSON, _ := json.Marshal(data)
-	_ = s.db.Pool.QueryRow(ctx, `
+	if err := s.db.Pool.QueryRow(ctx, `
 		INSERT INTO alert_events (severity, title, message, data)
 		VALUES ($1, $2, $3, $4)
 		RETURNING id`,
 		string(severity), title, message, dataJSON,
-	).Scan(&evt.ID)
+	).Scan(&evt.ID); err != nil {
+		slog.Error("failed to persist alert event", "title", title, "error", err)
+	}
 
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventAlert,
@@ -241,9 +244,17 @@ func (s *Service) GetEvents(ctx context.Context, limit int) ([]*Event, error) {
 	var events []*Event
 	for rows.Next() {
 		var e Event
-		if err := rows.Scan(&e.ID, &e.RuleID, &e.Severity, &e.Title, &e.Message,
-			&e.Acknowledged, &e.AcknowledgedBy, &e.AcknowledgedAt, &e.CreatedAt); err != nil {
+		var ruleID, ackBy sql.NullString
+		var ackAt sql.NullTime
+		if err := rows.Scan(&e.ID, &ruleID, &e.Severity, &e.Title, &e.Message,
+			&e.Acknowledged, &ackBy, &ackAt, &e.CreatedAt); err != nil {
+			slog.Warn("failed to scan alert event", "error", err)
 			continue
+		}
+		e.RuleID = ruleID.String
+		e.AcknowledgedBy = ackBy.String
+		if ackAt.Valid {
+			e.AcknowledgedAt = &ackAt.Time
 		}
 		events = append(events, &e)
 	}

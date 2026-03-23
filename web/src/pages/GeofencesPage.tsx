@@ -1,8 +1,9 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useCallback } from 'react'
-import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, useMapEvents, useMap } from 'react-leaflet'
+import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, Tooltip, useMapEvents, useMap } from 'react-leaflet'
 import 'leaflet/dist/leaflet.css'
 import api from '../api/client'
+import { useNodesStore } from '../stores/nodesStore'
 
 interface Point {
   lat: number
@@ -26,6 +27,7 @@ interface Geofence {
   appliesToDrones: boolean
   appliesToTargets: boolean
   appliesToDevices: boolean
+  notifyWebhook: boolean
 }
 
 interface GeofenceForm {
@@ -41,6 +43,7 @@ interface GeofenceForm {
   appliesToDrones: boolean
   appliesToTargets: boolean
   appliesToDevices: boolean
+  notifyWebhook: boolean
 }
 
 const PRESET_COLORS = [
@@ -63,6 +66,7 @@ const emptyForm: GeofenceForm = {
   appliesToDrones: true,
   appliesToTargets: false,
   appliesToDevices: false,
+  notifyWebhook: false,
 }
 
 function geofenceToForm(g: Geofence): GeofenceForm {
@@ -79,6 +83,7 @@ function geofenceToForm(g: Geofence): GeofenceForm {
     appliesToDrones: g.appliesToDrones,
     appliesToTargets: g.appliesToTargets,
     appliesToDevices: g.appliesToDevices,
+    notifyWebhook: g.notifyWebhook ?? false,
   }
 }
 
@@ -177,6 +182,7 @@ export default function GeofencesPage() {
       appliesToDrones: form.appliesToDrones,
       appliesToTargets: form.appliesToTargets,
       appliesToDevices: form.appliesToDevices,
+      notifyWebhook: form.notifyWebhook,
     }
 
     if (editingId) {
@@ -242,9 +248,18 @@ export default function GeofencesPage() {
     ? [...draftPositions, draftPositions[0]]
     : draftPositions
 
+  // Mesh nodes with GPS for map markers and auto-centering
+  const allNodes = useNodesStore((s) => s.nodes)
+  const nodesWithGPS = Array.from(allNodes.values()).filter(
+    (n) => n.latitude && n.longitude && n.latitude !== 0 && n.longitude !== 0
+  )
+
+  // Center: first geofence polygon > first node with GPS > Zurich fallback
   const defaultCenter: [number, number] = geofences.length > 0 && geofences[0].polygon?.length > 0
     ? [geofences[0].polygon[0].lat, geofences[0].polygon[0].lng]
-    : [47.3769, 8.5417]
+    : nodesWithGPS.length > 0
+      ? [nodesWithGPS[0].latitude!, nodesWithGPS[0].longitude!]
+      : [47.3769, 8.5417]
 
   return (
     <div className="flex h-full">
@@ -371,6 +386,17 @@ export default function GeofencesPage() {
                 ))}
               </div>
 
+              {/* Webhook notification */}
+              <label className="flex items-center gap-1.5 text-xs text-dark-300 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.notifyWebhook}
+                  onChange={e => updateField('notifyWebhook', e.target.checked)}
+                  className="rounded border-dark-600 bg-dark-800 text-primary-500"
+                />
+                Notify webhook
+              </label>
+
               {/* Drawing status */}
               <div className="bg-dark-800 rounded px-3 py-2 border border-dark-600">
                 <div className="flex items-center justify-between">
@@ -493,6 +519,34 @@ export default function GeofencesPage() {
             onPoint={handleMapClick}
             onHover={setHoverPoint}
           />
+
+          {/* Auto-fit to nodes when no geofences and not editing */}
+          {!showForm && geofences.length === 0 && nodesWithGPS.length > 0 && (
+            <FitToPoints points={nodesWithGPS.map(n => ({ lat: n.latitude!, lng: n.longitude! }))} />
+          )}
+
+          {/* Mesh node markers */}
+          {nodesWithGPS.map((n) => (
+            <CircleMarker
+              key={n.id}
+              center={[n.latitude!, n.longitude!]}
+              radius={6}
+              pathOptions={{
+                fillColor: n.isOnline ? '#3B82F6' : '#6B7280',
+                fillOpacity: 0.9,
+                color: '#fff',
+                weight: 1.5,
+                opacity: 0.7,
+              }}
+            >
+              <Tooltip direction="top" offset={[0, -8]} className="dark-tooltip">
+                <span className="text-xs font-mono">
+                  {n.longName || n.shortName || n.id}
+                  {n.isOnline ? ' (online)' : ' (offline)'}
+                </span>
+              </Tooltip>
+            </CircleMarker>
+          ))}
 
           {/* Fit to vertices when editing */}
           {fitOnce && draftVertices.length > 0 && <FitToPoints points={draftVertices} />}

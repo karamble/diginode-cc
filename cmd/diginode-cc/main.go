@@ -107,9 +107,63 @@ func main() {
 	chatSvc.SetBufferCallback(serialMgr.AddTextMessage)
 	commandsSvc := commands.NewService(db, hub)
 	alertsSvc := alerts.NewService(db, hub)
-	geofencesSvc := geofences.NewService(db, hub)
-	targetsSvc := targets.NewService(db, hub)
 	webhooksSvc := webhooks.NewService(db)
+	geofencesSvc := geofences.NewService(db, hub)
+	dronesSvc.SetGeofenceChecker(func(lat, lon float64, entityType string) []drones.GeofenceHit {
+		triggered := geofencesSvc.CheckPoint(lat, lon, entityType)
+		hits := make([]drones.GeofenceHit, len(triggered))
+		for i, g := range triggered {
+			hits[i] = drones.GeofenceHit{
+				ID:             g.ID,
+				Name:           g.Name,
+				AlarmLevel:     g.AlarmLevel,
+				AlarmMessage:   g.AlarmMessage,
+				NotifyWebhook:  g.NotifyWebhook,
+			}
+		}
+		return hits
+	})
+	dronesSvc.SetGeofenceNotifier(func(geofenceID, geofenceName, entityType, entityID string, lat, lon float64, alarmLevel, message string, notifyWebhook bool) {
+		// Broadcast geofence.event via WebSocket
+		if g := geofencesSvc.GetByID(geofenceID); g != nil {
+			geofencesSvc.NotifyViolation(g, entityType, entityID, lat, lon)
+		}
+		// Persist as alert event (shows in Recent Events on alerts page)
+		severity := alerts.SeverityAlert
+		switch alarmLevel {
+		case "INFO":
+			severity = alerts.SeverityInfo
+		case "NOTICE":
+			severity = alerts.SeverityNotice
+		case "CRITICAL":
+			severity = alerts.SeverityCritical
+		}
+		data := map[string]interface{}{
+			"geofenceId":   geofenceID,
+			"geofenceName": geofenceName,
+			"entityType":   entityType,
+			"entityId":     entityID,
+			"latitude":     lat,
+			"longitude":    lon,
+		}
+		title := fmt.Sprintf("Geofence breach: %s", geofenceName)
+		alertsSvc.TriggerDirect(context.Background(), severity, title, message, data)
+
+		// Fire webhook if enabled on this geofence
+		if notifyWebhook {
+			webhooksSvc.Dispatch("alert.geofence", map[string]interface{}{
+				"geofenceId":   geofenceID,
+				"geofenceName": geofenceName,
+				"entityType":   entityType,
+				"entityId":     entityID,
+				"latitude":     lat,
+				"longitude":    lon,
+				"alarmLevel":   alarmLevel,
+				"message":      message,
+			})
+		}
+	})
+	targetsSvc := targets.NewService(db, hub)
 	alarmsSvc := alarms.NewService(db)
 	firewallSvc := firewall.NewService(db)
 	exportsSvc := exports.NewService(db)
