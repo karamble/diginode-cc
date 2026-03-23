@@ -126,6 +126,14 @@ export interface Target {
   latitude?: number
   longitude?: number
   status: string
+  url?: string
+  tags?: string[]
+  notes?: string
+  createdBy?: string
+  firstNodeId?: string
+  trackingConfidence?: number | null
+  trackingUncertainty?: number | null
+  triangulationMethod?: string
   createdAt: string
   updatedAt: string
 }

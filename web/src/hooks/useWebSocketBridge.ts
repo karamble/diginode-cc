@@ -144,8 +144,22 @@ export function useWebSocketBridge() {
 
       // Target
       'target.update': (p) => {
-        useTargetStore.getState().updateTarget(p as Target)
+        const target = p as Target
+        useTargetStore.getState().updateTarget(target)
         useTerminalStore.getState().addEntry('target.update', p)
+
+        // Notify when triangulation result arrives (has confidence data)
+        if (target.trackingConfidence != null && target.trackingConfidence > 0) {
+          const pct = Math.round((target.trackingConfidence as number) * 100)
+          const unc = target.trackingUncertainty != null ? `±${Math.round(target.trackingUncertainty as number)}m` : ''
+          notify({
+            type: 'system',
+            severity: pct >= 70 ? 'notice' : pct >= 50 ? 'alert' : 'critical',
+            title: 'Triangulation complete',
+            message: `${target.name || target.mac}: ${pct}% confidence ${unc}`,
+            timestamp: new Date().toISOString(),
+          })
+        }
       },
 
       // Command

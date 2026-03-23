@@ -43,6 +43,9 @@ interface DroneRow {
   status: string
   source?: string
   siteName?: string
+  operatorLat?: number
+  operatorLon?: number
+  faa?: Record<string, string>
   lastSeen?: string
 }
 
@@ -99,9 +102,13 @@ interface Target {
   name: string
   description?: string
   targetType?: string
+  mac?: string
   latitude?: number
   longitude?: number
   status: string
+  trackingConfidence?: number | null
+  trackingUncertainty?: number | null
+  triangulationMethod?: string
 }
 
 interface Aircraft {
@@ -119,67 +126,88 @@ interface ADSBStatus {
   enabled: boolean
 }
 
-// Custom red icon for drones
-function droneIcon(status: string) {
-  const color = status === 'HOSTILE' ? '#EF4444' : status === 'FRIENDLY' ? '#22C55E' : status === 'NEUTRAL' ? '#3B82F6' : '#94A3B8'
+// --- Map marker icon SVGs by type ---
+// Drone: quadcopter silhouette (4 rotors)
+const DRONE_SVG = `<path d="M12 2v2m0 16v2M2 12h2m16 0h2M6.3 6.3l1.4 1.4m8.6 8.6l1.4 1.4M17.7 6.3l-1.4 1.4M7.7 15.7l-1.4 1.4M12 8a4 4 0 100 8 4 4 0 000-8z"/>`
+// WiFi: signal waves
+const WIFI_SVG = `<path d="M12 20h.01M8.53 16.11a6 6 0 018.94 0M5.64 12.72a10 10 0 0112.72 0M2.1 9.32a14 14 0 0119.8 0"/>`
+// BLE: bluetooth symbol
+const BLE_SVG = `<path d="M7 7l10 10-5 5V2l5 5L7 17"/>`
+// Person: user silhouette
+const PERSON_SVG = `<path d="M12 12a4 4 0 100-8 4 4 0 000 8zm0 2c-4 0-8 2-8 4v2h16v-2c0-2-4-4-8-4z"/>`
+// Vehicle: car
+const VEHICLE_SVG = `<path d="M5 17h14M5 17a2 2 0 01-2-2v-3l2-5h10l2 5v3a2 2 0 01-2 2M5 17a2 2 0 002 2m10-2a2 2 0 002 2M7 13h.01M17 13h.01"/>`
+// Generic crosshair
+const TARGET_SVG = `<circle cx="12" cy="12" r="3"/><path d="M12 2v4m0 12v4M2 12h4m12 0h4"/>`
+// Aircraft: airplane
+const AIRCRAFT_SVG = `<path d="M12 2L9 9H2l3 5-1 8 8-4 8 4-1-8 3-5h-7z"/>`
+
+// Status/threat color mapping for drones
+function droneStatusColor(status: string): string {
+  switch (status) {
+    case 'HOSTILE': return '#EF4444'
+    case 'FRIENDLY': return '#22C55E'
+    case 'NEUTRAL': return '#F59E0B'
+    default: return '#94A3B8'
+  }
+}
+
+// Target type color: active = orange, resolved = gray, triangulating = blue
+function targetStatusColor(status: string): string {
+  switch (status) {
+    case 'active': return '#F97316'
+    case 'triangulating': return '#3B82F6'
+    case 'resolved': return '#64748B'
+    default: return '#F97316'
+  }
+}
+
+// SVG icon by target type
+function targetTypeSvg(targetType?: string): string {
+  switch (targetType) {
+    case 'wifi': return WIFI_SVG
+    case 'ble': return BLE_SVG
+    case 'drone': return DRONE_SVG
+    case 'person': return PERSON_SVG
+    case 'vehicle': return VEHICLE_SVG
+    default: return TARGET_SVG
+  }
+}
+
+function makeIcon(svg: string, color: string, size: number, shape: 'circle' | 'square' | 'diamond' = 'circle') {
+  const border = shape === 'diamond' ? `transform: rotate(45deg);` : shape === 'square' ? `border-radius: 4px;` : `border-radius: 50%;`
+  const inner = shape === 'diamond'
+    ? `<div style="transform: rotate(-45deg); display:flex; align-items:center; justify-content:center; width:100%; height:100%;"><svg width="${size*0.5}" height="${size*0.5}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${svg}</svg></div>`
+    : `<svg width="${size*0.5}" height="${size*0.5}" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${svg}</svg>`
+
   return L.divIcon({
-    className: 'custom-drone-icon',
+    className: '',
     html: `<div style="
-      width: 28px; height: 28px;
-      background: ${color}22;
+      width: ${size}px; height: ${size}px;
+      background: ${color}18;
       border: 2px solid ${color};
-      border-radius: 50%;
+      ${border}
       display: flex; align-items: center; justify-content: center;
       box-shadow: 0 0 8px ${color}44;
-    ">
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="${color}" stroke-width="2">
-        <path d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2h6a2 2 0 002-2v-1a2 2 0 012-2h1.945M12 3v3m-4.243.757L6.343 5.343m11.314 1.414L16.243 5.343"/>
-      </svg>
-    </div>`,
-    iconSize: [28, 28],
-    iconAnchor: [14, 14],
-    popupAnchor: [0, -14],
+    ">${inner}</div>`,
+    iconSize: [size, size],
+    iconAnchor: [size/2, size/2],
+    popupAnchor: [0, -size/2],
   })
 }
 
-// Orange diamond icon for targets
-function targetIcon() {
-  return L.divIcon({
-    className: 'custom-target-icon',
-    html: `<div style="
-      width: 24px; height: 24px;
-      display: flex; align-items: center; justify-content: center;
-    ">
-      <div style="
-        width: 16px; height: 16px;
-        background: #F97316;
-        border: 2px solid #FB923C;
-        transform: rotate(45deg);
-        box-shadow: 0 0 8px #F9731644;
-      "></div>
-    </div>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
-    popupAnchor: [0, -12],
-  })
+function droneIcon(status: string) {
+  return makeIcon(DRONE_SVG, droneStatusColor(status), 28)
 }
 
-// Purple plane icon for ADS-B aircraft
+function targetIcon(targetType?: string, status?: string) {
+  const color = targetStatusColor(status || 'active')
+  const svg = targetTypeSvg(targetType)
+  return makeIcon(svg, color, 26, 'diamond')
+}
+
 function aircraftIcon() {
-  return L.divIcon({
-    className: 'custom-aircraft-icon',
-    html: `<div style="
-      width: 24px; height: 24px;
-      display: flex; align-items: center; justify-content: center;
-    ">
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="#A855F7" stroke="#C084FC" stroke-width="1">
-        <path d="M12 2L9 9H2l3 5-1 8 8-4 8 4-1-8 3-5h-7z"/>
-      </svg>
-    </div>`,
-    iconSize: [24, 24],
-    iconAnchor: [12, 12],
-    popupAnchor: [0, -12],
-  })
+  return makeIcon(AIRCRAFT_SVG, '#A855F7', 24)
 }
 
 // Fit bounds to all visible markers
@@ -344,9 +372,7 @@ export default function MapPage() {
                         </div>
                         <div style={{ color: '#94a3b8' }}>
                           <div>Status: <span style={{
-                            color: d.status === 'HOSTILE' ? '#EF4444' :
-                                   d.status === 'FRIENDLY' ? '#22C55E' :
-                                   d.status === 'NEUTRAL' ? '#3B82F6' : '#94A3B8'
+                            color: droneStatusColor(d.status)
                           }}>{d.status}</span></div>
                           {d.mac && <div>MAC: {d.mac}</div>}
                           {d.altitude !== undefined && d.altitude > 0 && (
@@ -364,8 +390,17 @@ export default function MapPage() {
                           {(d.uaType || d.manufacturer) && (
                             <div>Type: {d.uaType || d.manufacturer}</div>
                           )}
+                          {d.operatorLat !== undefined && d.operatorLat !== 0 && (
+                            <div>Operator: {d.operatorLat?.toFixed(5)}, {d.operatorLon?.toFixed(5)}</div>
+                          )}
+                          {d.faa && Object.keys(d.faa).length > 0 && (
+                            <div style={{ marginTop: '3px', borderTop: '1px solid #334155', paddingTop: '3px', color: '#22C55E' }}>
+                              <div>{[d.faa.makeName || d.faa.manufacturer, d.faa.modelName || d.faa.model].filter(Boolean).join(' ') || 'FAA Match'}</div>
+                              {d.faa.registrantName && <div style={{ color: '#94a3b8' }}>{d.faa.registrantName}</div>}
+                              {d.faa.nNumber && <div style={{ color: '#64748B' }}>N-{d.faa.nNumber}</div>}
+                            </div>
+                          )}
                           {d.source && <div>Source: {d.source}</div>}
-                          {d.siteName && <div>Site: {d.siteName}</div>}
                           {d.lastSeen && <div style={{ marginTop: '2px', fontSize: '10px', color: '#64748B' }}>Last: {new Date(d.lastSeen).toLocaleString()}</div>}
                         </div>
                       </div>
@@ -493,17 +528,28 @@ export default function MapPage() {
                   <Marker
                     key={`target-${t.id}`}
                     position={[t.latitude!, t.longitude!]}
-                    icon={targetIcon()}
+                    icon={targetIcon(t.targetType, t.status)}
                   >
                     <Popup>
-                      <div className="text-xs min-w-[140px]" style={{ color: '#e2e8f0' }}>
+                      <div className="text-xs min-w-[160px]" style={{ color: '#e2e8f0' }}>
                         <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '4px', color: '#f1f5f9' }}>
                           {t.name}
                         </div>
                         <div style={{ color: '#94a3b8' }}>
                           {t.description && <div>{t.description}</div>}
                           <div>Type: {t.targetType || '-'}</div>
-                          <div>Status: <span style={{ color: t.status === 'active' ? '#22C55E' : '#94A3B8' }}>{t.status}</span></div>
+                          {t.mac && <div>MAC: {t.mac}</div>}
+                          <div>Status: <span style={{ color: t.status === 'active' ? '#22C55E' : t.status === 'triangulating' ? '#3B82F6' : '#94A3B8' }}>{t.status}</span></div>
+                          {t.trackingConfidence != null && t.trackingConfidence > 0 && (
+                            <div>Confidence: <span style={{
+                              color: t.trackingConfidence > 0.7 ? '#22C55E' : t.trackingConfidence > 0.5 ? '#F59E0B' : '#EF4444'
+                            }}>{Math.round(t.trackingConfidence * 100)}%</span>
+                            {t.trackingUncertainty != null && t.trackingUncertainty > 0 && (
+                              <span> &plusmn;{Math.round(t.trackingUncertainty)}m</span>
+                            )}
+                            </div>
+                          )}
+                          {t.triangulationMethod && <div style={{ fontSize: '10px', color: '#64748B' }}>{t.triangulationMethod}</div>}
                         </div>
                       </div>
                     </Popup>
