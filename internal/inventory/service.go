@@ -92,6 +92,58 @@ func (s *Service) Track(mac, manufacturer, ssid string, rssi int) {
 	go s.persist(dev)
 }
 
+// TrackFull adds or updates a device with full detection data from mesh sensors.
+func (s *Service) TrackFull(mac, manufacturer, ssid, deviceType string, rssi int, nodeID string, lat, lon float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	dev, exists := s.devices[mac]
+	if !exists {
+		dev = &Device{
+			MAC:       mac,
+			FirstSeen: time.Now(),
+		}
+		s.devices[mac] = dev
+		slog.Info("new inventory device", "mac", mac, "type", deviceType, "nodeId", nodeID)
+	}
+
+	if manufacturer != "" {
+		dev.Manufacturer = manufacturer
+	}
+	if ssid != "" {
+		dev.LastSSID = ssid
+	}
+	if deviceType != "" {
+		dev.DeviceType = deviceType
+	}
+	if nodeID != "" {
+		dev.LastNodeID = nodeID
+	}
+	if lat != 0 && lon != 0 {
+		dev.LastLat = lat
+		dev.LastLon = lon
+	}
+	dev.RSSI = rssi
+	dev.LastSeen = time.Now()
+
+	// Running RSSI statistics
+	dev.Hits++
+	if dev.MinRSSI == 0 || rssi < dev.MinRSSI {
+		dev.MinRSSI = rssi
+	}
+	if rssi > dev.MaxRSSI {
+		dev.MaxRSSI = rssi
+	}
+	dev.AvgRSSI = dev.AvgRSSI + (float64(rssi)-dev.AvgRSSI)/float64(dev.Hits)
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventInventory,
+		Payload: dev,
+	})
+
+	go s.persist(dev)
+}
+
 // GetAll returns all devices.
 func (s *Service) GetAll() []*Device {
 	s.mu.RLock()

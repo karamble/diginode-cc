@@ -166,6 +166,17 @@ export function useWebSocketBridge() {
       // Inventory
       'inventory.update': (p) => {
         useTerminalStore.getState().addEntry('inventory.update', p)
+        const dev = p as Record<string, unknown>
+        if (dev.hits === 1) {
+          const label = (dev.deviceName as string) || (dev.lastSsid as string) || (dev.mac as string) || 'unknown'
+          notify({
+            type: 'system',
+            severity: 'info',
+            title: 'New device detected',
+            message: `${label} (${(dev.deviceType as string) || 'unknown'})`,
+            timestamp: new Date().toISOString(),
+          })
+        }
       },
 
       // ADS-B
