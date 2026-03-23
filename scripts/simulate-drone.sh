@@ -1,16 +1,19 @@
 #!/usr/bin/env bash
 #
-# simulate-drone.sh — Simulate an AntiHunter DigiNode sensor detecting a drone.
+# simulate-drone.sh — Simulate AntiHunter DigiNode sensor detections.
 #
-# Sends DRONE: telemetry lines to the local DigiNode CC /api/serial/simulate
-# endpoint, matching the exact message format that AntiHunter sensor firmware
-# transmits over Meshtastic LoRa. The full pipeline processes the data:
-#   DigiNode CC text parser → DroneService → DB + WebSocket → gotailme dashboard
+# Sends text lines to the DigiNode CC /api/serial/simulate endpoint,
+# matching the exact message format that AntiHunter sensor firmware
+# transmits over Meshtastic LoRa.
 #
 # Usage:
-#   ./scripts/simulate-drone.sh                          # defaults
-#   ./scripts/simulate-drone.sh --lat 50.148 --lon 19.005  # custom coordinates
-#   ./scripts/simulate-drone.sh --drone-count 3 --iterations 30
+#   ./scripts/simulate-drone.sh                            # drones (default)
+#   ./scripts/simulate-drone.sh --mode full                # all entity types
+#   ./scripts/simulate-drone.sh --mode triangulation       # T_D/T_F/T_C sequence
+#   ./scripts/simulate-drone.sh --mode attacks             # deauth events
+#   ./scripts/simulate-drone.sh --mode targets             # WiFi/BLE devices
+#   ./scripts/simulate-drone.sh --mode status              # node heartbeats
+#   ./scripts/simulate-drone.sh --drone-count 3 --speed 40 # custom drones
 #
 set -euo pipefail
 
@@ -18,18 +21,19 @@ set -euo pipefail
 BASE_URL="${BASE_URL:-http://localhost:3000}"
 EMAIL="admin@example.com"
 PASSWORD="admin"
+MODE="drones"
 
-# Target/node coordinates (where the gotailme device is)
+# Coordinates (where the sensor node is)
 TARGET_LAT=50.1481
 TARGET_LON=19.0054
 
 # Drone simulation
 DRONE_COUNT=1
-ITERATIONS=40
-INTERVAL=5          # seconds between updates
-START_DISTANCE=1200 # meters from target
+ITERATIONS=20
+INTERVAL=3
+START_DISTANCE=600
 ALTITUDE=120.0
-SPEED_KMH=55        # approach speed km/h
+SPEED_KMH=40
 NODE_ID="AH-SIM"
 DRONE_ID=""
 MAC=""
@@ -38,6 +42,7 @@ WITH_TARGETS=false
 # ── Parse arguments ───────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --mode)           MODE="$2"; shift 2 ;;
     --base-url)       BASE_URL="$2"; shift 2 ;;
     --lat)            TARGET_LAT="$2"; shift 2 ;;
     --lon)            TARGET_LON="$2"; shift 2 ;;
@@ -54,25 +59,36 @@ while [[ $# -gt 0 ]]; do
     --email)          EMAIL="$2"; shift 2 ;;
     --password)       PASSWORD="$2"; shift 2 ;;
     -h|--help)
-      echo "Usage: $0 [OPTIONS]"
-      echo ""
-      echo "Simulate drone detection from an AntiHunter sensor node."
-      echo ""
-      echo "Options:"
-      echo "  --base-url URL    DigiNode CC URL (default: http://localhost:3000)"
-      echo "  --lat LAT         Target latitude (default: 50.1481)"
-      echo "  --lon LON         Target longitude (default: 19.0054)"
-      echo "  --drone-count N   Number of drones (default: 1)"
-      echo "  --iterations N    Telemetry updates per drone (default: 40)"
-      echo "  --interval SECS   Seconds between updates (default: 5)"
-      echo "  --distance M      Start distance in meters (default: 1200)"
-      echo "  --altitude M      Starting altitude in meters (default: 120)"
-      echo "  --speed KMH       Approach speed km/h (default: 55)"
-      echo "  --node-id ID      Sensor node ID (default: AH-SIM)"
-      echo "  --drone-id ID     Override drone ID"
-      echo "  --mac MAC         Override drone MAC"
-      echo "  --email EMAIL     Login email (default: admin@example.com)"
-      echo "  --password PASS   Login password (default: admin)"
+      cat <<HELP
+Usage: $0 [OPTIONS]
+
+Simulate AntiHunter DigiNode sensor detections.
+
+Modes (--mode):
+  drones          Drone detection with zigzag flight paths (default)
+  targets         WiFi/BLE device detections around the sensor
+  triangulation   T_D → T_F → T_C sequence from multiple nodes
+  attacks         Deauth/disassoc attack events
+  status          Periodic sensor node STATUS heartbeats
+  full            Run all modes sequentially
+
+Options:
+  --base-url URL    DigiNode CC URL (default: http://localhost:3000)
+  --lat LAT         Sensor node latitude (default: 50.1481)
+  --lon LON         Sensor node longitude (default: 19.0054)
+  --drone-count N   Number of drones (default: 1)
+  --iterations N    Updates per simulation (default: 20)
+  --interval SECS   Seconds between updates (default: 3)
+  --distance M      Drone start distance in meters (default: 600)
+  --altitude M      Drone starting altitude (default: 120)
+  --speed KMH       Drone approach speed km/h (default: 40)
+  --node-id ID      Sensor node ID (default: AH-SIM)
+  --drone-id ID     Override drone ID
+  --mac MAC         Override drone MAC
+  --with-targets    Also generate WiFi target detections during drone sim
+  --email EMAIL     Login email (default: admin@example.com)
+  --password PASS   Login password (default: admin)
+HELP
       exit 0
       ;;
     *) echo "Unknown option: $1"; exit 1 ;;
@@ -92,21 +108,27 @@ TOKEN=$(curl -sf "${API}/auth/login" \
 }
 echo "Authenticated."
 
-# ── Helper: send lines to simulate endpoint ───────────────────────────────────
+# ── Helpers ───────────────────────────────────────────────────────────────────
 send_lines() {
-  local json_lines="$1"
   curl -sf "${API}/serial/simulate" \
     -H "Authorization: Bearer ${TOKEN}" \
     -H 'Content-Type: application/json' \
-    -d "{\"lines\": ${json_lines}}" > /dev/null
+    -d "{\"lines\": ${1}}" > /dev/null
 }
 
-# ── Helper: generate random MAC ──────────────────────────────────────────────
 random_mac() {
   printf '60:60:1F:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
 }
 
-# ── Helper: generate DJI-style drone ID ──────────────────────────────────────
+random_target_mac() {
+  # Locally administered bit set (AA:xx) for randomized devices
+  printf 'AA:BB:CC:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
+}
+
+random_ble_mac() {
+  printf 'DE:AD:%02X:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256))
+}
+
 random_drone_id() {
   local chars="0123456789ABCDEFGHJKLMNPQRSTUVWXYZ"
   local id="1581F5F"
@@ -116,160 +138,332 @@ random_drone_id() {
   echo "$id"
 }
 
-# ── Helper: offset lat/lon by meters and heading ─────────────────────────────
-# Uses simple equirectangular approximation (good enough for <50km)
 offset_position() {
-  local lat="$1" lon="$2" dist_m="$3" heading_deg="$4"
   python3 -c "
 import math
-lat, lon = $lat, $lon
-d, h = $dist_m, math.radians($heading_deg)
+lat, lon = $1, $2
+d, h = $3, math.radians($4)
 dlat = math.cos(h) * d / 111320.0
 dlon = math.sin(h) * d / (111320.0 * math.cos(math.radians(lat)))
 print(f'{lat + dlat:.6f} {lon + dlon:.6f}')
 "
 }
 
-# ── Helper: compute distance between two points ──────────────────────────────
 distance_m() {
-  local lat1="$1" lon1="$2" lat2="$3" lon2="$4"
   python3 -c "
 import math
-lat1, lon1, lat2, lon2 = $lat1, $lon1, $lat2, $lon2
+lat1, lon1, lat2, lon2 = $1, $2, $3, $4
 dlat = (lat2 - lat1) * 111320
 dlon = (lon2 - lon1) * 111320 * math.cos(math.radians((lat1 + lat2) / 2))
 print(f'{math.sqrt(dlat**2 + dlon**2):.1f}')
 "
 }
 
-# ── Bootstrap: send STATUS line to register the simulated sensor node ─────────
-echo ""
-echo "Bootstrapping sensor node '${NODE_ID}' at ${TARGET_LAT}, ${TARGET_LON}..."
-STATUS_LINE="${NODE_ID}: STATUS: Mode:WiFi+BLE Scan:ACTIVE Hits:0 Temp:38C Up:00:05:00 GPS:$(printf '%.6f' $TARGET_LAT),$(printf '%.6f' $TARGET_LON)"
-send_lines "[\"${STATUS_LINE}\"]"
-echo "  -> ${STATUS_LINE}"
-sleep 1
+jitter_pos() {
+  # Add small random offset to a position (meters)
+  python3 -c "
+import random
+lat, lon, meters = $1, $2, $3
+dlat = random.gauss(0, meters / 111320)
+dlon = random.gauss(0, meters / (111320 * __import__('math').cos(__import__('math').radians(lat))))
+print(f'{lat + dlat:.6f} {lon + dlon:.6f}')
+"
+}
 
-# ── Simulate drones ──────────────────────────────────────────────────────────
-echo ""
-echo "Simulating ${DRONE_COUNT} drone(s): ${ITERATIONS} updates, ${INTERVAL}s interval, ${SPEED_KMH} km/h approach"
-echo "Target: ${TARGET_LAT}, ${TARGET_LON} | Start distance: ${START_DISTANCE}m"
-echo ""
+# ── Bootstrap sensor node ────────────────────────────────────────────────────
+bootstrap_node() {
+  local nid="$1" lat="$2" lon="$3"
+  local line="${nid}: STATUS: Mode:WiFi+BLE Scan:ACTIVE Hits:0 Temp:38C Up:00:05:00 GPS:$(printf '%.6f' $lat),$(printf '%.6f' $lon)"
+  send_lines "[\"${line}\"]"
+  echo "  Node ${nid} at ${lat}, ${lon}"
+}
 
-for d in $(seq 1 "$DRONE_COUNT"); do
-  (
-    # Generate or use provided drone identity
-    if [[ -n "$DRONE_ID" && "$DRONE_COUNT" -eq 1 ]]; then
-      did="$DRONE_ID"
-    elif [[ -n "$DRONE_ID" ]]; then
-      did="${DRONE_ID}-${d}"
-    else
-      did=$(random_drone_id)
-    fi
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE: drones — flying drones with zigzag approach
+# ══════════════════════════════════════════════════════════════════════════════
+run_drones() {
+  echo ""
+  echo "═══ DRONES: ${DRONE_COUNT} drone(s), ${ITERATIONS} updates, ${INTERVAL}s interval, ${SPEED_KMH} km/h"
+  echo ""
 
-    if [[ -n "$MAC" && "$DRONE_COUNT" -eq 1 ]]; then
-      mac="$MAC"
-    else
-      mac=$(random_mac)
-    fi
+  for d in $(seq 1 "$DRONE_COUNT"); do
+    (
+      if [[ -n "$DRONE_ID" && "$DRONE_COUNT" -eq 1 ]]; then did="$DRONE_ID"
+      elif [[ -n "$DRONE_ID" ]]; then did="${DRONE_ID}-${d}"
+      else did=$(random_drone_id); fi
 
-    # Random starting heading (direction drone comes from)
-    heading=$(python3 -c "import random; print(f'{random.uniform(0, 360):.1f}')")
+      if [[ -n "$MAC" && "$DRONE_COUNT" -eq 1 ]]; then mac="$MAC"
+      else mac=$(random_mac); fi
 
-    # Place drone at start distance
-    start_pos=$(offset_position "$TARGET_LAT" "$TARGET_LON" "$START_DISTANCE" "$heading")
-    drone_lat=$(echo "$start_pos" | awk '{print $1}')
-    drone_lon=$(echo "$start_pos" | awk '{print $2}')
+      heading=$(python3 -c "import random; print(f'{random.uniform(0, 360):.1f}')")
+      start_pos=$(offset_position "$TARGET_LAT" "$TARGET_LON" "$START_DISTANCE" "$heading")
+      drone_lat=$(echo "$start_pos" | awk '{print $1}')
+      drone_lon=$(echo "$start_pos" | awk '{print $2}')
+      op_offset=$(python3 -c "import random; print(f'{random.uniform(-0.002, 0.002):.6f} {random.uniform(-0.002, 0.002):.6f}')")
+      op_lat=$(python3 -c "print(f'{$drone_lat + $(echo $op_offset | awk '{print $1}'):.6f}')")
+      op_lon=$(python3 -c "print(f'{$drone_lon + $(echo $op_offset | awk '{print $2}'):.6f}')")
+      alt="$ALTITUDE"
+      spd=$(python3 -c "print(f'{$SPEED_KMH / 3.6:.1f}')")
 
-    # Operator near drone start
-    op_offset=$(python3 -c "import random; print(f'{random.uniform(-0.002, 0.002):.6f} {random.uniform(-0.002, 0.002):.6f}')")
-    op_lat=$(python3 -c "print(f'{$drone_lat + $(echo $op_offset | awk '{print $1}'):.6f}')")
-    op_lon=$(python3 -c "print(f'{$drone_lon + $(echo $op_offset | awk '{print $2}'):.6f}')")
+      echo "[${did}] MAC=${mac} heading=${heading}deg"
 
-    alt="$ALTITUDE"
-    spd=$(python3 -c "print(f'{$SPEED_KMH / 3.6:.1f}')") # km/h -> m/s
-    rssi=-85
+      for i in $(seq 1 "$ITERATIONS"); do
+        dist=$(distance_m "$drone_lat" "$drone_lon" "$TARGET_LAT" "$TARGET_LON")
+        mps=$(python3 -c "print(f'{($SPEED_KMH * 1000.0 / 3600.0) * $INTERVAL:.1f}')")
 
-    echo "[${did}] MAC=${mac} heading=${heading}deg from ${drone_lat},${drone_lon}"
-
-    for i in $(seq 1 "$ITERATIONS"); do
-      # Move drone toward target
-      dist=$(distance_m "$drone_lat" "$drone_lon" "$TARGET_LAT" "$TARGET_LON")
-      meters_per_step=$(python3 -c "print(f'{($SPEED_KMH * 1000.0 / 3600.0) * $INTERVAL:.1f}')")
-
-      # Move toward target with zigzag (lateral oscillation)
-      new_pos=$(python3 -c "
+        new_pos=$(python3 -c "
 import math, random
-lat1, lon1 = $drone_lat, $drone_lon
-lat2, lon2 = $TARGET_LAT, $TARGET_LON
-step_i = $i
+lat1, lon1, lat2, lon2, step_i = $drone_lat, $drone_lon, $TARGET_LAT, $TARGET_LON, $i
 dlat = (lat2 - lat1) * 111320
 dlon = (lon2 - lon1) * 111320 * math.cos(math.radians((lat1 + lat2) / 2))
 dist = math.sqrt(dlat**2 + dlon**2)
-if dist < 30:
-    print(f'{lat2:.6f} {lon2:.6f}')
+if dist < 30: print(f'{lat2:.6f} {lon2:.6f}')
 else:
-    step = min($meters_per_step, dist)
-    # Forward component (toward target)
-    fwd_ratio = step * 0.7 / dist
-    # Lateral zigzag: perpendicular to heading, alternating direction
-    # bearing to target
+    step = min($mps, dist)
+    fwd = step * 0.7 / dist
     bearing = math.atan2(dlon, dlat)
-    # perpendicular offset oscillates with step number
-    zigzag_amplitude = min(80, dist * 0.12)  # meters, shrinks as drone gets close
-    lateral = zigzag_amplitude * math.sin(step_i * 1.3)  # oscillate
-    perp_bearing = bearing + math.pi / 2
-    lat_offset = lateral * math.cos(perp_bearing) / 111320
-    lon_offset = lateral * math.sin(perp_bearing) / (111320 * math.cos(math.radians(lat1)))
-    nlat = lat1 + (lat2 - lat1) * fwd_ratio + lat_offset + random.gauss(0, 0.000003)
-    nlon = lon1 + (lon2 - lon1) * fwd_ratio + lon_offset + random.gauss(0, 0.000003)
+    amp = min(80, dist * 0.12)
+    lateral = amp * math.sin(step_i * 1.3)
+    perp = bearing + math.pi / 2
+    nlat = lat1 + (lat2-lat1)*fwd + lateral*math.cos(perp)/111320 + random.gauss(0,0.000003)
+    nlon = lon1 + (lon2-lon1)*fwd + lateral*math.sin(perp)/(111320*math.cos(math.radians(lat1))) + random.gauss(0,0.000003)
     print(f'{nlat:.6f} {nlon:.6f}')
 ")
-      drone_lat=$(echo "$new_pos" | awk '{print $1}')
-      drone_lon=$(echo "$new_pos" | awk '{print $2}')
+        drone_lat=$(echo "$new_pos" | awk '{print $1}')
+        drone_lon=$(echo "$new_pos" | awk '{print $2}')
+        rssi=$(python3 -c "print(max(-95, min(-30, -30 - int($dist / 20))))")
+        alt=$(python3 -c "import random; print(f'{$alt + random.uniform(-0.5, 0.5):.1f}')")
 
-      # RSSI increases as drone approaches (less negative = stronger)
-      rssi=$(python3 -c "
-dist = $dist
-rssi = max(-95, min(-30, -30 - int(dist / 20)))
-print(rssi)
-")
-      # Vary altitude slightly
-      alt=$(python3 -c "import random; print(f'{$alt + random.uniform(-0.5, 0.5):.1f}')")
+        LINE="${NODE_ID}: DRONE: ${mac} ID:${did} R${rssi} GPS:${drone_lat},${drone_lon} ALT:${alt} SPD:${spd} OP:${op_lat},${op_lon}"
 
-      LINE="${NODE_ID}: DRONE: ${mac} ID:${did} R${rssi} GPS:${drone_lat},${drone_lon} ALT:${alt} SPD:${spd} OP:${op_lat},${op_lon}"
+        if [[ "$WITH_TARGETS" == "true" && $((i % 3)) -eq 1 ]]; then
+          TMAC=$(random_target_mac)
+          TRSSI=$(( -60 - RANDOM % 30 ))
+          TLINE="${NODE_ID}: Target: WiFi ${TMAC} RSSI:${TRSSI} Name:DJI-RC2-SIM GPS:${drone_lat},${drone_lon}"
+          send_lines "[\"${LINE}\", \"${TLINE}\"]"
+          echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} +target"
+        else
+          send_lines "[\"${LINE}\"]"
+          echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi}"
+        fi
 
-      # Optionally send simulated target detections (WiFi/BLE devices near the drone)
-      if [[ "$WITH_TARGETS" == "true" && $((i % 3)) -eq 1 ]]; then
-        TARGET_MAC=$(printf 'AA:BB:CC:%02X:%02X:%02X' $((RANDOM % 256)) $((RANDOM % 256)) $((RANDOM % 256)))
-        TARGET_RSSI=$(( -60 - RANDOM % 30 ))
-        TARGET_LINE="${NODE_ID}: Target: WiFi ${TARGET_MAC} RSSI:${TARGET_RSSI} Name:DJI-RC2-SIM GPS:${drone_lat},${drone_lon}"
-        send_lines "[\"${LINE}\", \"${TARGET_LINE}\"]"
-        echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} ${drone_lat},${drone_lon} +target"
-      else
-        send_lines "[\"${LINE}\"]"
-        echo "  [${did}] #${i}/${ITERATIONS} dist=$(printf '%.0f' $dist)m rssi=${rssi} ${drone_lat},${drone_lon}"
-      fi
+        if python3 -c "import sys; sys.exit(0 if $dist < 30 else 1)" 2>/dev/null; then
+          echo "  [${did}] Reached target!"; break
+        fi
+        sleep "$INTERVAL"
+      done
+      echo "[${did}] Done."
+    ) &
+    [[ "$DRONE_COUNT" -gt 1 ]] && sleep 1
+  done
+  wait
+}
 
-      # Check if reached target
-      if python3 -c "import sys; sys.exit(0 if $dist < 30 else 1)" 2>/dev/null; then
-        echo "  [${did}] Reached target after ${i} steps!"
-        break
-      fi
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE: targets — WiFi and BLE device detections
+# ══════════════════════════════════════════════════════════════════════════════
+run_targets() {
+  echo ""
+  echo "═══ TARGETS: ${ITERATIONS} detections, ${INTERVAL}s interval"
+  echo ""
 
-      sleep "$INTERVAL"
-    done
+  local WIFI_DEVICES=("DJI-RC2-SIM" "iPhone_John" "Galaxy-S24" "NETGEAR-5G" "HiddenCam")
+  local BLE_NAMES=("AirTag-X" "Tile-Tracker" "FitBit-HR" "BLE-Beacon" "Unknown")
+  local CHANNELS=(1 6 11 1 6 11 3 8 13)
 
-    echo "[${did}] Simulation complete."
-  ) &
+  for i in $(seq 1 "$ITERATIONS"); do
+    local lines="["
 
-  # Stagger drone launches
-  if [[ "$DRONE_COUNT" -gt 1 ]]; then
-    sleep 1
-  fi
-done
+    # WiFi device
+    local wmac=$(random_target_mac)
+    local wrssi=$(( -40 - RANDOM % 50 ))
+    local wch=${CHANNELS[$((RANDOM % ${#CHANNELS[@]}))]}
+    local wname=${WIFI_DEVICES[$((RANDOM % ${#WIFI_DEVICES[@]}))]}
+    local wpos=$(jitter_pos "$TARGET_LAT" "$TARGET_LON" 50)
+    local wlat=$(echo "$wpos" | awk '{print $1}')
+    local wlon=$(echo "$wpos" | awk '{print $2}')
+    lines+="\"${NODE_ID}: Target: WiFi ${wmac} RSSI:${wrssi} Name:${wname} GPS:${wlat},${wlon}\""
 
-# Wait for all background drone processes
-wait
+    # BLE device (every other iteration)
+    if [[ $((i % 2)) -eq 0 ]]; then
+      local bmac=$(random_ble_mac)
+      local brssi=$(( -50 - RANDOM % 40 ))
+      local bname=${BLE_NAMES[$((RANDOM % ${#BLE_NAMES[@]}))]}
+      lines+=",\"${NODE_ID}: Target: BLE ${bmac} RSSI:${brssi} Name:${bname}\""
+    fi
+
+    # DEVICE line (raw device scan, every 3rd)
+    if [[ $((i % 3)) -eq 0 ]]; then
+      local dmac=$(random_target_mac)
+      local drssi=$(( -45 - RANDOM % 45 ))
+      local dch=${CHANNELS[$((RANDOM % ${#CHANNELS[@]}))]}
+      lines+=",\"${NODE_ID}: DEVICE:${dmac} W ${drssi} C${dch}\""
+    fi
+
+    lines+="]"
+    send_lines "$lines"
+    echo "  #${i}/${ITERATIONS} WiFi:${wmac} rssi=${wrssi} ch=${wch} name=${wname}"
+    sleep "$INTERVAL"
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE: triangulation — T_D from multiple nodes → T_F → T_C
+# ══════════════════════════════════════════════════════════════════════════════
+run_triangulation() {
+  echo ""
+  echo "═══ TRIANGULATION: 3-node triangulation sequence"
+  echo ""
+
+  local TRI_MAC=$(random_target_mac)
+  local NODE1="AH-N1"
+  local NODE2="AH-N2"
+  local NODE3="AH-N3"
+
+  # Place 3 sensor nodes in a triangle around the target
+  local n1=$(offset_position "$TARGET_LAT" "$TARGET_LON" 80 0)
+  local n2=$(offset_position "$TARGET_LAT" "$TARGET_LON" 80 120)
+  local n3=$(offset_position "$TARGET_LAT" "$TARGET_LON" 80 240)
+  local n1_lat=$(echo "$n1" | awk '{print $1}') n1_lon=$(echo "$n1" | awk '{print $2}')
+  local n2_lat=$(echo "$n2" | awk '{print $1}') n2_lon=$(echo "$n2" | awk '{print $2}')
+  local n3_lat=$(echo "$n3" | awk '{print $1}') n3_lon=$(echo "$n3" | awk '{print $2}')
+
+  # Bootstrap the 3 nodes
+  bootstrap_node "$NODE1" "$n1_lat" "$n1_lon"
+  bootstrap_node "$NODE2" "$n2_lat" "$n2_lon"
+  bootstrap_node "$NODE3" "$n3_lat" "$n3_lon"
+  sleep 1
+
+  echo "  Target MAC: ${TRI_MAC}"
+  echo "  Nodes: ${NODE1} ${NODE2} ${NODE3} in triangle (80m radius)"
+
+  # Phase 1: T_D detections from each node (5 rounds)
+  for round in $(seq 1 5); do
+    local r1=$(( -40 - RANDOM % 20 ))
+    local r2=$(( -45 - RANDOM % 20 ))
+    local r3=$(( -50 - RANDOM % 20 ))
+    send_lines "[\"${NODE1}: T_D: ${TRI_MAC} RSSI:${r1} Hits=${round} Type:WiFi GPS=${n1_lat},${n1_lon}\",\"${NODE2}: T_D: ${TRI_MAC} RSSI:${r2} Hits=${round} Type:WiFi GPS=${n2_lat},${n2_lon}\",\"${NODE3}: T_D: ${TRI_MAC} RSSI:${r3} Hits=${round} Type:BLE GPS=${n3_lat},${n3_lon}\"]"
+    echo "  T_D round ${round}: N1=${r1}dBm N2=${r2}dBm N3=${r3}dBm"
+    sleep "$INTERVAL"
+  done
+
+  # Phase 2: T_F final result
+  local conf=$(python3 -c "import random; print(f'{random.uniform(72, 95):.1f}')")
+  local unc=$(python3 -c "import random; print(f'{random.uniform(5, 25):.1f}')")
+  local fix=$(jitter_pos "$TARGET_LAT" "$TARGET_LON" 15)
+  local fix_lat=$(echo "$fix" | awk '{print $1}')
+  local fix_lon=$(echo "$fix" | awk '{print $2}')
+
+  send_lines "[\"${NODE1}: T_F: MAC=${TRI_MAC} GPS=${fix_lat},${fix_lon} CONF=${conf} UNC=${unc}\"]"
+  echo "  T_F: GPS=${fix_lat},${fix_lon} CONF=${conf}% UNC=${unc}m"
+  sleep 1
+
+  # Phase 3: T_C complete
+  send_lines "[\"${NODE1}: T_C: MAC=${TRI_MAC} Nodes=3\"]"
+  echo "  T_C: Complete (3 nodes)"
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE: attacks — Deauth/disassoc events
+# ══════════════════════════════════════════════════════════════════════════════
+run_attacks() {
+  echo ""
+  echo "═══ ATTACKS: ${ITERATIONS} attack events, ${INTERVAL}s interval"
+  echo ""
+
+  local ATTACK_TYPES=("DEAUTH" "DISASSOC")
+  local CHANNELS=(1 6 11 6 1 11)
+
+  for i in $(seq 1 "$ITERATIONS"); do
+    local atype=${ATTACK_TYPES[$((RANDOM % 2))]}
+    local src=$(random_target_mac)
+    local dst="FF:FF:FF:FF:FF:FF"  # broadcast
+    [[ $((RANDOM % 3)) -eq 0 ]] && dst=$(random_target_mac)  # sometimes targeted
+    local arssi=$(( -30 - RANDOM % 40 ))
+    local ach=${CHANNELS[$((RANDOM % ${#CHANNELS[@]}))]}
+
+    local line="${NODE_ID}: ATTACK: ${atype} ${src}->${dst} R${arssi} C${ach}"
+    send_lines "[\"${line}\"]"
+
+    local mode="BROADCAST"
+    [[ "$dst" != "FF:FF:FF:FF:FF:FF" ]] && mode="TARGETED"
+    echo "  #${i}/${ITERATIONS} ${atype} [${mode}] src=${src} rssi=${arssi} ch=${ach}"
+    sleep "$INTERVAL"
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# MODE: status — Periodic sensor node heartbeats
+# ══════════════════════════════════════════════════════════════════════════════
+run_status() {
+  echo ""
+  echo "═══ STATUS: ${ITERATIONS} heartbeats, ${INTERVAL}s interval"
+  echo ""
+
+  local hits=0
+  local uptime_s=300
+
+  for i in $(seq 1 "$ITERATIONS"); do
+    hits=$(( hits + RANDOM % 10 ))
+    uptime_s=$(( uptime_s + INTERVAL ))
+    local up_h=$(( uptime_s / 3600 ))
+    local up_m=$(( (uptime_s % 3600) / 60 ))
+    local up_s=$(( uptime_s % 60 ))
+    local temp=$(python3 -c "import random; print(f'{35 + random.uniform(0, 15):.0f}')")
+    local up=$(printf '%02d:%02d:%02d' $up_h $up_m $up_s)
+
+    local line="${NODE_ID}: STATUS: Mode:WiFi+BLE Scan:ACTIVE Hits:${hits} Temp:${temp}C Up:${up} GPS:$(printf '%.6f' $TARGET_LAT),$(printf '%.6f' $TARGET_LON)"
+    send_lines "[\"${line}\"]"
+    echo "  #${i}/${ITERATIONS} hits=${hits} temp=${temp}C up=${up}"
+    sleep "$INTERVAL"
+  done
+}
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Main
+# ══════════════════════════════════════════════════════════════════════════════
 echo ""
-echo "All drone simulations complete."
+echo "Bootstrapping sensor node '${NODE_ID}'..."
+bootstrap_node "$NODE_ID" "$TARGET_LAT" "$TARGET_LON"
+sleep 1
+
+case "$MODE" in
+  drones)
+    run_drones
+    ;;
+  targets)
+    run_targets
+    ;;
+  triangulation)
+    run_triangulation
+    ;;
+  attacks)
+    run_attacks
+    ;;
+  status)
+    run_status
+    ;;
+  full)
+    echo ""
+    echo "╔══════════════════════════════════════════╗"
+    echo "║  FULL SIMULATION — all entity types      ║"
+    echo "╚══════════════════════════════════════════╝"
+    run_status &
+    sleep 2
+    run_drones &
+    sleep 2
+    run_targets &
+    sleep 2
+    run_attacks &
+    sleep 5
+    run_triangulation
+    wait
+    ;;
+  *)
+    echo "ERROR: Unknown mode '${MODE}'. Use: drones, targets, triangulation, attacks, status, full"
+    exit 1
+    ;;
+esac
+
+echo ""
+echo "Simulation complete (mode: ${MODE})."
