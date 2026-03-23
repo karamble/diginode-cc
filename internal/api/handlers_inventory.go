@@ -39,18 +39,37 @@ func (s *Server) handlePromoteToTarget(w http.ResponseWriter, r *http.Request) {
 
 	// Build target from device info
 	name := "Promoted: " + mac
-	manufacturer := ""
+	var manufacturer, deviceType, ssid string
+	var lat, lon float64
 	if dev != nil {
 		if dev.DeviceName != "" {
 			name = dev.DeviceName
+		} else if dev.LastSSID != "" {
+			name = dev.LastSSID
 		}
 		manufacturer = dev.Manufacturer
+		deviceType = dev.DeviceType
+		ssid = dev.LastSSID
+		lat = dev.LastLat
+		lon = dev.LastLon
 	}
+
+	desc := fmt.Sprintf("Promoted from inventory (MAC: %s", mac)
+	if manufacturer != "" {
+		desc += ", manufacturer: " + manufacturer
+	}
+	if ssid != "" {
+		desc += ", SSID: " + ssid
+	}
+	desc += ")"
 
 	target := targets.Target{
 		Name:        name,
-		Description: fmt.Sprintf("Promoted from inventory (MAC: %s, manufacturer: %s)", mac, manufacturer),
+		Description: desc,
+		TargetType:  deviceType,
 		MAC:         mac,
+		Latitude:    lat,
+		Longitude:   lon,
 		Status:      "active",
 	}
 
