@@ -125,12 +125,13 @@ export default function InventoryPage() {
                 <tr className="border-b border-dark-700/50">
                   <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">MAC</th>
                   <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Manufacturer</th>
+                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Name/SSID</th>
                   <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Type</th>
                   <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">RSSI</th>
                   <th className="text-right text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Hits</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">First Seen</th>
+                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Location</th>
+                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Node</th>
                   <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Last Seen</th>
-                  <th className="text-left text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Known</th>
                   <th className="text-right text-xs font-medium text-dark-400 uppercase tracking-wider px-4 py-3">Actions</th>
                 </tr>
               </thead>
@@ -144,20 +145,19 @@ export default function InventoryPage() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-sm text-dark-300">{dev.manufacturer || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-dark-300 truncate max-w-[120px]">{dev.lastSsid || dev.deviceName || '-'}</td>
                     <td className="px-4 py-3 text-sm text-dark-300">{dev.deviceType || '-'}</td>
                     <td className="px-4 py-3">
                       <RSSIBar rssi={dev.rssi} />
                     </td>
                     <td className="px-4 py-3 text-sm text-dark-300 text-right font-mono">{dev.hits}</td>
-                    <td className="px-4 py-3 text-sm text-dark-400">{formatDate(dev.firstSeen)}</td>
-                    <td className="px-4 py-3 text-sm text-dark-400">{formatDate(dev.lastSeen)}</td>
-                    <td className="px-4 py-3">
-                      {dev.isKnown ? (
-                        <span className="inline-flex px-2 py-0.5 text-xs font-medium rounded bg-green-600/20 text-green-400 border border-green-500/30">Known</span>
-                      ) : (
-                        <span className="text-xs text-dark-500">-</span>
-                      )}
+                    <td className="px-4 py-3 text-sm text-dark-400 font-mono">
+                      {dev.lastLat && dev.lastLon && dev.lastLat !== 0
+                        ? `${dev.lastLat.toFixed(4)}, ${dev.lastLon.toFixed(4)}`
+                        : '-'}
                     </td>
+                    <td className="px-4 py-3 text-sm text-dark-400 font-mono">{dev.lastNodeId || '-'}</td>
+                    <td className="px-4 py-3 text-sm text-dark-400">{formatDate(dev.lastSeen)}</td>
                     <td className="px-4 py-3 text-right">
                       <button
                         onClick={() => promoteMutation.mutate(dev.mac)}

@@ -23,7 +23,8 @@ const statusBadge: Record<string, string> = {
 export default function TargetsPage() {
   const queryClient = useQueryClient()
   const [showCreate, setShowCreate] = useState(false)
-  const [newTarget, setNewTarget] = useState({ name: '', mac: '', targetType: 'wifi', description: '' })
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [newTarget, setNewTarget] = useState({ name: '', mac: '', targetType: 'wifi', description: '', latitude: '', longitude: '' })
 
   const { data: targets, isLoading, error } = useQuery<Target[]>({
     queryKey: ['targets'],
@@ -31,14 +32,54 @@ export default function TargetsPage() {
   })
 
   const createMutation = useMutation({
-    mutationFn: (body: { name: string; mac: string; targetType: string; description: string; status: string }) =>
-      api.post('/targets', body),
+    mutationFn: (body: Record<string, unknown>) => api.post('/targets', body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['targets'] })
       setShowCreate(false)
-      setNewTarget({ name: '', mac: '', targetType: 'wifi', description: '' })
+      setEditingId(null)
+      setNewTarget({ name: '', mac: '', targetType: 'wifi', description: '', latitude: '', longitude: '' })
     },
   })
+
+  const updateMutation = useMutation({
+    mutationFn: ({ id, body }: { id: string; body: Record<string, unknown> }) => api.put(`/targets/${id}`, body),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['targets'] })
+      setEditingId(null)
+      setNewTarget({ name: '', mac: '', targetType: 'wifi', description: '', latitude: '', longitude: '' })
+    },
+  })
+
+  const startEdit = (t: Target) => {
+    setEditingId(t.id)
+    setShowCreate(true)
+    setNewTarget({
+      name: t.name,
+      mac: t.mac || '',
+      targetType: t.targetType || 'wifi',
+      description: t.description || '',
+      latitude: t.latitude ? String(t.latitude) : '',
+      longitude: t.longitude ? String(t.longitude) : '',
+    })
+  }
+
+  const handleSave = () => {
+    const body: Record<string, unknown> = {
+      name: newTarget.name,
+      mac: newTarget.mac || undefined,
+      targetType: newTarget.targetType,
+      description: newTarget.description || undefined,
+      status: 'active',
+    }
+    if (newTarget.latitude) body.latitude = parseFloat(newTarget.latitude)
+    if (newTarget.longitude) body.longitude = parseFloat(newTarget.longitude)
+
+    if (editingId) {
+      updateMutation.mutate({ id: editingId, body })
+    } else {
+      createMutation.mutate(body)
+    }
+  }
 
   const resolveMutation = useMutation({
     mutationFn: (id: string) => api.post(`/targets/${id}/resolve`),
@@ -90,7 +131,15 @@ export default function TargetsPage() {
             Clear All
           </button>
           <button
-            onClick={() => setShowCreate(!showCreate)}
+            onClick={() => {
+              if (showCreate) {
+                setShowCreate(false)
+                setEditingId(null)
+                setNewTarget({ name: '', mac: '', targetType: 'wifi', description: '', latitude: '', longitude: '' })
+              } else {
+                setShowCreate(true)
+              }
+            }}
             className="px-4 py-2 bg-primary-600 hover:bg-primary-700 text-white text-sm rounded font-medium transition-colors"
           >
             {showCreate ? 'Cancel' : 'Add Target'}
@@ -100,11 +149,11 @@ export default function TargetsPage() {
 
       {showCreate && (
         <div className="bg-surface rounded-lg border border-dark-700/50 p-4 mb-6">
-          <h3 className="text-sm font-medium text-dark-200 mb-3">Create Target</h3>
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+          <h3 className="text-sm font-medium text-dark-200 mb-3">{editingId ? 'Edit Target' : 'Create Target'}</h3>
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
             <input
               type="text"
-              placeholder="Name"
+              placeholder="Name *"
               value={newTarget.name}
               onChange={(e) => setNewTarget({ ...newTarget, name: e.target.value })}
               className="px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500"
@@ -127,26 +176,40 @@ export default function TargetsPage() {
               <option value="vehicle">Vehicle</option>
               <option value="person">Person</option>
             </select>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                placeholder="Description"
-                value={newTarget.description}
-                onChange={(e) => setNewTarget({ ...newTarget, description: e.target.value })}
-                className="flex-1 px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500"
-              />
-              <button
-                onClick={() => createMutation.mutate({ ...newTarget, status: 'active' })}
-                disabled={!newTarget.name || createMutation.isPending}
-                className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm rounded font-medium transition-colors"
-              >
-                Create
-              </button>
-            </div>
+            <input
+              type="text"
+              placeholder="Description"
+              value={newTarget.description}
+              onChange={(e) => setNewTarget({ ...newTarget, description: e.target.value })}
+              className="px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500"
+            />
+            <input
+              type="text"
+              placeholder="Latitude"
+              value={newTarget.latitude}
+              onChange={(e) => setNewTarget({ ...newTarget, latitude: e.target.value })}
+              className="px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500"
+            />
+            <input
+              type="text"
+              placeholder="Longitude"
+              value={newTarget.longitude}
+              onChange={(e) => setNewTarget({ ...newTarget, longitude: e.target.value })}
+              className="px-3 py-2 bg-dark-800 border border-dark-600 rounded text-dark-100 text-sm focus:outline-none focus:border-primary-500"
+            />
           </div>
-          {createMutation.isError && (
-            <p className="mt-2 text-sm text-red-400">{(createMutation.error as Error).message}</p>
-          )}
+          <div className="flex items-center gap-2 mt-3">
+            <button
+              onClick={handleSave}
+              disabled={!newTarget.name || createMutation.isPending || updateMutation.isPending}
+              className="px-4 py-2 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-sm rounded font-medium transition-colors"
+            >
+              {editingId ? 'Save' : 'Create'}
+            </button>
+            {(createMutation.isError || updateMutation.isError) && (
+              <span className="text-sm text-red-400">{((createMutation.error || updateMutation.error) as Error)?.message}</span>
+            )}
+          </div>
         </div>
       )}
 
@@ -199,6 +262,12 @@ export default function TargetsPage() {
                     <td className="px-4 py-3 text-sm text-dark-400 font-mono">{formatCoord(t.longitude)}</td>
                     <td className="px-4 py-3 text-sm text-dark-400">{formatDate(t.createdAt)}</td>
                     <td className="px-4 py-3 text-right space-x-3">
+                      <button
+                        onClick={() => startEdit(t)}
+                        className="text-xs text-primary-400 hover:text-primary-300 transition-colors"
+                      >
+                        Edit
+                      </button>
                       {t.status === 'active' && (
                         <button
                           onClick={() => resolveMutation.mutate(t.id)}
