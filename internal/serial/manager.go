@@ -43,6 +43,9 @@ type Manager struct {
 	textParser        *TextParser // text-mode line parser
 	syntheticID       atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
 	onTargetDetected  func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)
+	onTriData         func(mac, nodeID string, rssi int, lat, lon float64)
+	onTriFinal        func(mac string, lat, lon, confidence, uncertainty float64)
+	onTriComplete     func(mac string, nodes int)
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -62,6 +65,17 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 // SetTargetDetectedCallback sets the handler for target/device detection events from mesh sensors.
 func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)) {
 	m.onTargetDetected = fn
+}
+
+// SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
+func (m *Manager) SetTriangulationCallbacks(
+	onData func(mac, nodeID string, rssi int, lat, lon float64),
+	onFinal func(mac string, lat, lon, confidence, uncertainty float64),
+	onComplete func(mac string, nodes int),
+) {
+	m.onTriData = onData
+	m.onTriFinal = onFinal
+	m.onTriComplete = onComplete
 }
 
 // SetProtocol switches the serial protocol mode ("binary" or "text").
@@ -476,6 +490,32 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 
 		if m.onTargetDetected != nil {
 			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID)
+		}
+
+	case "tri-data":
+		mac, _ := evt.Data["mac"].(string)
+		rssi, _ := evt.Data["rssi"].(int)
+		lat, _ := evt.Data["nodeLat"].(float64)
+		lon, _ := evt.Data["nodeLon"].(float64)
+		if m.onTriData != nil && mac != "" {
+			m.onTriData(mac, evt.NodeID, rssi, lat, lon)
+		}
+
+	case "tri-final":
+		mac, _ := evt.Data["mac"].(string)
+		lat, _ := evt.Data["lat"].(float64)
+		lon, _ := evt.Data["lon"].(float64)
+		conf, _ := evt.Data["confidence"].(float64)
+		unc, _ := evt.Data["uncertainty"].(float64)
+		if m.onTriFinal != nil && mac != "" {
+			m.onTriFinal(mac, lat, lon, conf, unc)
+		}
+
+	case "tri-complete":
+		mac, _ := evt.Data["mac"].(string)
+		nodes, _ := evt.Data["nodes"].(int)
+		if m.onTriComplete != nil {
+			m.onTriComplete(mac, nodes)
 		}
 
 	default:

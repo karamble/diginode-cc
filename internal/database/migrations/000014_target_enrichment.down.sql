@@ -1,0 +1,8 @@
+ALTER TABLE targets DROP COLUMN IF EXISTS notes;
+ALTER TABLE targets DROP COLUMN IF EXISTS triangulation_method;
+ALTER TABLE targets DROP COLUMN IF EXISTS tracking_uncertainty;
+ALTER TABLE targets DROP COLUMN IF EXISTS tracking_confidence;
+ALTER TABLE targets DROP COLUMN IF EXISTS first_node_id;
+ALTER TABLE targets DROP COLUMN IF EXISTS created_by;
+ALTER TABLE targets DROP COLUMN IF EXISTS tags;
+ALTER TABLE targets DROP COLUMN IF EXISTS url;

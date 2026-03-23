@@ -88,6 +88,30 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DRONE:\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+ID:(?P<droneId>[A-Za-z0-9_-]+)\s+R(?P<rssi>-?\d+)\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?)(?:\s+ALT:(?P<alt>-?\d+(?:\.\d+)?))?(?:\s+SPD:(?P<spd>-?\d+(?:\.\d+)?))?(?:\s+OP:(?P<opLat>-?\d+(?:\.\d+)?),(?P<opLon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleDrone,
 		},
+		// T_D (TARGET_DATA): triangulation detection from node
+		// "nodeId: T_D: AA:BB:CC:DD:EE:FF RSSI:-45 Hits=5 Type:WiFi GPS=12.34,56.78"
+		{
+			name: "tri-target-data",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?:TARGET_DATA|T_D):\s*(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+RSSI:(?P<rssi>-?\d+)(?:\s+Hits=(?P<hits>\d+))?(?:\s+Type:(?P<type>\w+))?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+			handler: p.handleTriData,
+		},
+		// T_F (FINAL): triangulation final result
+		// "nodeId: T_F: MAC=AA:BB:CC:DD:EE:FF GPS=12.34,56.78 CONF=87.5 UNC=12.3"
+		{
+			name: "tri-final",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*T_F:\s*MAC=(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+GPS=(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?)\s+CONF=(?P<conf>-?\d+(?:\.\d+)?)\s+UNC=(?P<unc>-?\d+(?:\.\d+)?)`),
+			handler: p.handleTriFinal,
+		},
+		// T_C (COMPLETE): triangulation complete
+		// "nodeId: T_C: MAC=AA:BB:CC:DD:EE:FF Nodes=3"
+		{
+			name: "tri-complete",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*T_C:\s*(?:MAC=(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+)?Nodes=(?P<nodes>\d+)`),
+			handler: p.handleTriComplete,
+		},
 		// Target: type-first: "nodeId: Target: WiFi AA:BB:CC:DD:EE:FF RSSI:-75 Name:MyDevice GPS:12.34,56.78"
 		{
 			name: "target-type-first",
@@ -766,6 +790,66 @@ func (p *TextParser) handleTamper(match []string, names []string, raw string) []
 		NodeID:   nodeID,
 		Data:     map[string]interface{}{"kind": g["tamperKind"]},
 		Raw:      raw,
+	}}
+}
+
+// --- Triangulation event handlers ---
+
+func (p *TextParser) handleTriData(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	mac := strings.ToUpper(g["mac"])
+	data := map[string]interface{}{
+		"mac":     mac,
+		"rssi":    parseOptInt(g["rssi"]),
+		"hits":    parseOptInt(g["hits"]),
+		"type":    g["type"],
+		"nodeLat": parseOptFloat(g["lat"]),
+		"nodeLon": parseOptFloat(g["lon"]),
+	}
+	return []*ParsedEvent{{
+		Kind:   "tri-data",
+		NodeID: nodeID,
+		Data:   data,
+		Raw:    raw,
+	}}
+}
+
+func (p *TextParser) handleTriFinal(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	mac := strings.ToUpper(g["mac"])
+	conf := parseOptFloat(g["conf"])
+	if conf > 1 {
+		conf = conf / 100.0 // CC PRO sends 0-100, normalize to 0-1
+	}
+	data := map[string]interface{}{
+		"mac":         mac,
+		"lat":         parseOptFloat(g["lat"]),
+		"lon":         parseOptFloat(g["lon"]),
+		"confidence":  conf,
+		"uncertainty": parseOptFloat(g["unc"]),
+	}
+	return []*ParsedEvent{{
+		Kind:   "tri-final",
+		NodeID: nodeID,
+		Data:   data,
+		Raw:    raw,
+	}}
+}
+
+func (p *TextParser) handleTriComplete(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	data := map[string]interface{}{
+		"mac":   strings.ToUpper(g["mac"]),
+		"nodes": parseOptInt(g["nodes"]),
+	}
+	return []*ParsedEvent{{
+		Kind:   "tri-complete",
+		NodeID: nodeID,
+		Data:   data,
+		Raw:    raw,
 	}}
 }
 
