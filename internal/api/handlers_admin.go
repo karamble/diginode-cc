@@ -127,7 +127,7 @@ func (s *Server) handleFactoryReset(w http.ResponseWriter, r *http.Request) {
 	s.svc.DB().Pool.Exec(ctx, `
 		INSERT INTO users (email, password_hash, name, role)
 		SELECT 'admin@example.com',
-			'$2a$10$N9qo8uLOickgx2ZMRZoMyeIjZAgcfl7p92ldGxad68LJZdL17lhWy',
+			'$2a$10$pdc.F5coo6FIwTvkD4IBUODFYY9/7QSXUcZWPvn9DKz8gTGS.OZ6q',
 			'Admin', 'ADMIN'
 		WHERE NOT EXISTS (SELECT 1 FROM users)`)
 
