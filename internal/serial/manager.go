@@ -413,13 +413,19 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 		if pktID == 0 {
 			pktID = m.syntheticID.Add(1)
 		}
+		// Use the destination from the parsed event if available (extracted from
+		// preceding Lora RX debug line). Falls back to broadcast if unknown.
+		toAddr := evt.ToNode
+		if toAddr == 0 {
+			toAddr = BroadcastAddr
+		}
 		pkt := &FromRadioPacket{
 			Type: FromRadioMeshPacket,
 			MeshPacket: &MeshPacketData{
 				PortNum: PortNumTextMessage,
 				Payload: []byte(text),
 				From:    parseNodeNum(evt.NodeID),
-				To:      BroadcastAddr,
+				To:      toAddr,
 				ID:      pktID,
 			},
 		}

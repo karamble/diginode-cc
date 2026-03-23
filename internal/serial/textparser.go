@@ -5,6 +5,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // ParsedEvent represents a parsed serial text line.
@@ -12,10 +13,16 @@ type ParsedEvent struct {
 	Kind     string                 // "node-telemetry", "target-detected", "alert", "command-ack", "drone-telemetry", "text-message", "raw"
 	NodeID   string                 // Source node ID
 	PacketID uint32                 // Meshtastic packet ID (extracted from echo line, 0 if unavailable)
+	ToNode   uint32                 // Destination node (0 = unknown, BroadcastAddr = broadcast, else DM target)
 	Data     map[string]interface{} // Parsed fields
 	Raw      string                 // Original line
 	Category string                 // For alerts: "status", "gps", "attack", etc.
 	Level    string                 // For alerts: "INFO", "NOTICE", "ALERT", "CRITICAL"
+}
+
+// pktMeta caches addressing info extracted from Meshtastic debug lines.
+type pktMeta struct {
+	to uint32
 }
 
 // TextParser parses Meshtastic debug console text lines.
@@ -29,10 +36,17 @@ type TextParser struct {
 	fromExtract *regexp.Regexp
 	idExtract   *regexp.Regexp
 	ansiClean   *regexp.Regexp
+	toExtract   *regexp.Regexp // extracts to=0x... from Lora RX / phone downloaded lines
 
 	// Payload normalization helpers
 	nodeIDFallback *regexp.Regexp
 	trailingHash   *regexp.Regexp
+
+	// Packet metadata cache: packet ID → addressing info.
+	// Populated from "Lora RX" and "phone downloaded" debug lines
+	// that arrive before or after the text echo line.
+	pktCache   map[uint32]pktMeta
+	pktCacheMu sync.Mutex
 }
 
 type patternEntry struct {
@@ -48,9 +62,11 @@ func NewTextParser() *TextParser {
 		echoTextMsg:    regexp.MustCompile(`(?i)\btextmessage\s+msg=`),
 		fromExtract:    regexp.MustCompile(`(?i)from=(?:0x)?([0-9a-fA-F]+)`),
 		idExtract:      regexp.MustCompile(`(?i)\bid=(?:0x)?([0-9a-fA-F]+)`),
+		toExtract:      regexp.MustCompile(`(?i)\bto=(?:0x)?([0-9a-fA-F]+)`),
 		ansiClean:      regexp.MustCompile(`\x1b\[[0-9;]*[A-Za-z]`),
 		nodeIDFallback: regexp.MustCompile(`^([A-Za-z0-9_.:-]+)`),
 		trailingHash:   regexp.MustCompile(`#+$`),
+		pktCache:       make(map[uint32]pktMeta),
 	}
 	p.initPatterns()
 	return p
@@ -173,6 +189,62 @@ func (p *TextParser) initPatterns() {
 	}
 }
 
+// cachePacketMeta extracts packet ID and "to" address from Meshtastic debug lines
+// like "Lora RX (id=0x343cf551 fr=0x0409c9d8 to=0x02ec2fe0 ...)" and
+// "phone downloaded packet (id=0x343cf551 fr=0x0409c9d8 to=0x02ec2fe0 ...)".
+// These arrive before the "Received text msg" echo and contain the full addressing.
+func (p *TextParser) cachePacketMeta(cleaned string) {
+	lower := strings.ToLower(cleaned)
+	if !strings.Contains(lower, "lora rx") && !strings.Contains(lower, "phone downloaded") {
+		return
+	}
+
+	idMatch := p.idExtract.FindStringSubmatch(cleaned)
+	toMatch := p.toExtract.FindStringSubmatch(cleaned)
+	if idMatch == nil || toMatch == nil {
+		return
+	}
+
+	pktID, err := strconv.ParseUint(idMatch[1], 16, 32)
+	if err != nil {
+		return
+	}
+	toAddr, err := strconv.ParseUint(toMatch[1], 16, 32)
+	if err != nil {
+		return
+	}
+
+	p.pktCacheMu.Lock()
+	p.pktCache[uint32(pktID)] = pktMeta{to: uint32(toAddr)}
+	// Prune if cache gets too large
+	if len(p.pktCache) > 256 {
+		for k := range p.pktCache {
+			delete(p.pktCache, k)
+			if len(p.pktCache) <= 128 {
+				break
+			}
+		}
+	}
+	p.pktCacheMu.Unlock()
+}
+
+// lookupPacketTo returns the cached "to" address for a packet ID, or 0 if unknown.
+func (p *TextParser) lookupPacketTo(pktID uint32) uint32 {
+	if pktID == 0 {
+		return 0
+	}
+	p.pktCacheMu.Lock()
+	meta, ok := p.pktCache[pktID]
+	if ok {
+		delete(p.pktCache, pktID) // consume
+	}
+	p.pktCacheMu.Unlock()
+	if ok {
+		return meta.to
+	}
+	return 0
+}
+
 // ParseLine processes a single text line from the Heltec serial console.
 func (p *TextParser) ParseLine(line string) []*ParsedEvent {
 	// 1. Clean ANSI escape codes and non-printable chars
@@ -190,6 +262,10 @@ func (p *TextParser) ParseLine(line string) []*ParsedEvent {
 			return nil
 		}
 	}
+
+	// Cache packet addressing from Lora RX / phone downloaded debug lines.
+	// These contain the full from/to/id before the text echo arrives.
+	p.cachePacketMeta(cleaned)
 
 	// 2. Check for Meshtastic text message echo (this determines payload extraction)
 	isMeshEcho := p.isMeshtasticEcho(cleaned)
@@ -278,10 +354,15 @@ func (p *TextParser) parseTextEcho(rawLine, payload string) []*ParsedEvent {
 		}
 	}
 
+	// Look up the cached "to" address from the preceding Lora RX debug line.
+	// The echo line itself only has from= and id=, not to=.
+	toNode := p.lookupPacketTo(packetID)
+
 	return []*ParsedEvent{{
 		Kind:     "text-message",
 		NodeID:   nodeID,
 		PacketID: packetID,
+		ToNode:   toNode,
 		Data:     map[string]interface{}{"text": payload},
 		Raw:      rawLine,
 	}}
