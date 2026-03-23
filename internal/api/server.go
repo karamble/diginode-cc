@@ -9,6 +9,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/gorilla/websocket"
+	"github.com/karamble/diginode-cc/internal/database"
 	"github.com/karamble/diginode-cc/internal/acars"
 	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/audit"
@@ -63,7 +64,11 @@ type Services struct {
 	ADSB        *adsb.Service
 	MQTT        *mqtt.Service
 	Updates     *updates.Service
+	Database    *database.DB
 }
+
+// DB returns the database handle for direct queries (admin operations).
+func (s *Services) DB() *database.DB { return s.Database }
 
 // Server is the HTTP API server.
 type Server struct {
@@ -285,6 +290,15 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/status", s.handleFAAStatus)
 				r.Post("/sync", s.handleFAASync)
 				r.Post("/upload", s.handleFAAUpload)
+			})
+
+			// Admin / Data Management (ADMIN role only)
+			r.Route("/admin", func(r chi.Router) {
+				r.Use(auth.RequireRole(auth.RoleAdmin))
+				r.Post("/clear-detections", s.handleClearDetectionData)
+				r.Post("/clear-operational", s.handleClearOperationalData)
+				r.Post("/prune", s.handlePruneOldData)
+				r.Post("/factory-reset", s.handleFactoryReset)
 			})
 
 			// Exports

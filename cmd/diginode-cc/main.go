@@ -357,6 +357,7 @@ func main() {
 		ADSB:        adsbSvc,
 		MQTT:        mqttSvc,
 		Updates:     updatesSvc,
+		Database:    db,
 	}
 
 	// HTTP server
