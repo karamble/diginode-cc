@@ -27,7 +27,7 @@ export default {
         status: {
           unknown: '#94A3B8',
           friendly: '#22C55E',
-          neutral: '#3B82F6',
+          neutral: '#F59E0B',
           hostile: '#EF4444',
         }
       },

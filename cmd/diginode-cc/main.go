@@ -265,6 +265,12 @@ func main() {
 	if err := firewallSvc.Load(ctx); err != nil {
 		slog.Warn("failed to load firewall rules", "error", err)
 	}
+	if err := inventorySvc.Load(ctx); err != nil {
+		slog.Warn("failed to load inventory", "error", err)
+	}
+	if err := targetsSvc.Load(ctx); err != nil {
+		slog.Warn("failed to load targets", "error", err)
+	}
 	if err := appCfg.Load(ctx); err != nil {
 		slog.Warn("failed to load app config", "error", err)
 	}

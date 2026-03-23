@@ -2,6 +2,7 @@ package inventory
 
 import (
 	"context"
+	"database/sql"
 	"log/slog"
 	"sync"
 	"time"
@@ -47,6 +48,67 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 		hub:     hub,
 		devices: make(map[string]*Device),
 	}
+}
+
+// Load populates the in-memory cache from the database on startup.
+func (s *Service) Load(ctx context.Context) error {
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT mac, manufacturer, device_name, device_type, rssi, last_ssid,
+			first_seen, last_seen, is_known, notes, hits,
+			rssi_min, rssi_max, rssi_avg,
+			last_node_id, last_latitude, last_longitude
+		FROM inventory_devices`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	count := 0
+	for rows.Next() {
+		var d Device
+		var manufacturer, deviceName, deviceType, lastSSID, notes, lastNodeID sql.NullString
+		var lastLat, lastLon sql.NullFloat64
+		var rssiMin, rssiMax sql.NullInt32
+		var avgRSSI sql.NullFloat64
+		if err := rows.Scan(
+			&d.MAC, &manufacturer, &deviceName, &deviceType, &d.RSSI, &lastSSID,
+			&d.FirstSeen, &d.LastSeen, &d.IsKnown, &notes, &d.Hits,
+			&rssiMin, &rssiMax, &avgRSSI,
+			&lastNodeID, &lastLat, &lastLon,
+		); err != nil {
+			slog.Warn("failed to scan inventory device", "error", err)
+			continue
+		}
+		d.Manufacturer = manufacturer.String
+		d.DeviceName = deviceName.String
+		d.DeviceType = deviceType.String
+		d.LastSSID = lastSSID.String
+		d.Notes = notes.String
+		d.LastNodeID = lastNodeID.String
+		if lastLat.Valid {
+			d.LastLat = lastLat.Float64
+		}
+		if lastLon.Valid {
+			d.LastLon = lastLon.Float64
+		}
+		if rssiMin.Valid {
+			d.MinRSSI = int(rssiMin.Int32)
+		}
+		if rssiMax.Valid {
+			d.MaxRSSI = int(rssiMax.Int32)
+		}
+		if avgRSSI.Valid {
+			d.AvgRSSI = avgRSSI.Float64
+		}
+		s.devices[d.MAC] = &d
+		count++
+	}
+
+	slog.Info("loaded inventory devices", "count", count)
+	return nil
 }
 
 // Track adds or updates a device in the inventory.
@@ -192,20 +254,21 @@ func (s *Service) persist(dev *Device) {
 	_, err := s.db.Pool.Exec(ctx, `
 		INSERT INTO inventory_devices (mac, manufacturer, rssi, last_ssid, first_seen, last_seen,
 			hits, rssi_min, rssi_max, rssi_avg, last_node_id, last_latitude, last_longitude)
-		VALUES ($1, $2, $3, $4, $5, $6, 1, $3, $3, $3, $7, $8, $9)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
 		ON CONFLICT (mac) DO UPDATE SET
 			manufacturer = COALESCE(EXCLUDED.manufacturer, inventory_devices.manufacturer),
 			rssi = EXCLUDED.rssi,
 			last_ssid = COALESCE(EXCLUDED.last_ssid, inventory_devices.last_ssid),
 			last_seen = EXCLUDED.last_seen,
-			hits = inventory_devices.hits + 1,
-			rssi_min = LEAST(COALESCE(inventory_devices.rssi_min, EXCLUDED.rssi), EXCLUDED.rssi),
-			rssi_max = GREATEST(COALESCE(inventory_devices.rssi_max, EXCLUDED.rssi), EXCLUDED.rssi),
+			hits = EXCLUDED.hits,
+			rssi_min = EXCLUDED.rssi_min,
+			rssi_max = EXCLUDED.rssi_max,
 			rssi_avg = EXCLUDED.rssi_avg,
 			last_node_id = COALESCE(EXCLUDED.last_node_id, inventory_devices.last_node_id),
 			last_latitude = COALESCE(EXCLUDED.last_latitude, inventory_devices.last_latitude),
 			last_longitude = COALESCE(EXCLUDED.last_longitude, inventory_devices.last_longitude)`,
 		dev.MAC, dev.Manufacturer, dev.RSSI, dev.LastSSID, dev.FirstSeen, dev.LastSeen,
+		dev.Hits, dev.MinRSSI, dev.MaxRSSI, dev.AvgRSSI,
 		nilIfEmpty(dev.LastNodeID), nilIfZero(dev.LastLat), nilIfZero(dev.LastLon),
 	)
 	if err != nil {

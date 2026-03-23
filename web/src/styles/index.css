@@ -21,10 +21,16 @@ body {
 ::-webkit-scrollbar-thumb:hover { background: #475569; }
 
 /* Status badge colors */
-.badge-unknown { @apply bg-status-unknown/20 text-status-unknown; }
-.badge-friendly { @apply bg-status-friendly/20 text-status-friendly; }
-.badge-neutral { @apply bg-status-neutral/20 text-status-neutral; }
-.badge-hostile { @apply bg-status-hostile/20 text-status-hostile; }
+.badge-unknown { @apply bg-status-unknown/20 text-status-unknown border border-status-unknown/40; }
+.badge-friendly { @apply bg-status-friendly/20 text-status-friendly border border-status-friendly/40; }
+.badge-neutral { @apply bg-status-neutral/20 text-status-neutral border border-status-neutral/40; }
+.badge-hostile { @apply bg-status-hostile/30 text-status-hostile border border-status-hostile/50; }
+
+/* Active status buttons (stronger fill for selected state) */
+.badge-unknown-active { @apply bg-status-unknown/30 text-status-unknown border-2 border-status-unknown; }
+.badge-friendly-active { @apply bg-status-friendly/30 text-status-friendly border-2 border-status-friendly; }
+.badge-neutral-active { @apply bg-status-neutral/30 text-status-neutral border-2 border-status-neutral; }
+.badge-hostile-active { @apply bg-status-hostile/40 text-status-hostile border-2 border-status-hostile; }
 
 .badge-info { @apply bg-alert-info/20 text-alert-info; }
 .badge-notice { @apply bg-alert-notice/20 text-alert-notice; }

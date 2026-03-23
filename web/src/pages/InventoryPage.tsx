@@ -1,4 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useState } from 'react'
 import api from '../api/client'
 
 interface Device {
@@ -59,6 +60,7 @@ function formatDate(dateStr: string) {
 
 export default function InventoryPage() {
   const queryClient = useQueryClient()
+  const [promotedMAC, setPromotedMAC] = useState<string | null>(null)
 
   const { data: devices, isLoading, error } = useQuery<Device[]>({
     queryKey: ['inventory'],
@@ -73,7 +75,12 @@ export default function InventoryPage() {
 
   const promoteMutation = useMutation({
     mutationFn: (mac: string) => api.post(`/inventory/${mac}/promote`),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ['inventory'] }),
+    onSuccess: (_data, mac) => {
+      setPromotedMAC(mac)
+      queryClient.invalidateQueries({ queryKey: ['inventory'] })
+      queryClient.invalidateQueries({ queryKey: ['targets'] })
+      setTimeout(() => setPromotedMAC(null), 3000)
+    },
   })
 
   // Sort by lastSeen descending
@@ -159,14 +166,18 @@ export default function InventoryPage() {
                     <td className="px-4 py-3 text-sm text-dark-400 font-mono">{dev.lastNodeId || '-'}</td>
                     <td className="px-4 py-3 text-sm text-dark-400">{formatDate(dev.lastSeen)}</td>
                     <td className="px-4 py-3 text-right">
-                      <button
-                        onClick={() => promoteMutation.mutate(dev.mac)}
-                        disabled={promoteMutation.isPending}
-                        className="text-xs text-primary-400 hover:text-primary-300 transition-colors"
-                        title="Promote to target"
-                      >
-                        Promote
-                      </button>
+                      {promotedMAC === dev.mac ? (
+                        <span className="text-xs text-green-400 font-medium">Promoted!</span>
+                      ) : (
+                        <button
+                          onClick={() => promoteMutation.mutate(dev.mac)}
+                          disabled={promoteMutation.isPending}
+                          className="text-xs text-primary-400 hover:text-primary-300 transition-colors"
+                          title="Promote to target"
+                        >
+                          {promoteMutation.isPending && promoteMutation.variables === dev.mac ? 'Promoting...' : 'Promote'}
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
