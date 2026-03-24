@@ -10,6 +10,15 @@ import (
 	goserial "go.bug.st/serial"
 )
 
+// localNodeNum returns the local Heltec node number, or writes a 503 error and returns 0.
+func (s *Server) localNodeNum(w http.ResponseWriter) uint32 {
+	num := s.svc.Nodes.GetLocalNodeNum()
+	if num == 0 {
+		writeError(w, http.StatusServiceUnavailable, "local node number not yet known")
+	}
+	return num
+}
+
 // handleGetTextMessages returns text messages since a given sequence number.
 // This is polled by gotailme for inter-system messaging (CC PRO compat).
 func (s *Server) handleGetTextMessages(w http.ResponseWriter, r *http.Request) {
@@ -228,7 +237,12 @@ func (s *Server) handleSendSerialDisplayConfig(w http.ResponseWriter, r *http.Re
 		req.ScreenOnSecs = 60 // default 60 seconds
 	}
 
-	data := serial.BuildAdminDisplayConfig(req.ScreenOnSecs)
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
+	data := serial.BuildAdminDisplayConfig(nodeNum, req.ScreenOnSecs)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
@@ -238,7 +252,12 @@ func (s *Server) handleSendSerialDisplayConfig(w http.ResponseWriter, r *http.Re
 }
 
 func (s *Server) handleSendSerialNodedbReset(w http.ResponseWriter, r *http.Request) {
-	data := serial.BuildAdminNodedbReset()
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
+	data := serial.BuildAdminNodedbReset(nodeNum)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
@@ -265,7 +284,12 @@ func (s *Server) handleSendSerialShutdown(w http.ResponseWriter, r *http.Request
 		secs = 5 // default 5-second delay
 	}
 
-	data := serial.BuildAdminShutdown(secs)
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
+	data := serial.BuildAdminShutdown(nodeNum, secs)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
@@ -388,11 +412,23 @@ func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.
 		return
 	}
 
-	data := serial.BuildAdminBluetoothConfig(req.Enabled, req.Mode, req.FixedPin)
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
+	data := serial.BuildAdminBluetoothConfig(nodeNum, req.Enabled, req.Mode, req.FixedPin)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent"})
+	// BLE config changes require a device reboot to take effect.
+	// Send a reboot with a short delay so the config write completes first.
+	rebootData := serial.BuildAdminReboot(nodeNum, 5)
+	if err := s.serialMgr.SendToRadio(rebootData); err != nil {
+		slog.Warn("bluetooth config sent but reboot failed", "error", err)
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent, reboot in 5s"})
 }

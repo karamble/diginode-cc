@@ -167,39 +167,39 @@ func BuildDeviceMetrics(batteryLevel uint32, voltage float32) []byte {
 	return buildToRadio(mp)
 }
 
-// BuildAdminShutdown builds a ToRadio containing an admin shutdown command (broadcast).
-//   AdminMessage: field 16 = shutdown_seconds (varint)
-func BuildAdminShutdown(seconds uint32) []byte {
-	admin := encodeVarintField(16, uint64(seconds))
+// BuildAdminShutdown builds a ToRadio containing an admin shutdown command addressed to the local node.
+//   AdminMessage: field 98 = shutdown_seconds (int32/varint)
+func BuildAdminShutdown(nodeNum uint32, seconds uint32) []byte {
+	admin := encodeVarintField(98, uint64(seconds))
 
 	data := buildDataMessage(PortNumAdmin, admin)
-	mp := buildMeshPacket(BroadcastAddr, data)
+	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }
 
 // BuildAdminDisplayConfig builds a ToRadio containing an admin command to set the screen-on duration.
 //
-//	AdminMessage: field 3 = set_config (Config, length-delimited)
-//	Config: field 7 = display (DisplayConfig, length-delimited)
-//	DisplayConfig: field 4 = screen_on_secs (varint)
-func BuildAdminDisplayConfig(screenOnSecs uint32) []byte {
-	// DisplayConfig: field 4 = screen_on_secs
-	displayCfg := encodeVarintField(4, uint64(screenOnSecs))
-	// Config: field 7 = display
-	config := encodeLengthDelimited(7, displayCfg)
-	// AdminMessage: field 3 = set_config
-	admin := encodeLengthDelimited(3, config)
+//	AdminMessage: field 34 = set_config (Config, length-delimited)
+//	Config: field 5 = display (DisplayConfig, length-delimited)
+//	DisplayConfig: field 1 = screen_on_secs (uint32)
+func BuildAdminDisplayConfig(nodeNum uint32, screenOnSecs uint32) []byte {
+	// DisplayConfig: field 1 = screen_on_secs
+	displayCfg := encodeVarintField(1, uint64(screenOnSecs))
+	// Config: field 5 = display
+	config := encodeLengthDelimited(5, displayCfg)
+	// AdminMessage: field 34 = set_config
+	admin := encodeLengthDelimited(34, config)
 
 	data := buildDataMessage(PortNumAdmin, admin)
-	mp := buildMeshPacket(BroadcastAddr, data)
+	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }
 
 // BuildAdminBluetoothConfig builds a ToRadio containing an admin command to set Bluetooth config.
-//   AdminMessage: field 3 = set_config (Config, length-delimited)
-//   Config: field 8 = bluetooth (BluetoothConfig, length-delimited)
-//   BluetoothConfig: field 1 = enabled (bool/varint), field 2 = mode (varint), field 3 = fixed_pin (varint)
-func BuildAdminBluetoothConfig(enabled bool, mode uint32, fixedPin uint32) []byte {
+//   AdminMessage: field 34 = set_config (Config, length-delimited)
+//   Config: field 7 = bluetooth (BluetoothConfig, length-delimited)
+//   BluetoothConfig: field 1 = enabled (bool), field 2 = mode (enum/varint), field 3 = fixed_pin (uint32)
+func BuildAdminBluetoothConfig(nodeNum uint32, enabled bool, mode uint32, fixedPin uint32) []byte {
 	var btCfg []byte
 	enabledVal := uint64(0)
 	if enabled {
@@ -210,22 +210,31 @@ func BuildAdminBluetoothConfig(enabled bool, mode uint32, fixedPin uint32) []byt
 	if fixedPin > 0 {
 		btCfg = append(btCfg, encodeVarintField(3, uint64(fixedPin))...)
 	}
-	// Config: field 8 = bluetooth
-	config := encodeLengthDelimited(8, btCfg)
-	// AdminMessage: field 3 = set_config
-	admin := encodeLengthDelimited(3, config)
+	// Config: field 7 = bluetooth
+	config := encodeLengthDelimited(7, btCfg)
+	// AdminMessage: field 34 = set_config
+	admin := encodeLengthDelimited(34, config)
 
 	data := buildDataMessage(PortNumAdmin, admin)
-	mp := buildMeshPacket(BroadcastAddr, data)
+	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }
 
 // BuildAdminNodedbReset builds a ToRadio containing an admin command to reset the node database.
 //   AdminMessage: field 100 = nodedb_reset (bool)
-func BuildAdminNodedbReset() []byte {
+func BuildAdminNodedbReset(nodeNum uint32) []byte {
 	admin := encodeVarintField(100, 1) // nodedb_reset = true
 	data := buildDataMessage(PortNumAdmin, admin)
-	mp := buildMeshPacket(BroadcastAddr, data)
+	mp := buildMeshPacket(nodeNum, data)
+	return buildToRadio(mp)
+}
+
+// BuildAdminReboot builds a ToRadio containing an admin reboot command.
+//   AdminMessage: field 97 = reboot_seconds (int32/varint)
+func BuildAdminReboot(nodeNum uint32, seconds uint32) []byte {
+	admin := encodeVarintField(97, uint64(seconds))
+	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }
 
