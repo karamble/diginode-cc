@@ -432,3 +432,13 @@ func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent, reboot in 5s"})
 }
+
+// handleWakeDevice toggles DTR/RTS on the serial port to hardware-reset the
+// Heltec out of deep sleep (after an admin shutdown command).
+func (s *Server) handleWakeDevice(w http.ResponseWriter, r *http.Request) {
+	if err := s.serialMgr.WakeDevice(); err != nil {
+		writeError(w, http.StatusInternalServerError, "wake failed: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "wake signal sent"})
+}

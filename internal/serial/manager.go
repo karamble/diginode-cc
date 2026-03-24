@@ -553,6 +553,47 @@ func (m *Manager) SendToRadio(data []byte) error {
 	return err
 }
 
+// WakeDevice toggles DTR/RTS to hardware-reset the ESP32-S3 out of deep sleep.
+// It closes the current port, opens a raw connection to toggle the control lines,
+// then lets the reconnect loop in Start() re-establish the Meshtastic session.
+func (m *Manager) WakeDevice() error {
+	device := m.cfg.SerialDevice
+
+	// Close the existing connection so we can toggle control lines directly.
+	m.mu.Lock()
+	if m.port != nil {
+		m.port.Close()
+		m.port = nil
+	}
+	m.connected = false
+	m.mu.Unlock()
+	m.broadcastSerialState(false)
+
+	slog.Info("waking device via DTR/RTS reset", "device", device)
+
+	// Open a temporary connection just to toggle the lines.
+	port, err := serial.Open(device, &serial.Mode{BaudRate: 115200})
+	if err != nil {
+		return err
+	}
+
+	// Pulse RTS high (pulls EN low on ESP32-S3 Heltec V3)
+	port.SetDTR(false)
+	port.SetRTS(true)
+	time.Sleep(100 * time.Millisecond)
+
+	// Release — EN goes high, ESP32 boots
+	port.SetDTR(false)
+	port.SetRTS(false)
+	time.Sleep(100 * time.Millisecond)
+
+	port.Close()
+
+	slog.Info("DTR/RTS reset complete, serial reconnect loop will pick up the device")
+	// The Start() reconnect loop will detect the device and re-establish the session.
+	return nil
+}
+
 // AddTextMessage stores a text message in the ring buffer (polled by gotailme).
 func (m *Manager) AddTextMessage(nodeID, message, siteID string) {
 	m.textMu.Lock()
