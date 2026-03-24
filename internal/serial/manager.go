@@ -46,6 +46,9 @@ type Manager struct {
 	onTriData         func(mac, nodeID string, rssi int, lat, lon float64)
 	onTriFinal        func(mac string, lat, lon, confidence, uncertainty float64)
 	onTriComplete     func(mac string, nodes int)
+	// Stored radio config sections (populated during wantConfig dump)
+	radioConfig   map[string]*ConfigPayload
+	radioConfigMu sync.RWMutex
 }
 
 // PacketHandler processes decoded Meshtastic packets.
@@ -592,6 +595,30 @@ func (m *Manager) WakeDevice() error {
 	slog.Info("DTR/RTS reset complete, serial reconnect loop will pick up the device")
 	// The Start() reconnect loop will detect the device and re-establish the session.
 	return nil
+}
+
+// StoreConfig stores a parsed config section received during the wantConfig dump.
+func (m *Manager) StoreConfig(cfg *ConfigPayload) {
+	if cfg == nil || cfg.Section == "" {
+		return
+	}
+	m.radioConfigMu.Lock()
+	defer m.radioConfigMu.Unlock()
+	if m.radioConfig == nil {
+		m.radioConfig = make(map[string]*ConfigPayload)
+	}
+	m.radioConfig[cfg.Section] = cfg
+}
+
+// GetRadioConfig returns all stored radio config sections.
+func (m *Manager) GetRadioConfig() map[string]*ConfigPayload {
+	m.radioConfigMu.RLock()
+	defer m.radioConfigMu.RUnlock()
+	out := make(map[string]*ConfigPayload, len(m.radioConfig))
+	for k, v := range m.radioConfig {
+		out[k] = v
+	}
+	return out
 }
 
 // AddTextMessage stores a text message in the ring buffer (polled by gotailme).
