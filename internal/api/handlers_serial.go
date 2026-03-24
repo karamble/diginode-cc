@@ -184,14 +184,20 @@ func (s *Server) handleSendSerialPosition(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
 	latI := int32(req.Latitude * 1e7)
 	lonI := int32(req.Longitude * 1e7)
 	alt := int32(0)
 	if req.Altitude != nil {
 		alt = int32(*req.Altitude)
 	}
+	timestamp := uint32(time.Now().Unix())
 
-	data := serial.BuildPosition(latI, lonI, alt)
+	data := serial.BuildAdminSetFixedPosition(nodeNum, latI, lonI, alt, timestamp)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
 		return
@@ -431,6 +437,37 @@ func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.
 	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent, reboot in 5s"})
+}
+
+// handleGetRadioConfig returns the stored Meshtastic radio config sections.
+func (s *Server) handleGetRadioConfig(w http.ResponseWriter, r *http.Request) {
+	configs := s.serialMgr.GetRadioConfig()
+	result := map[string]any{}
+	for section, cfg := range configs {
+		switch section {
+		case "bluetooth":
+			if cfg.Bluetooth != nil {
+				result[section] = cfg.Bluetooth
+			}
+		case "position":
+			if cfg.Position != nil {
+				result[section] = cfg.Position
+			}
+		case "display":
+			if cfg.Display != nil {
+				result[section] = cfg.Display
+			}
+		case "lora":
+			if cfg.LoRa != nil {
+				result[section] = cfg.LoRa
+			}
+		case "power":
+			if cfg.Power != nil {
+				result[section] = cfg.Power
+			}
+		}
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 // handleWakeDevice toggles DTR/RTS on the serial port to hardware-reset the

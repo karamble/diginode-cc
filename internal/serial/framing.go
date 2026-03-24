@@ -240,6 +240,44 @@ type MeshPacketData struct {
 type ConfigPayload struct {
 	Section string
 	Raw     []byte
+	// Parsed sub-configs (populated by decodeConfig)
+	Bluetooth *BluetoothConfig
+	Position  *PositionConfig
+	Display   *DisplayConfig
+	LoRa      *LoRaConfig
+	Power     *PowerConfig
+}
+
+type BluetoothConfig struct {
+	Enabled  bool   `json:"enabled"`
+	Mode     uint32 `json:"mode"`     // 0=RANDOM_PIN, 1=FIXED_PIN, 2=NO_PIN
+	FixedPin uint32 `json:"fixedPin"`
+}
+
+type PositionConfig struct {
+	GPSMode                  uint32 `json:"gpsMode"` // 0=ENABLED, 1=DISABLED, 2=NOT_PRESENT
+	GPSEnabled               bool   `json:"gpsEnabled"`
+	PositionBroadcastSecs    uint32 `json:"positionBroadcastSecs"`
+	GPSUpdateInterval        uint32 `json:"gpsUpdateInterval"`
+	FixedPosition            bool   `json:"fixedPosition"`
+}
+
+type DisplayConfig struct {
+	ScreenOnSecs uint32 `json:"screenOnSecs"`
+	FlipScreen   bool   `json:"flipScreen"`
+}
+
+type LoRaConfig struct {
+	Region     uint32 `json:"region"`
+	UsePreset  bool   `json:"usePreset"`
+	HopLimit   uint32 `json:"hopLimit"`
+	TxEnabled  bool   `json:"txEnabled"`
+	TxPower    int32  `json:"txPower"`
+}
+
+type PowerConfig struct {
+	IsPowerSaving          bool   `json:"isPowerSaving"`
+	DeviceBatteryINAAddr   uint32 `json:"deviceBatteryInaAddress"`
 }
 
 type ChannelPayload struct {
@@ -328,7 +366,7 @@ func DecodeFromRadio(data []byte) (*FromRadioPacket, error) {
 				pkt.NodeInfo = decodeNodeInfo(subData)
 			case 5: // config
 				pkt.Type = FromRadioConfig
-				pkt.Config = &ConfigPayload{Raw: subData}
+				pkt.Config = decodeConfig(subData)
 			case 9: // moduleConfig (treat same as config)
 				pkt.Type = FromRadioConfig
 				pkt.Config = &ConfigPayload{Raw: subData}
@@ -787,6 +825,191 @@ func decodeDataPayload(data []byte) (portNum uint32, payload []byte) {
 		}
 	}
 	return
+}
+
+// decodeConfig parses a Config protobuf message into structured sub-configs.
+// Config fields: 1=device, 2=position, 3=power, 5=display, 6=lora, 7=bluetooth
+func decodeConfig(data []byte) *ConfigPayload {
+	cfg := &ConfigPayload{Raw: data}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 {
+			break
+		}
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+
+		if wireType == 2 { // length-delimited sub-message
+			length, n2 := decodeVarint(data[pos:])
+			if n2 == 0 {
+				break
+			}
+			pos += n2
+			end := pos + int(length)
+			if end > len(data) {
+				break
+			}
+			sub := data[pos:end]
+			pos = end
+
+			switch fieldNum {
+			case 2: // position
+				cfg.Section = "position"
+				cfg.Position = decodePositionConfig(sub)
+			case 3: // power
+				cfg.Section = "power"
+				cfg.Power = decodePowerConfig(sub)
+			case 5: // display
+				cfg.Section = "display"
+				cfg.Display = decodeDisplayConfig(sub)
+			case 6: // lora
+				cfg.Section = "lora"
+				cfg.LoRa = decodeLoRaConfig(sub)
+			case 7: // bluetooth
+				cfg.Section = "bluetooth"
+				cfg.Bluetooth = decodeBluetoothConfig(sub)
+			default:
+				cfg.Section = fmt.Sprintf("unknown_%d", fieldNum)
+			}
+		} else if wireType == 0 {
+			_, n2 := decodeVarint(data[pos:])
+			if n2 == 0 {
+				break
+			}
+			pos += n2
+		} else {
+			break
+		}
+	}
+	return cfg
+}
+
+func decodeBluetoothConfig(data []byte) *BluetoothConfig {
+	bt := &BluetoothConfig{}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 { break }
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		if wireType == 0 {
+			val, n2 := decodeVarint(data[pos:])
+			if n2 == 0 { break }
+			pos += n2
+			switch fieldNum {
+			case 1: bt.Enabled = val != 0
+			case 2: bt.Mode = uint32(val)
+			case 3: bt.FixedPin = uint32(val)
+			}
+		} else { break }
+	}
+	return bt
+}
+
+func decodePositionConfig(data []byte) *PositionConfig {
+	pc := &PositionConfig{}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 { break }
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		if wireType == 0 {
+			val, n2 := decodeVarint(data[pos:])
+			if n2 == 0 { break }
+			pos += n2
+			switch fieldNum {
+			case 1: pc.PositionBroadcastSecs = uint32(val)
+			case 3: pc.FixedPosition = val != 0
+			case 4: pc.GPSEnabled = val != 0
+			case 5: pc.GPSUpdateInterval = uint32(val)
+			case 13: pc.GPSMode = uint32(val)
+			}
+		} else { break }
+	}
+	return pc
+}
+
+func decodeDisplayConfig(data []byte) *DisplayConfig {
+	dc := &DisplayConfig{}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 { break }
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		if wireType == 0 {
+			val, n2 := decodeVarint(data[pos:])
+			if n2 == 0 { break }
+			pos += n2
+			switch fieldNum {
+			case 1: dc.ScreenOnSecs = uint32(val)
+			case 5: dc.FlipScreen = val != 0
+			}
+		} else { break }
+	}
+	return dc
+}
+
+func decodeLoRaConfig(data []byte) *LoRaConfig {
+	lc := &LoRaConfig{}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 { break }
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		if wireType == 0 {
+			val, n2 := decodeVarint(data[pos:])
+			if n2 == 0 { break }
+			pos += n2
+			switch fieldNum {
+			case 1: lc.UsePreset = val != 0
+			case 7: lc.Region = uint32(val)
+			case 8: lc.HopLimit = uint32(val)
+			case 9: lc.TxEnabled = val != 0
+			case 10: lc.TxPower = int32(val)
+			}
+		} else if wireType == 5 { // fixed32 (float fields like frequency_offset)
+			if pos+4 > len(data) { break }
+			pos += 4
+		} else if wireType == 1 { // fixed64
+			if pos+8 > len(data) { break }
+			pos += 8
+		} else { break }
+	}
+	return lc
+}
+
+func decodePowerConfig(data []byte) *PowerConfig {
+	pc := &PowerConfig{}
+	pos := 0
+	for pos < len(data) {
+		tag, n := decodeVarint(data[pos:])
+		if n == 0 { break }
+		pos += n
+		fieldNum := tag >> 3
+		wireType := tag & 0x7
+		if wireType == 0 {
+			val, n2 := decodeVarint(data[pos:])
+			if n2 == 0 { break }
+			pos += n2
+			switch fieldNum {
+			case 1: pc.IsPowerSaving = val != 0
+			case 9: pc.DeviceBatteryINAAddr = uint32(val)
+			}
+		} else if wireType == 5 { // fixed32 (adc_multiplier_override)
+			if pos+4 > len(data) { break }
+			pos += 4
+		} else { break }
+	}
+	return pc
 }
 
 func decodeMetadata(data []byte) *DeviceMetadata {

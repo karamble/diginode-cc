@@ -210,6 +210,7 @@ func main() {
 		alertsSvc.Evaluate(ctx, evt)
 	})
 	dispatcher.SetWebhookCallback(webhooksSvc.Dispatch)
+	dispatcher.SetSerialManager(serialMgr)
 	serialMgr.RegisterHandler(dispatcher.HandlePacket)
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences

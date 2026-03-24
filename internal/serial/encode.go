@@ -229,6 +229,30 @@ func BuildAdminNodedbReset(nodeNum uint32) []byte {
 	return buildToRadio(mp)
 }
 
+// BuildAdminSetFixedPosition builds a ToRadio containing an admin command to set the
+// local node's position. Used to feed GPS from an external source (gotailme) to a
+// Heltec with gps_mode=NOT_PRESENT. Each call overrides the previous position.
+//   AdminMessage: field 41 = set_fixed_position (Position, length-delimited)
+//   Position: field 1 = latitude_i (sfixed32), field 2 = longitude_i (sfixed32),
+//             field 3 = altitude (int32/varint), field 7 = timestamp (fixed32)
+func BuildAdminSetFixedPosition(nodeNum uint32, latI, lonI int32, altitude int32, timestamp uint32) []byte {
+	var pos []byte
+	pos = append(pos, encodeSFixed32Field(1, latI)...)
+	pos = append(pos, encodeSFixed32Field(2, lonI)...)
+	if altitude != 0 {
+		pos = append(pos, encodeVarintField(3, uint64(altitude))...)
+	}
+	if timestamp != 0 {
+		pos = append(pos, encodeFixed32Field(7, timestamp)...)
+	}
+	// AdminMessage: field 41 = set_fixed_position
+	admin := encodeLengthDelimited(41, pos)
+
+	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(nodeNum, data)
+	return buildToRadio(mp)
+}
+
 // BuildAdminReboot builds a ToRadio containing an admin reboot command.
 //   AdminMessage: field 97 = reboot_seconds (int32/varint)
 func BuildAdminReboot(nodeNum uint32, seconds uint32) []byte {

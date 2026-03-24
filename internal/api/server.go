@@ -332,6 +332,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/nodedb-reset", s.handleSendSerialNodedbReset)
 				r.Post("/wake", s.handleWakeDevice)
+				r.Get("/config", s.handleGetRadioConfig)
 				r.Post("/simulate", s.handleSerialSimulate)
 			})
 

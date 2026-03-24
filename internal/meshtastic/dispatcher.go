@@ -43,6 +43,7 @@ type Dispatcher struct {
 	dedupMu        sync.Mutex
 	localNodeSeen  bool   // true after first NodeInfo from wantConfig
 	localNodeNum   uint32 // our local Heltec's mesh node number
+	serialMgr      *serial.Manager
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -82,6 +83,9 @@ func NewDispatcher(hub *ws.Hub) *Dispatcher {
 		dedup: make(map[uint64]time.Time),
 	}
 }
+
+// SetSerialManager sets the serial manager for config storage.
+func (d *Dispatcher) SetSerialManager(m *serial.Manager) { d.serialMgr = m }
 
 // SetNodeHandler sets the node handler.
 func (d *Dispatcher) SetNodeHandler(h NodeHandler) { d.nodeHandler = h }
@@ -139,6 +143,11 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 	case serial.FromRadioMeshPacket:
 		if pkt.MeshPacket != nil {
 			d.handleMeshPacket(pkt.MeshPacket)
+		}
+
+	case serial.FromRadioConfig:
+		if pkt.Config != nil && d.serialMgr != nil {
+			d.serialMgr.StoreConfig(pkt.Config)
 		}
 
 	case serial.FromRadioConfigComplete:
