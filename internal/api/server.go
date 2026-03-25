@@ -320,6 +320,9 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/preload/cancel", s.handleTilePreloadCancel)
 			})
 
+			// Database stats (authenticated, gotailme uses service token)
+			r.Get("/database/stats", s.handleDatabaseStats)
+
 			// Admin / Data Management (ADMIN role only)
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(auth.RequireRole(auth.RoleAdmin))
