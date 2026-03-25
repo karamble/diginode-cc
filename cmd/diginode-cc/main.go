@@ -41,20 +41,31 @@ import (
 )
 
 func main() {
-	// Structured logging
-	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
-		Level: slog.LevelInfo,
-	}))
-	slog.SetDefault(logger)
-
-	slog.Info("starting DigiNode CC", "version", Version)
-
-	// Load configuration
+	// Load configuration (before logger so we can use LogLevel)
 	cfg, err := config.Load()
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	// Structured logging with configurable level
+	var logLevel slog.Level
+	switch cfg.LogLevel {
+	case "debug":
+		logLevel = slog.LevelDebug
+	case "warn":
+		logLevel = slog.LevelWarn
+	case "error":
+		logLevel = slog.LevelError
+	default:
+		logLevel = slog.LevelInfo
+	}
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+	slog.SetDefault(logger)
+
+	slog.Info("starting DigiNode CC", "version", Version)
 
 	// Connect to PostgreSQL
 	db, err := database.New(cfg.DatabaseURL)
@@ -71,22 +82,28 @@ func main() {
 	}
 
 	// WebSocket hub
-	hub := ws.NewHub()
+	hub := ws.NewHub(cfg.WSMaxClients)
 	go hub.Run()
 
 	// Serial port manager (Meshtastic)
 	serialMgr := serial.NewManager(cfg, hub)
 
 	// Instantiate all domain services
-	authSvc := auth.NewService(db, cfg.JWTSecret)
-	usersSvc := users.NewService(db)
+	authSvc := auth.NewService(db, cfg.JWTSecret, auth.AuthConfig{
+		JWTExpiry:                cfg.JWTExpiry,
+		LockoutThreshold:         cfg.AuthLockoutThreshold,
+		LockoutDurationMinutes:   cfg.AuthLockoutDurationMinutes,
+		PasswordResetExpiryHours: cfg.PasswordResetExpiryHours,
+		TwoFactorIssuer:          cfg.TwoFactorIssuer,
+	})
+	usersSvc := users.NewService(db, cfg.InviteExpiryHours)
 	sitesSvc := sites.NewService(db)
 	nodesSvc := nodes.NewService(db, hub)
 	dronesSvc := drones.NewService(db, hub)
 	dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)
 	inventorySvc := inventory.NewService(db, hub)
 	dronesSvc.SetInventoryCallback(inventorySvc.Track)
-	faaSvc := faa.NewService(db)
+	faaSvc := faa.NewService(db, cfg.FAAOnlineLookupEnabled, cfg.FAACacheTTLMinutes)
 	dronesSvc.SetFAALookup(func(ctx context.Context, droneID, mac, serial string) (map[string]interface{}, error) {
 		entry, err := faaSvc.LookupMultiKey(ctx, droneID, mac, serial)
 		if err != nil || entry == nil {
@@ -174,6 +191,8 @@ func main() {
 	exportsSvc := exports.NewService(db)
 	permsSvc := permissions.NewService(db)
 	mailSvc := mail.NewService(mail.Config{
+		Enabled:  cfg.MailEnabled,
+		Secure:   cfg.MailSecure,
 		Host:     cfg.SMTPHost,
 		Port:     cfg.SMTPPort,
 		User:     cfg.SMTPUser,
@@ -185,20 +204,19 @@ func main() {
 	// ADS-B service (optional)
 	var adsbSvc *adsb.Service
 	if cfg.ADSBEnabled {
-		adsbSvc = adsb.NewService(hub, cfg.ADSBURL)
+		adsbSvc = adsb.NewService(hub, cfg.ADSBURL, cfg.ADSBPollIntervalMS)
 	} else {
-		// Create a service with empty URL so handlers can still return empty data
-		adsbSvc = adsb.NewService(hub, "")
+		adsbSvc = adsb.NewService(hub, "", cfg.ADSBPollIntervalMS)
 	}
 
 	// MQTT service (optional)
 	var mqttSvc *mqtt.Service
 	if cfg.MQTTEnabled {
-		mqttSvc = mqtt.NewService(hub, cfg.MQTTBrokerURL, "local")
+		mqttSvc = mqtt.NewService(hub, cfg.MQTTBrokerURL, "local", cfg.MQTTConnectTimeoutMS)
 	}
 
 	// Updates service
-	updatesSvc := updates.NewService(".")
+	updatesSvc := updates.NewService(".", cfg.AutoUpdateRemote, cfg.AutoUpdateBranch)
 
 	// Wire Meshtastic dispatcher → domain services
 	dispatcher := meshtastic.NewDispatcher(hub)

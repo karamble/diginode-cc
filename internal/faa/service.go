@@ -59,13 +59,13 @@ type Service struct {
 }
 
 // NewService creates a new FAA registry service.
-func NewService(db *database.DB) *Service {
+func NewService(db *database.DB, onlineLookupEnabled bool, cacheTTLMinutes int) *Service {
 	return &Service{
 		db:                  db,
 		cache:               make(map[string]*cacheEntry),
-		OnlineLookupEnabled: true,
-		OnlineCooldown:      10 * time.Minute,
-		cookieTTL:           10 * time.Minute,
+		OnlineLookupEnabled: onlineLookupEnabled,
+		OnlineCooldown:      time.Duration(cacheTTLMinutes) * time.Minute,
+		cookieTTL:           time.Duration(cacheTTLMinutes) * time.Minute,
 		httpClient: &http.Client{
 			Timeout: 15 * time.Second,
 			// Don't follow redirects automatically — we need to capture cookies

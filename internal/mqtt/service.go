@@ -22,7 +22,7 @@ type Service struct {
 }
 
 // NewService creates a new MQTT federation service.
-func NewService(hub *ws.Hub, brokerURL, siteID string) *Service {
+func NewService(hub *ws.Hub, brokerURL, siteID string, connectTimeoutMS int) *Service {
 	s := &Service{
 		hub:    hub,
 		siteID: siteID,
@@ -33,7 +33,7 @@ func NewService(hub *ws.Hub, brokerURL, siteID string) *Service {
 		AddBroker(brokerURL).
 		SetClientID(fmt.Sprintf("diginode-cc-%s", siteID)).
 		SetAutoReconnect(true).
-		SetConnectRetryInterval(5 * time.Second).
+		SetConnectRetryInterval(time.Duration(connectTimeoutMS) * time.Millisecond).
 		SetOnConnectHandler(func(c pahomqtt.Client) {
 			slog.Info("MQTT connected", "broker", brokerURL)
 			s.mu.Lock()

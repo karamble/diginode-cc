@@ -54,12 +54,13 @@ type Invitation struct {
 
 // Service manages users and invitations.
 type Service struct {
-	db *database.DB
+	db                *database.DB
+	InviteExpiryHours int
 }
 
 // NewService creates a new user service.
-func NewService(db *database.DB) *Service {
-	return &Service{db: db}
+func NewService(db *database.DB, inviteExpiryHours int) *Service {
+	return &Service{db: db, InviteExpiryHours: inviteExpiryHours}
 }
 
 // List returns all users.
@@ -152,7 +153,7 @@ func (s *Service) CreateInvitation(ctx context.Context, email string, role Role,
 		Email:     email,
 		Role:      role,
 		Token:     token,
-		ExpiresAt: time.Now().Add(7 * 24 * time.Hour),
+		ExpiresAt: time.Now().Add(time.Duration(s.InviteExpiryHours) * time.Hour),
 		InvitedBy: invitedBy,
 	}
 

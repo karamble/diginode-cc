@@ -47,23 +47,25 @@ type Service struct {
 	mu       sync.RWMutex
 	stopCh   chan struct{}
 	client   *http.Client
+	pollMS   int
 }
 
 // NewService creates a new ADS-B polling service.
-func NewService(hub *ws.Hub, url string) *Service {
+func NewService(hub *ws.Hub, url string, pollIntervalMS int) *Service {
 	return &Service{
 		hub:      hub,
 		url:      url,
 		aircraft: make(map[string]*Aircraft),
 		stopCh:   make(chan struct{}),
 		client:   &http.Client{Timeout: 5 * time.Second},
+		pollMS:   pollIntervalMS,
 	}
 }
 
 // Start begins polling the ADS-B feed.
 func (s *Service) Start(ctx context.Context) {
-	slog.Info("starting ADS-B poller", "url", s.url)
-	ticker := time.NewTicker(3 * time.Second)
+	slog.Info("starting ADS-B poller", "url", s.url, "interval_ms", s.pollMS)
+	ticker := time.NewTicker(time.Duration(s.pollMS) * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

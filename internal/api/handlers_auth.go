@@ -208,7 +208,7 @@ func (s *Server) handleForgotPassword(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			token := hex.EncodeToString(tokenBytes)
-			expiresAt := time.Now().Add(1 * time.Hour)
+			expiresAt := time.Now().Add(s.svc.Auth.PasswordResetExpiry())
 
 			// Store token in password_resets table
 			_, err = s.svc.Auth.DB().Pool.Exec(ctx, `

@@ -118,8 +118,8 @@ func (m *Manager) Start() error {
 		slog.Info("serial device not present, will retry when available", "device", m.cfg.SerialDevice)
 	}
 
-	baseDelay := 500 * time.Millisecond
-	maxDelay := 15 * time.Second
+	baseDelay := time.Duration(m.cfg.SerialReconnectBaseMS) * time.Millisecond
+	maxDelay := time.Duration(m.cfg.SerialReconnectMaxMS) * time.Millisecond
 	delay := baseDelay
 
 	for {
@@ -144,8 +144,8 @@ func (m *Manager) Start() error {
 				if delay > maxDelay {
 					delay = maxDelay
 				}
-				// Add jitter (±20%)
-				jitter := time.Duration(float64(delay) * 0.2 * (2*float64(time.Now().UnixNano()%100)/100 - 1))
+				// Add jitter
+				jitter := time.Duration(float64(delay) * m.cfg.SerialReconnectJitter * (2*float64(time.Now().UnixNano()%100)/100 - 1))
 				delay += jitter
 				continue
 			case <-m.stopCh:
