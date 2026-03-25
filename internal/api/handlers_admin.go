@@ -2,7 +2,54 @@ package api
 
 import (
 	"net/http"
+	"os"
+	"path/filepath"
 )
+
+// handleDatabaseStats returns row counts and cache sizes for the Data Management panel.
+func (s *Server) handleDatabaseStats(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	db := s.svc.DB().Pool
+
+	countTable := func(table string) int64 {
+		var n int64
+		db.QueryRow(ctx, `SELECT COUNT(*) FROM `+table).Scan(&n)
+		return n
+	}
+
+	stats := map[string]interface{}{
+		"drones":           countTable("drones"),
+		"drone_detections": countTable("drone_detections"),
+		"nodes":            countTable("nodes"),
+		"node_positions":   countTable("node_positions"),
+		"targets":          countTable("targets"),
+		"target_positions": countTable("target_positions"),
+		"inventory":        countTable("inventory_devices"),
+		"alert_rules":      countTable("alert_rules"),
+		"alert_events":     countTable("alert_events"),
+		"commands":         countTable("commands"),
+		"chat_messages":    countTable("chat_messages"),
+		"geofences":        countTable("geofences"),
+		"webhooks":         countTable("webhooks"),
+		"users":            countTable("users"),
+		"audit_log":        countTable("audit_log"),
+		"tile_cache_bytes": getDirSize("data/tiles"),
+	}
+	writeJSON(w, http.StatusOK, stats)
+}
+
+// getDirSize returns the total size in bytes of all files under a directory.
+func getDirSize(path string) int64 {
+	var size int64
+	filepath.Walk(path, func(_ string, info os.FileInfo, err error) error {
+		if err != nil || info.IsDir() {
+			return nil
+		}
+		size += info.Size()
+		return nil
+	})
+	return size
+}
 
 // handleClearDetectionData wipes all detection data (drones, targets, inventory,
 // positions, detections) while preserving config, users, rules, and geofences.
