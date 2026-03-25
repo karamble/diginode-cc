@@ -3,6 +3,7 @@ package adsb
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -41,13 +42,15 @@ type Dump1090Response struct {
 
 // Service polls ADS-B data from dump1090.
 type Service struct {
-	hub      *ws.Hub
-	url      string
-	aircraft map[string]*Aircraft
-	mu       sync.RWMutex
-	stopCh   chan struct{}
-	client   *http.Client
-	pollMS   int
+	hub          *ws.Hub
+	url          string
+	aircraft     map[string]*Aircraft
+	mu           sync.RWMutex
+	stopCh       chan struct{}
+	client       *http.Client
+	pollMS       int
+	OpenSky      *OpenSkyClient
+	Planespotters *PlanespottersClient
 }
 
 // NewService creates a new ADS-B polling service.
@@ -101,6 +104,22 @@ func (s *Service) GetAircraft() []*Aircraft {
 		result = append(result, a)
 	}
 	return result
+}
+
+// LookupOpenSky returns enriched aircraft metadata from OpenSky Network.
+func (s *Service) LookupOpenSky(icao24 string) (*OpenSkyAircraft, error) {
+	if s.OpenSky == nil {
+		return nil, fmt.Errorf("OpenSky not configured")
+	}
+	return s.OpenSky.Lookup(icao24)
+}
+
+// LookupPlanespotters returns aircraft photo data from Planespotters.
+func (s *Service) LookupPlanespotters(icao24 string) (*PlanespottersResult, error) {
+	if s.Planespotters == nil {
+		return nil, fmt.Errorf("Planespotters not configured")
+	}
+	return s.Planespotters.Lookup(icao24)
 }
 
 func (s *Service) poll() {

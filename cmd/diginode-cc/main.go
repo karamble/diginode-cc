@@ -199,6 +199,7 @@ func main() {
 		Password: cfg.SMTPPassword,
 		From:     cfg.SMTPFrom,
 	})
+	alertsSvc.SetEmailSender(mailSvc.Send)
 	appCfg := config.NewAppConfig(db.Pool)
 
 	// ADS-B service (optional)
@@ -207,6 +208,14 @@ func main() {
 		adsbSvc = adsb.NewService(hub, cfg.ADSBURL, cfg.ADSBPollIntervalMS)
 	} else {
 		adsbSvc = adsb.NewService(hub, "", cfg.ADSBPollIntervalMS)
+	}
+	if cfg.ADSBOpenSkyEnabled && cfg.ADSBOpenSkyClientID != "" {
+		adsbSvc.OpenSky = adsb.NewOpenSkyClient(cfg.ADSBOpenSkyClientID, cfg.ADSBOpenSkyClientSecret)
+		slog.Info("OpenSky enrichment enabled")
+	}
+	if cfg.ADSBPlanespottersEnabled {
+		adsbSvc.Planespotters = adsb.NewPlanespottersClient()
+		slog.Info("Planespotters enrichment enabled")
 	}
 
 	// MQTT service (optional)

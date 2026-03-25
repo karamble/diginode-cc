@@ -13,12 +13,13 @@ import (
 
 // Service manages MQTT broker connections for multi-site federation.
 type Service struct {
-	hub       *ws.Hub
-	client    pahomqtt.Client
-	siteID    string
-	connected bool
-	mu        sync.RWMutex
-	stopCh    chan struct{}
+	hub              *ws.Hub
+	client           pahomqtt.Client
+	siteID           string
+	connected        bool
+	mu               sync.RWMutex
+	stopCh           chan struct{}
+	geofenceHandler  GeofenceHandler
 }
 
 // NewService creates a new MQTT federation service.
@@ -135,6 +136,9 @@ func (s *Service) subscribe(client pahomqtt.Client) {
 			Payload: data,
 		})
 	})
+
+	// Geofence federation
+	s.subscribeGeofences(client)
 
 	slog.Info("MQTT subscriptions active")
 }
