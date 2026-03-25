@@ -31,14 +31,27 @@ services:
       SERIAL_DEVICE: ${SERIAL_DEVICE:-}
       SERIAL_BAUD: ${SERIAL_BAUD:-115200}
       MQTT_ENABLED: ${MQTT_ENABLED:-false}
+      MQTT_BROKER_URL: ${MQTT_BROKER_URL:-tcp://localhost:1883}
       ADSB_ENABLED: ${ADSB_ENABLED:-false}
+      ADSB_URL: ${ADSB_URL:-http://localhost:8080/data/aircraft.json}
       ACARS_ENABLED: ${ACARS_ENABLED:-false}
+      ACARS_PORT: ${ACARS_PORT:-5555}
       TAK_ENABLED: ${TAK_ENABLED:-false}
+      TAK_ADDR: ${TAK_ADDR:-}
+      JAWG_ACCESS_TOKEN: ${JAWG_ACCESS_TOKEN:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      GEOIP_DB_PATH: ${GEOIP_DB_PATH:-}
     ports:
       - "3000:3000"
     privileged: true
     volumes:
       - /dev:/dev
+      - tiles:/app/data/tiles
 
 volumes:
   pgdata:
+  tiles:

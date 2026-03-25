@@ -32,6 +32,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
 	"github.com/karamble/diginode-cc/internal/targets"
+	"github.com/karamble/diginode-cc/internal/tiles"
 	"github.com/karamble/diginode-cc/internal/updates"
 	"github.com/karamble/diginode-cc/internal/users"
 	"github.com/karamble/diginode-cc/internal/webhooks"
@@ -76,6 +77,7 @@ type Server struct {
 	hub       *ws.Hub
 	serialMgr *serial.Manager
 	svc       *Services
+	tileCache *tiles.TileCache
 	router    chi.Router
 	upgrader  websocket.Upgrader
 }
@@ -87,6 +89,7 @@ func NewServer(cfg *config.Config, hub *ws.Hub, serialMgr *serial.Manager, svc *
 		hub:       hub,
 		serialMgr: serialMgr,
 		svc:       svc,
+		tileCache: tiles.NewTileCache("data/tiles", cfg.JawgAccessToken),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins (nginx handles CORS)
@@ -130,6 +133,9 @@ func (s *Server) setupRoutes() chi.Router {
 		r.Post("/auth/register", s.handleRegister)
 		r.Post("/auth/forgot-password", s.handleForgotPassword)
 		r.Post("/auth/reset-password", s.handleResetPassword)
+
+		// Tile proxy (no auth — Leaflet loads these as <img> src)
+		r.Get("/tiles/{provider}/{z}/{x}/{y}", s.handleTileRequest)
 
 		// Protected routes
 		r.Group(func(r chi.Router) {
@@ -292,6 +298,13 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/upload", s.handleFAAUpload)
 			})
 
+			// Tiles (preload management)
+			r.Route("/tiles", func(r chi.Router) {
+				r.Post("/preload", s.handleTilePreload)
+				r.Get("/preload/status", s.handleTilePreloadStatus)
+				r.Post("/preload/cancel", s.handleTilePreloadCancel)
+			})
+
 			// Admin / Data Management (ADMIN role only)
 			r.Route("/admin", func(r chi.Router) {
 				r.Use(auth.RequireRole(auth.RoleAdmin))
@@ -299,6 +312,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/clear-operational", s.handleClearOperationalData)
 				r.Post("/prune", s.handlePruneOldData)
 				r.Post("/factory-reset", s.handleFactoryReset)
+				r.Delete("/tiles-cache", s.handleClearTileCache)
 			})
 
 			// Exports

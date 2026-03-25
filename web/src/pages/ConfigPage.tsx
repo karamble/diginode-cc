@@ -338,6 +338,26 @@ export default function ConfigPage() {
               {pruneResult && <p className="text-xs text-green-400 mt-2">{pruneResult}</p>}
             </div>
 
+            {/* Clear Tile Cache */}
+            <div className="bg-surface rounded-lg border border-dark-700/50 p-4">
+              <h3 className="text-sm font-medium text-dark-200 mb-1">Clear Tile Cache</h3>
+              <p className="text-xs text-dark-500 mb-3">
+                Delete all cached map tiles. Tiles will re-download automatically when online.
+              </p>
+              <button
+                onClick={() => {
+                  if (confirm('Clear all cached map tiles?')) {
+                    api.delete('/admin/tiles-cache').then(() => {
+                      alert('Tile cache cleared.')
+                    }).catch((e: Error) => alert('Failed: ' + e.message))
+                  }
+                }}
+                className="px-4 py-2 bg-dark-700 hover:bg-dark-600 text-dark-300 text-xs rounded font-medium transition-colors"
+              >
+                Clear Tiles
+              </button>
+            </div>
+
             {/* Factory Reset */}
             <div className="bg-surface rounded-lg border border-red-700/30 p-4">
               <h3 className="text-sm font-medium text-red-400 mb-1">Factory Reset</h3>
