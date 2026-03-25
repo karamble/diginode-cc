@@ -42,6 +42,9 @@ type Config struct {
 	SMTPPassword string
 	SMTPFrom     string
 
+	// Tiles
+	JawgAccessToken string
+
 	// Firewall
 	GeoIPDBPath string
 }
@@ -67,7 +70,8 @@ func Load() (*Config, error) {
 		SMTPUser:     envOrDefault("SMTP_USER", ""),
 		SMTPPassword: envOrDefault("SMTP_PASSWORD", ""),
 		SMTPFrom:     envOrDefault("SMTP_FROM", ""),
-		GeoIPDBPath:  envOrDefault("GEOIP_DB_PATH", ""),
+		JawgAccessToken: envOrDefault("JAWG_ACCESS_TOKEN", ""),
+		GeoIPDBPath:     envOrDefault("GEOIP_DB_PATH", ""),
 	}
 
 	if cfg.JWTSecret == "" {

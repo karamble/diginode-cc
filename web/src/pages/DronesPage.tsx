@@ -272,11 +272,7 @@ export default function DronesPage() {
           zoomControl={true}
           attributionControl={false}
         >
-          <TileLayer
-            url="https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png"
-            subdomains="abcd"
-            maxZoom={19}
-          />
+          <TileLayer url="/api/tiles/jawg/{z}/{x}/{y}" maxZoom={22} />
 
           {/* Drone markers */}
           {droneMarkers.map((d) => (

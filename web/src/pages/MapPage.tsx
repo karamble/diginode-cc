@@ -263,25 +263,14 @@ export default function MapPage() {
         >
           <LayersControl position="topright">
             {/* Base layers */}
-            <LayersControl.BaseLayer checked name="CartoDB Dark">
-              <TileLayer
-                url="https://cartodb-basemaps-{s}.global.ssl.fastly.net/dark_all/{z}/{x}/{y}.png"
-                subdomains="abcd"
-                maxZoom={19}
-              />
+            <LayersControl.BaseLayer checked name="Jawg Matrix">
+              <TileLayer url="/api/tiles/jawg/{z}/{x}/{y}" maxZoom={22} />
             </LayersControl.BaseLayer>
             <LayersControl.BaseLayer name="OpenStreetMap">
-              <TileLayer
-                url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-                subdomains="abc"
-                maxZoom={19}
-              />
+              <TileLayer url="/api/tiles/osm/{z}/{x}/{y}" maxZoom={19} />
             </LayersControl.BaseLayer>
             <LayersControl.BaseLayer name="Esri Satellite">
-              <TileLayer
-                url="https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
-                maxZoom={18}
-              />
+              <TileLayer url="/api/tiles/esri/{z}/{x}/{y}" maxZoom={18} />
             </LayersControl.BaseLayer>
 
             {/* Overlay layers */}
