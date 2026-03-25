@@ -133,6 +133,9 @@ func (s *Server) setupRoutes() chi.Router {
 	// WebSocket endpoint (auth checked on connect)
 	r.Get("/ws", s.handleWebSocket)
 
+	// Tile proxy (no auth, no rate limit — Leaflet loads many tiles on scroll)
+	r.Get("/api/tiles/{provider}/{z}/{x}/{y}", s.handleTileRequest)
+
 	// API routes
 	r.Route("/api", func(r chi.Router) {
 		r.Use(s.rlDefault.Middleware)
@@ -145,9 +148,6 @@ func (s *Server) setupRoutes() chi.Router {
 			r.Post("/auth/forgot-password", s.handleForgotPassword)
 			r.Post("/auth/reset-password", s.handleResetPassword)
 		})
-
-		// Tile proxy (no auth — Leaflet loads these as <img> src)
-		r.Get("/tiles/{provider}/{z}/{x}/{y}", s.handleTileRequest)
 
 		// Protected routes
 		r.Group(func(r chi.Router) {
