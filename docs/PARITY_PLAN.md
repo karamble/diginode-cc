@@ -223,22 +223,25 @@ Gap analysis identified missing features across 6 areas. This plan brings DigiNo
 
 ---
 
-## Phase Order & Dependencies
+## Completion Status
 
-```
-Phase 1 (OUI + Inventory)     ← No dependencies, can start immediately
-Phase 2 (Drone UI)            ← No dependencies, can start immediately
-Phase 3 (Command Builder)     ← No dependencies, can start immediately
-Phase 4 (Target Tracking)     ← Benefits from Phase 1 (OUI for manufacturer)
-Phase 5 (Alert Email)         ← Benefits from Phase 4 (target fields)
-Phase 6 (Webhook + Geofence)  ← Benefits from all prior phases
-```
+All 6 phases are **COMPLETE** as of 2026-03-25.
 
-Phases 1-3 are independent and can run in parallel. Phase 4-6 build on earlier work.
+| Phase | Status | Key Commits |
+|-------|--------|-------------|
+| 1 — OUI + Inventory | DONE | OUI CSV loader, MAC flags, search/sort |
+| 2 — Drone UI | DONE | Map + sidebar, trail tracking, detection history |
+| 3 — Command Builder | DONE | 46 structured commands, category UI |
+| 4 — Target Tracking | DONE | T_D/T_F/T_C protocol, weighted centroid, confidence |
+| 5 — Alert Email | DONE | notifyEmail/Visual/Audible, HTML templates, per-rule toggles |
+| 6 — Webhook + Geofence | DONE | Delivery history, MQTT geofence federation |
 
-## Verification per Phase
-- `go build ./...` + `cd web && npm run build`
-- Run `simulate-drone.sh --with-targets` to exercise the pipeline
-- Check each frontend page for new features
-- Test webhook delivery with a RequestBin or local listener
-- Commit after each phase passes
+**Beyond parity (also completed):**
+- Map tile proxy with caching (Jawg Matrix, OSM, Esri) + preload API
+- API rate limiting (per-IP, per-endpoint group)
+- Login anti-automation timing guard
+- TAK protocol expansion (TCP/UDP/TLS/auth)
+- OpenSky Network aircraft enrichment (OAuth2)
+- Planespotters aircraft photo lookup
+- 40+ configurable env vars (full CC PRO parity)
+- `.env` file setup for Docker deployment
