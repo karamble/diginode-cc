@@ -187,6 +187,7 @@ func (s *Service) GetByKey(key string) *Drone {
 }
 
 // findByID looks up a drone by its UUID (iterates the map).
+// Caller must hold at least s.mu.RLock.
 func (s *Service) findByID(id string) (*Drone, string) {
 	for key, d := range s.drones {
 		if d.ID == id {
@@ -194,6 +195,14 @@ func (s *Service) findByID(id string) (*Drone, string) {
 		}
 	}
 	return nil, ""
+}
+
+// GetByID looks up a drone by its UUID.
+func (s *Service) GetByID(id string) *Drone {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	d, _ := s.findByID(id)
+	return d
 }
 
 // UpdateStatus changes a drone's status. Accepts either the map key (MAC/serial) or UUID.
@@ -530,11 +539,20 @@ type DetectionRecord struct {
 	Timestamp     time.Time `json:"timestamp"`
 }
 
-// GetDetections returns recent detection records for a given drone MAC or serial.
+// GetDetections returns recent detection records for a given drone identifier.
+// Accepts MAC, serial number, or UUID (resolved to MAC via in-memory lookup).
 func (s *Service) GetDetections(ctx context.Context, droneKey string, limit int) ([]DetectionRecord, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 80
 	}
+
+	// If the key looks like a UUID, resolve to MAC for the query.
+	s.mu.RLock()
+	if drone, _ := s.findByID(droneKey); drone != nil && drone.MAC != "" {
+		droneKey = drone.MAC
+	}
+	s.mu.RUnlock()
+
 	rows, err := s.db.Pool.Query(ctx, `
 		SELECT id, mac, serial_number, latitude, longitude, altitude,
 			speed, heading, rssi, source, timestamp

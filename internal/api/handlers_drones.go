@@ -118,10 +118,14 @@ func (s *Server) handleListDrones(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, responses)
 }
 
-// handleGetDrone returns a single drone by its key (MAC/serial/UAS ID).
+// handleGetDrone returns a single drone by its key (MAC/serial/UAS ID) or UUID.
 func (s *Server) handleGetDrone(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 	drone := s.svc.Drones.GetByKey(id)
+	if drone == nil {
+		// Try UUID lookup
+		drone = s.svc.Drones.GetByID(id)
+	}
 	if drone == nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("drone %q not found", id))
 		return
