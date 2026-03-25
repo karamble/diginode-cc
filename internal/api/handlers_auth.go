@@ -82,6 +82,15 @@ func buildUserResponse(u *auth.User) userResponse {
 // --- Handlers ---
 
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// Anti-automation: ensure login always takes at least AUTH_MIN_SUBMIT_MS
+	loginStart := time.Now()
+	defer func() {
+		minDuration := time.Duration(s.cfg.AuthMinSubmitMS) * time.Millisecond
+		if elapsed := time.Since(loginStart); elapsed < minDuration {
+			time.Sleep(minDuration - elapsed)
+		}
+	}()
+
 	var req loginRequest
 	if err := readJSON(r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
