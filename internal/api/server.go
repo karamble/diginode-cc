@@ -29,6 +29,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/mqtt"
 	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/permissions"
+	"github.com/karamble/diginode-cc/internal/ratelimit"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
 	"github.com/karamble/diginode-cc/internal/targets"
@@ -73,13 +74,16 @@ func (s *Services) DB() *database.DB { return s.Database }
 
 // Server is the HTTP API server.
 type Server struct {
-	cfg       *config.Config
-	hub       *ws.Hub
-	serialMgr *serial.Manager
-	svc       *Services
-	tileCache *tiles.TileCache
-	router    chi.Router
-	upgrader  websocket.Upgrader
+	cfg          *config.Config
+	hub          *ws.Hub
+	serialMgr    *serial.Manager
+	svc          *Services
+	tileCache    *tiles.TileCache
+	rlDefault    *ratelimit.Limiter
+	rlLogin      *ratelimit.Limiter
+	rl2FA        *ratelimit.Limiter
+	router       chi.Router
+	upgrader     websocket.Upgrader
 }
 
 // NewServer creates a new API server.
@@ -90,6 +94,9 @@ func NewServer(cfg *config.Config, hub *ws.Hub, serialMgr *serial.Manager, svc *
 		serialMgr: serialMgr,
 		svc:       svc,
 		tileCache: tiles.NewTileCache("data/tiles", cfg.JawgAccessToken),
+		rlDefault: ratelimit.New(cfg.RateLimitDefault, cfg.RateLimitDefaultTTL),
+		rlLogin:   ratelimit.New(cfg.RateLimitLogin, cfg.RateLimitLoginTTL),
+		rl2FA:     ratelimit.New(cfg.RateLimit2FA, cfg.RateLimit2FATTL),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true // Allow all origins (nginx handles CORS)
@@ -128,11 +135,16 @@ func (s *Server) setupRoutes() chi.Router {
 
 	// API routes
 	r.Route("/api", func(r chi.Router) {
-		// Auth routes (public)
-		r.Post("/auth/login", s.handleLogin)
-		r.Post("/auth/register", s.handleRegister)
-		r.Post("/auth/forgot-password", s.handleForgotPassword)
-		r.Post("/auth/reset-password", s.handleResetPassword)
+		r.Use(s.rlDefault.Middleware)
+
+		// Auth routes (public, with stricter login rate limit)
+		r.Group(func(r chi.Router) {
+			r.Use(s.rlLogin.Middleware)
+			r.Post("/auth/login", s.handleLogin)
+			r.Post("/auth/register", s.handleRegister)
+			r.Post("/auth/forgot-password", s.handleForgotPassword)
+			r.Post("/auth/reset-password", s.handleResetPassword)
+		})
 
 		// Tile proxy (no auth — Leaflet loads these as <img> src)
 		r.Get("/tiles/{provider}/{z}/{x}/{y}", s.handleTileRequest)
@@ -145,11 +157,14 @@ func (s *Server) setupRoutes() chi.Router {
 			r.Post("/auth/logout", s.handleLogout)
 			r.Get("/auth/me", s.handleMe)
 			r.Post("/auth/legal-ack", s.handleLegalAck)
-			r.Post("/auth/2fa/setup", s.handle2FASetup)
-			r.Post("/auth/2fa/verify", s.handle2FAVerify)
-			r.Post("/auth/2fa/confirm", s.handle2FAConfirm)
-			r.Post("/auth/2fa/disable", s.handle2FADisable)
-			r.Post("/auth/2fa/recovery/regenerate", s.handle2FARecoveryRegenerate)
+			r.Route("/auth/2fa", func(r chi.Router) {
+				r.Use(s.rl2FA.Middleware)
+				r.Post("/setup", s.handle2FASetup)
+				r.Post("/verify", s.handle2FAVerify)
+				r.Post("/confirm", s.handle2FAConfirm)
+				r.Post("/disable", s.handle2FADisable)
+				r.Post("/recovery/regenerate", s.handle2FARecoveryRegenerate)
+			})
 
 			// Users
 			r.Route("/users", func(r chi.Router) {

@@ -23,6 +23,15 @@ type Config struct {
 	InviteExpiryHours         int
 	PasswordResetExpiryHours  int
 	TwoFactorIssuer           string
+	AuthMinSubmitMS           int
+
+	// Rate Limiting
+	RateLimitDefault    int
+	RateLimitDefaultTTL int
+	RateLimitLogin      int
+	RateLimitLoginTTL   int
+	RateLimit2FA        int
+	RateLimit2FATTL     int
 
 	// WebSocket
 	WSMaxClients int
@@ -50,8 +59,12 @@ type Config struct {
 	ACARSHost    string
 
 	// TAK
-	TAKEnabled bool
-	TAKAddr    string
+	TAKEnabled  bool
+	TAKAddr     string
+	TAKProtocol string // "tcp" or "udp"
+	TAKTLS      bool
+	TAKUsername string
+	TAKPassword string
 
 	// FAA
 	FAAOnlineLookupEnabled  bool
@@ -92,6 +105,15 @@ func Load() (*Config, error) {
 		InviteExpiryHours:          envOrDefaultInt("INVITE_EXPIRY_HOURS", 168),
 		PasswordResetExpiryHours:   envOrDefaultInt("PASSWORD_RESET_EXPIRY_HOURS", 1),
 		TwoFactorIssuer:            envOrDefault("TWO_FACTOR_ISSUER", "DigiNode CC"),
+		AuthMinSubmitMS:            envOrDefaultInt("AUTH_MIN_SUBMIT_MS", 600),
+
+		// Rate Limiting
+		RateLimitDefault:    envOrDefaultInt("RATE_LIMIT_DEFAULT_LIMIT", 300),
+		RateLimitDefaultTTL: envOrDefaultInt("RATE_LIMIT_DEFAULT_TTL", 60),
+		RateLimitLogin:      envOrDefaultInt("RATE_LIMIT_LOGIN_LIMIT", 30),
+		RateLimitLoginTTL:   envOrDefaultInt("RATE_LIMIT_LOGIN_TTL", 60),
+		RateLimit2FA:        envOrDefaultInt("RATE_LIMIT_2FA_LIMIT", 10),
+		RateLimit2FATTL:     envOrDefaultInt("RATE_LIMIT_2FA_TTL", 300),
 
 		// WebSocket
 		WSMaxClients: envOrDefaultInt("WS_MAX_CLIENTS", 200),
@@ -119,8 +141,12 @@ func Load() (*Config, error) {
 		ACARSHost:    envOrDefault("ACARS_UDP_HOST", "0.0.0.0"),
 
 		// TAK
-		TAKEnabled: envOrDefaultBool("TAK_ENABLED", false),
-		TAKAddr:    envOrDefault("TAK_ADDR", ""),
+		TAKEnabled:  envOrDefaultBool("TAK_ENABLED", false),
+		TAKAddr:     envOrDefault("TAK_ADDR", ""),
+		TAKProtocol: envOrDefault("TAK_PROTOCOL", "tcp"),
+		TAKTLS:      envOrDefaultBool("TAK_TLS", false),
+		TAKUsername: envOrDefault("TAK_USERNAME", ""),
+		TAKPassword: envOrDefault("TAK_PASSWORD", ""),
 
 		// FAA
 		FAAOnlineLookupEnabled: envOrDefaultBool("FAA_ONLINE_LOOKUP_ENABLED", true),

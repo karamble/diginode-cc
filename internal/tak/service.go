@@ -1,10 +1,12 @@
 package tak
 
 import (
+	"crypto/tls"
 	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 )
 
@@ -48,29 +50,98 @@ type COTTrack struct {
 	Speed  float64 `xml:"speed,attr"`
 }
 
+// Config holds TAK connection parameters.
+type Config struct {
+	Addr     string // host:port
+	Protocol string // "tcp" or "udp"
+	TLS      bool
+	Username string
+	Password string
+}
+
 // Service sends COT events to TAK servers.
 type Service struct {
-	addr   string
+	cfg    Config
 	conn   net.Conn
 	stopCh chan struct{}
 }
 
 // NewService creates a new TAK service.
-func NewService(addr string) *Service {
+func NewService(cfg Config) *Service {
 	return &Service{
-		addr:   addr,
+		cfg:    cfg,
 		stopCh: make(chan struct{}),
 	}
 }
 
 // Start connects to the TAK server.
 func (s *Service) Start() error {
-	conn, err := net.DialTimeout("tcp", s.addr, 10*time.Second)
-	if err != nil {
-		return fmt.Errorf("TAK connection failed: %w", err)
+	proto := strings.ToLower(s.cfg.Protocol)
+
+	switch proto {
+	case "udp":
+		addr, err := net.ResolveUDPAddr("udp", s.cfg.Addr)
+		if err != nil {
+			return fmt.Errorf("TAK UDP resolve failed: %w", err)
+		}
+		conn, err := net.DialUDP("udp", nil, addr)
+		if err != nil {
+			return fmt.Errorf("TAK UDP connection failed: %w", err)
+		}
+		s.conn = conn
+		slog.Info("TAK connected (UDP)", "addr", s.cfg.Addr)
+
+	case "tcp":
+		if s.cfg.TLS {
+			tlsCfg := &tls.Config{
+				InsecureSkipVerify: true, // TAK servers often use self-signed certs
+			}
+			conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", s.cfg.Addr, tlsCfg)
+			if err != nil {
+				return fmt.Errorf("TAK TLS connection failed: %w", err)
+			}
+			s.conn = conn
+			slog.Info("TAK connected (TCP+TLS)", "addr", s.cfg.Addr)
+		} else {
+			conn, err := net.DialTimeout("tcp", s.cfg.Addr, 10*time.Second)
+			if err != nil {
+				return fmt.Errorf("TAK TCP connection failed: %w", err)
+			}
+			s.conn = conn
+			slog.Info("TAK connected (TCP)", "addr", s.cfg.Addr)
+		}
+
+	default:
+		return fmt.Errorf("TAK unsupported protocol: %s", proto)
 	}
-	s.conn = conn
-	slog.Info("TAK connected", "addr", s.addr)
+
+	// Send auth if credentials provided
+	if s.cfg.Username != "" {
+		if err := s.sendAuth(); err != nil {
+			s.conn.Close()
+			s.conn = nil
+			return fmt.Errorf("TAK authentication failed: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// sendAuth sends a COT auth event with credentials.
+func (s *Service) sendAuth() error {
+	// TAK auth is typically done via a COT event with auth details
+	now := time.Now().UTC()
+	authXML := fmt.Sprintf(
+		`<?xml version="1.0" encoding="UTF-8"?>`+
+			`<auth><cot><username>%s</username><password>%s</password>`+
+			`<uid>DigiNode-CC</uid><time>%s</time></cot></auth>`,
+		s.cfg.Username, s.cfg.Password, now.Format(time.RFC3339))
+
+	_, err := s.conn.Write([]byte(authXML))
+	if err != nil {
+		return err
+	}
+	slog.Info("TAK auth sent", "user", s.cfg.Username)
 	return nil
 }
 
