@@ -8,9 +8,9 @@ DigiNode CC (Command Center) is a Go backend that manages Meshtastic mesh networ
 
 | | |
 |--|-------------|
-| Language | Go 1.23 |
+| Language | Go 1.25 |
 | Docker containers | 2 (Go + PostgreSQL) |
-| API routes | 165+ |
+| API routes | 175+ |
 | Database | PostgreSQL 16 (pgx) |
 
 ---
@@ -92,27 +92,29 @@ diginode-cc/
 |   +-- audit/               # Audit logging service
 |   +-- alerts/              # Alert rules + evaluation engine
 |   +-- alarms/              # Audio/visual alarm config
-|   +-- adsb/                # ADS-B aircraft feed polling
+|   +-- adsb/                # ADS-B feed polling + OpenSky + Planespotters
 |   +-- acars/               # ACARS UDP listener
 |   +-- chat/                # Mesh text message handling
 |   +-- commands/            # Command queue + ACK tracking
 |   +-- config/              # Env config + runtime AppConfig
 |   +-- database/            # PostgreSQL pool + embedded migrations
-|   |   +-- migrations/      # 7 SQL migration files
+|   |   +-- migrations/      # 15 SQL migration files
+|   +-- tiles/               # Map tile proxy + filesystem cache
 |   +-- drones/              # Drone detection + tracking
 |   +-- exports/             # CSV/JSON data export
 |   +-- faa/                 # FAA aircraft registry
 |   +-- firewall/            # IP/CIDR blocking middleware
 |   +-- geofences/           # Polygon geofence engine
 |   +-- inventory/           # WiFi device inventory
-|   +-- mail/                # SMTP email delivery
+|   +-- mail/                # SMTP email delivery (plain + TLS)
 |   +-- meshtastic/          # Packet dispatcher + port numbers
-|   +-- mqtt/                # MQTT broker federation
+|   +-- mqtt/                # MQTT broker federation + geofence sync
 |   +-- nodes/               # Mesh node tracking
 |   +-- permissions/         # Feature-level RBAC
 |   +-- serial/              # Meshtastic serial framing + encoding
 |   +-- sites/               # Multi-site management
-|   +-- tak/                 # TAK/ATAK COT protocol
+|   +-- ratelimit/            # Per-IP rate limiting middleware
+|   +-- tak/                 # TAK/ATAK COT protocol (TCP/UDP/TLS)
 |   +-- targets/             # Target tracking + triangulation
 |   +-- updates/             # Self-update (git-based)
 |   +-- users/               # User CRUD + invitations
@@ -122,6 +124,7 @@ diginode-cc/
 +-- docker/
 |   +-- Dockerfile           # Multi-stage build (Go + Node + Alpine)
 +-- docker-compose.yml       # PostgreSQL + DigiNode CC
++-- .env.example             # All configurable environment variables
 +-- Makefile                 # Build targets
 +-- docs/                    # Documentation
 ```
@@ -132,11 +135,11 @@ diginode-cc/
 
 `main.go` executes in this order:
 
-1. **Logger** -- structured logging via `slog`
-2. **Config** -- `config.Load()` reads environment variables
+1. **Config** -- `config.Load()` reads ~40 environment variables
+2. **Logger** -- structured logging via `slog` (level from `LOG_LEVEL`)
 3. **Database** -- PostgreSQL connection pool via `pgx`
-4. **Migrations** -- `db.Migrate()` runs embedded SQL files (000001-000007)
-5. **WebSocket Hub** -- `ws.NewHub()` + goroutine
+4. **Migrations** -- `db.Migrate()` runs embedded SQL files (000001-000015)
+5. **WebSocket Hub** -- `ws.NewHub(maxClients)` + goroutine
 6. **Serial Manager** -- `serial.NewManager(cfg, hub)`
 7. **Domain Services** -- 20 services instantiated:
    - auth, users, sites, nodes, drones, chat, commands, alerts, geofences, targets, inventory, webhooks, alarms, firewall, faa, exports, permissions, audit, mail, appConfig
@@ -225,11 +228,11 @@ The dispatcher filters mesh rebroadcasts:
 
 ### Serial Reconnect
 
-Exponential backoff with jitter:
-- Base delay: 500ms
-- Max delay: 15s
+Exponential backoff with jitter (all configurable via env vars):
+- Base delay: `SERIAL_RECONNECT_BASE_MS` (default 500ms)
+- Max delay: `SERIAL_RECONNECT_MAX_MS` (default 15000ms)
 - Scale factor: 1.5x per attempt
-- Jitter: +/-20%
+- Jitter: `SERIAL_RECONNECT_JITTER` (default ±20%)
 - Resets to base on successful connection
 
 ---
@@ -292,6 +295,16 @@ Fields mapped to `DroneDetection` JSON tags: `uasId`, `mac`, `rssi`, `latitude`,
 **Template rendering** with placeholders: `{mac}`, `{oui}`, `{ssid}`, `{channel}`, `{rssi}`, `{nodeId}`, `{nodeName}`, `{rule}`, `{severity}`
 
 **Severity levels:** INFO, NOTICE, ALERT, CRITICAL
+
+**Notification channels (per-rule toggles):**
+- `notifyVisual` (default true) — frontend visual notification
+- `notifyAudible` (default true) — frontend audio alert
+- `notifyWebhook` — fire webhook event on trigger
+- `notifyEmail` — send HTML email to `emailRecipients` (comma-separated)
+
+WebSocket alert events include `notifyVisual` and `notifyAudible` flags so the frontend can decide rendering.
+
+**Email notifications:** When `notifyEmail=true` and `emailRecipients` is set, the alert service sends HTML emails via `mail.Service.Send()` in a background goroutine. Subject format: `[DigiNode CC] Alert: {ruleName}`.
 
 **Alert sources:**
 - **Rule-based**: `Evaluate(DetectionEvent)` matches conditions → `Trigger(ruleID, ...)`
@@ -385,7 +398,7 @@ Fields mapped to `DroneDetection` JSON tags: `uasId`, `mac`, `rssi`, `latitude`,
 ### JWT Authentication
 
 - Algorithm: HMAC-SHA256
-- Expiry: 24 hours
+- Expiry: configurable via `JWT_EXPIRY` (default `24h`)
 - Claims: `uid` (user ID), `email`, `role`
 - Middleware extracts from `Authorization: Bearer <token>` header
 
@@ -417,15 +430,29 @@ ADMIN (3) > OPERATOR (2) > ANALYST (1) > VIEWER (0)
 ### Account Security
 
 - **Password hashing:** bcrypt (DefaultCost)
-- **Account lockout:** 5 failed attempts -> 15 minute lock
-- **2FA:** TOTP with recovery codes
-- **Password reset:** Token-based (4h expiry), email delivery
+- **Account lockout:** `AUTH_LOCKOUT_THRESHOLD` (default 4) failed attempts → `AUTH_LOCKOUT_DURATION_MINUTES` (default 15) lock
+- **2FA:** TOTP via `TWO_FACTOR_ISSUER` (default "DigiNode CC"), 8 recovery codes
+- **Password reset:** Token-based, `PASSWORD_RESET_EXPIRY_HOURS` (default 1h), email delivery
+- **Invitation expiry:** `INVITE_EXPIRY_HOURS` (default 168 = 7 days)
+- **Anti-automation:** `AUTH_MIN_SUBMIT_MS` (default 600ms) timing floor on login to prevent credential stuffing
+
+### API Rate Limiting
+
+Per-IP rate limiting middleware (`internal/ratelimit/`):
+
+| Scope | Env Vars | Default |
+|-------|----------|---------|
+| All API routes | `RATE_LIMIT_DEFAULT_LIMIT` / `_TTL` | 300 req / 60s |
+| Login/register/reset | `RATE_LIMIT_LOGIN_LIMIT` / `_TTL` | 30 req / 60s |
+| 2FA endpoints | `RATE_LIMIT_2FA_LIMIT` / `_TTL` | 10 req / 300s |
+
+Returns `429 Too Many Requests` when exceeded. Strips port from `RemoteAddr` for consistent per-IP tracking.
 
 ---
 
 ## 8. Database Schema
 
-10 migrations (`internal/database/migrations/`), 33+ tables:
+15 migrations (`internal/database/migrations/`), 33+ tables:
 
 ### Core Tables
 
@@ -438,7 +465,7 @@ ADMIN (3) > OPERATOR (2) > ANALYST (1) > VIEWER (0)
 | `targets` | Tracked entities | name, MAC, lat/lon, status, tracking confidence |
 | `inventory_devices` | WiFi devices | MAC, manufacturer, RSSI stats (min/max/avg/hits) |
 | `geofences` | Polygon boundaries | polygon (JSONB), alarm config, entity filtering, notify_webhook |
-| `alert_rules` | Alert conditions | condition (JSONB), severity, cooldown, match mode, notify_webhook |
+| `alert_rules` | Alert conditions | condition (JSONB), severity, cooldown, match mode, notify_webhook, notify_email, email_recipients, notify_visual, notify_audible |
 | `commands` | Command queue | target_node, status lifecycle, retry tracking |
 
 ### History & Audit
@@ -615,6 +642,20 @@ Each resource follows: `GET /`, `POST /`, `GET /{id}`, `PUT /{id}`, `DELETE /{id
 - `/api/alarms` -- Alarm configs (+ `POST /sounds/{level}`, `DELETE /sounds/{level}`)
 - `/api/firewall/rules` -- IP blocking rules
 
+### Map Tile Proxy
+
+| Method | Path | Auth | Description |
+|--------|------|:----:|-------------|
+| GET | `/api/tiles/{provider}/{z}/{x}/{y}` | No | Proxy + cache tile (jawg/osm/esri) |
+| POST | `/api/tiles/preload` | Yes | Preload tiles for area |
+| GET | `/api/tiles/preload/status` | Yes | Preload progress |
+| POST | `/api/tiles/preload/cancel` | Yes | Cancel preload |
+| DELETE | `/api/admin/tiles-cache` | Admin | Clear tile cache |
+
+**Providers:** `jawg` (Jawg Matrix, default), `osm` (OpenStreetMap), `esri` (Esri Satellite)
+
+Tiles are cached to filesystem (`data/tiles/{provider}/{z}/{x}/{y}.png`) with 30-day TTL, PNG/JPEG magic byte validation, and atomic writes. Offline mode serves a gray placeholder tile. Response headers: `X-Tile-Cache: HIT/MISS/PLACEHOLDER`.
+
 ### Integrations
 
 | Method | Path | Description |
@@ -622,6 +663,8 @@ Each resource follows: `GET /`, `POST /`, `GET /{id}`, `PUT /{id}`, `DELETE /{id
 | GET | `/api/adsb/status` | ADS-B feed status |
 | GET | `/api/adsb/tracks` | Current aircraft |
 | GET/PUT | `/api/adsb/config` | ADS-B configuration |
+| GET | `/api/adsb/opensky/{hex}` | OpenSky aircraft metadata lookup |
+| GET | `/api/adsb/planespotters/{hex}` | Planespotters photo lookup |
 | GET | `/api/mqtt/sites` | MQTT site configs |
 | GET | `/api/mqtt/sites-status` | Connection status |
 | GET/PUT | `/api/tak/config` | TAK configuration |
@@ -638,26 +681,90 @@ Each resource follows: `GET /`, `POST /`, `GET /{id}`, `PUT /{id}`, `DELETE /{id
 
 ### Environment Variables
 
+All variables have sensible defaults. See `.env.example` for the complete list. Copy to `.env` and customize for your deployment.
+
+**Core:**
+
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `JWT_SECRET` | (required) | JWT signing secret |
-| `DATABASE_URL` | `postgres://diginode:diginode@localhost:5432/diginode?sslmode=disable` | PostgreSQL connection |
+| `DATABASE_URL` | `postgres://...` | PostgreSQL connection |
 | `LISTEN_ADDR` | `:3000` | HTTP listen address |
-| `SERIAL_DEVICE` | (empty) | Meshtastic serial port |
-| `SERIAL_BAUD` | `115200` | Serial baud rate |
+| `LOG_LEVEL` | `info` | Log level (debug/info/warn/error) |
+
+**Auth & Security:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JWT_EXPIRY` | `24h` | JWT token lifetime |
+| `AUTH_LOCKOUT_THRESHOLD` | `4` | Failed logins before lockout |
+| `AUTH_LOCKOUT_DURATION_MINUTES` | `15` | Lockout duration |
+| `INVITE_EXPIRY_HOURS` | `168` | Invitation token expiry (7 days) |
+| `PASSWORD_RESET_EXPIRY_HOURS` | `1` | Password reset token expiry |
+| `TWO_FACTOR_ISSUER` | `DigiNode CC` | 2FA TOTP issuer name |
+| `AUTH_MIN_SUBMIT_MS` | `600` | Login anti-automation timing floor |
+| `RATE_LIMIT_DEFAULT_LIMIT` / `_TTL` | `300` / `60` | API rate limit (req/sec window) |
+| `RATE_LIMIT_LOGIN_LIMIT` / `_TTL` | `30` / `60` | Login rate limit |
+| `RATE_LIMIT_2FA_LIMIT` / `_TTL` | `10` / `300` | 2FA rate limit |
+| `WS_MAX_CLIENTS` | `200` | Max WebSocket connections |
+
+**Serial (Meshtastic):**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SERIAL_DEVICE` | `/dev/lora` | Serial port path |
+| `SERIAL_BAUD` | `115200` | Baud rate |
+| `SERIAL_RECONNECT_BASE_MS` | `500` | Reconnect base delay |
+| `SERIAL_RECONNECT_MAX_MS` | `15000` | Reconnect max delay |
+| `SERIAL_RECONNECT_JITTER` | `0.2` | Reconnect jitter factor |
+
+**Map Tiles:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `JAWG_ACCESS_TOKEN` | (empty) | Jawg Maps API token (server-side only) |
+
+**Integrations:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `MQTT_ENABLED` | `false` | Enable MQTT federation |
 | `MQTT_BROKER_URL` | `tcp://localhost:1883` | MQTT broker URL |
+| `MQTT_CONNECT_TIMEOUT_MS` | `5000` | MQTT connection retry interval |
 | `ADSB_ENABLED` | `false` | Enable ADS-B polling |
 | `ADSB_URL` | `http://localhost:8080/data/aircraft.json` | dump1090 JSON URL |
+| `ADSB_POLL_INTERVAL_MS` | `3000` | ADS-B poll interval |
+| `ADSB_OPENSKY_ENABLED` | `false` | Enable OpenSky enrichment |
+| `ADSB_OPENSKY_CLIENT_ID` | (empty) | OpenSky OAuth client ID |
+| `ADSB_OPENSKY_CLIENT_SECRET` | (empty) | OpenSky OAuth client secret |
+| `ADSB_PLANESPOTTERS_ENABLED` | `true` | Enable Planespotters photo lookup |
 | `ACARS_ENABLED` | `false` | Enable ACARS listener |
+| `ACARS_UDP_HOST` | `0.0.0.0` | ACARS bind address |
 | `ACARS_PORT` | `5555` | ACARS UDP port |
 | `TAK_ENABLED` | `false` | Enable TAK/ATAK |
-| `TAK_ADDR` | (empty) | TAK server address |
-| `SMTP_HOST` | (empty) | SMTP server |
-| `SMTP_PORT` | `587` | SMTP port |
-| `SMTP_USER` | (empty) | SMTP username |
-| `SMTP_PASSWORD` | (empty) | SMTP password |
-| `SMTP_FROM` | (empty) | Sender email |
+| `TAK_ADDR` | (empty) | TAK server host:port |
+| `TAK_PROTOCOL` | `tcp` | TAK protocol (tcp/udp) |
+| `TAK_TLS` | `false` | Enable TLS for TAK |
+| `TAK_USERNAME` / `TAK_PASSWORD` | (empty) | TAK authentication |
+| `FAA_ONLINE_LOOKUP_ENABLED` | `true` | Enable FAA online lookups |
+| `FAA_ONLINE_CACHE_TTL_MINUTES` | `10` | FAA lookup cooldown/cache |
+
+**Email:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MAIL_ENABLED` | `false` | Enable email delivery |
+| `MAIL_SECURE` | `false` | Use TLS/SSL (port 465) |
+| `SMTP_HOST` / `SMTP_PORT` | (empty) / `587` | SMTP server |
+| `SMTP_USER` / `SMTP_PASSWORD` | (empty) | SMTP credentials |
+| `SMTP_FROM` | (empty) | Sender address |
+
+**Updates & Firewall:**
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `AUTO_UPDATE_BRANCH` | `master` | Git branch for updates |
+| `AUTO_UPDATE_REMOTE` | `origin` | Git remote for updates |
 | `GEOIP_DB_PATH` | (empty) | GeoIP database path |
 
 ### Runtime AppConfig (33 keys)
@@ -685,32 +792,25 @@ Stored in `app_config` table, seeded on first startup:
 
 ## 12. Deployment
 
-### Docker Compose
+### Standalone (Development)
 
-```yaml
-services:
-  postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: diginode
-      POSTGRES_PASSWORD: diginode
-      POSTGRES_DB: diginode
-    volumes:
-      - pgdata:/var/lib/postgresql/data
-
-  diginode-cc:
-    build: .
-    ports:
-      - "3000:3000"
-    environment:
-      DATABASE_URL: postgres://diginode:diginode@postgres:5432/diginode?sslmode=disable
-      JWT_SECRET: your-secret-here
-      SERIAL_DEVICE: /dev/ttyUSB0
-    devices:
-      - /dev/ttyUSB0:/dev/ttyUSB0
-    depends_on:
-      - postgres
+```bash
+cp .env.example .env    # Edit with your values (JAWG_ACCESS_TOKEN, etc.)
+docker compose up -d    # Starts PostgreSQL + DigiNode CC, reads .env
 ```
+
+Tile cache persisted via `tiles` Docker volume.
+
+### Via GoTailMe (Production / Raspberry Pi)
+
+DigiNode CC runs as an overlay service alongside gotailme:
+
+```bash
+# From gotailme directory
+make docker-prod-push-all   # Build + push both images to Docker Hub
+```
+
+On the Pi, `docker-compose.antihunter.yml` overlay adds DigiNode CC + PostgreSQL. Env vars are passed from gotailme's `.env` file. Watchtower auto-updates on image push.
 
 ### Makefile Targets
 
@@ -728,8 +828,9 @@ services:
 
 ### Production (Raspberry Pi)
 
-1. Push image: `make docker-prod-push`
-2. Watchtower auto-updates hourly, or force-update via Watchtower HTTP API
+1. Push images: `make docker-prod-push-all` (from gotailme dir)
+2. Watchtower auto-updates on the Pi, or force via `docker pull` + restart
+3. DigiNode CC listens on `:3000`, gotailme on `:8000`
 
 ---
 
