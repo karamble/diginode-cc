@@ -375,6 +375,8 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Delete("/log", s.handleClearADSBLog)
 				r.Post("/database/upload", s.handleADSBDatabaseUpload)
 				r.Post("/opensky/credentials", s.handleADSBOpenSkyCredentials)
+				r.Get("/opensky/{hex}", s.handleADSBOpenSkyLookup)
+				r.Get("/planespotters/{hex}", s.handleADSBPlanespottersLookup)
 				r.Get("/alerts/rules", s.handleListADSBAlertRules)
 				r.Post("/alerts/rules", s.handleCreateADSBAlertRule)
 				r.Put("/alerts/rules/{id}", s.handleUpdateADSBAlertRule)

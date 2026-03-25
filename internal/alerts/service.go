@@ -4,7 +4,9 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,8 +33,16 @@ type Rule struct {
 	Severity        Severity               `json:"severity"`
 	Enabled         bool                   `json:"enabled"`
 	CooldownSeconds int                    `json:"cooldownSeconds"`
+	NotifyWebhook   bool                   `json:"notifyWebhook"`
+	NotifyEmail     bool                   `json:"notifyEmail"`
+	EmailRecipients string                 `json:"emailRecipients,omitempty"`
+	NotifyVisual    bool                   `json:"notifyVisual"`
+	NotifyAudible   bool                   `json:"notifyAudible"`
 	LastTriggered   *time.Time             `json:"lastTriggered,omitempty"`
 }
+
+// EmailSender is a callback for sending alert emails.
+type EmailSender func(to, subject, body string) error
 
 // Event represents a triggered alert.
 type Event struct {
@@ -42,6 +52,8 @@ type Event struct {
 	Title          string                 `json:"title"`
 	Message        string                 `json:"message,omitempty"`
 	Data           map[string]interface{} `json:"data,omitempty"`
+	NotifyVisual   bool                   `json:"notifyVisual"`
+	NotifyAudible  bool                   `json:"notifyAudible"`
 	Acknowledged   bool                   `json:"acknowledged"`
 	AcknowledgedBy string                 `json:"acknowledgedBy,omitempty"`
 	AcknowledgedAt *time.Time             `json:"acknowledgedAt,omitempty"`
@@ -50,10 +62,11 @@ type Event struct {
 
 // Service manages alert rules and events.
 type Service struct {
-	db    *database.DB
-	hub   *ws.Hub
-	rules map[string]*Rule
-	mu    sync.RWMutex
+	db          *database.DB
+	hub         *ws.Hub
+	rules       map[string]*Rule
+	mu          sync.RWMutex
+	emailSender EmailSender
 }
 
 // NewService creates a new alert service.
@@ -65,11 +78,19 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 	}
 }
 
+// SetEmailSender sets the callback used to send alert notification emails.
+func (s *Service) SetEmailSender(fn EmailSender) {
+	s.emailSender = fn
+}
+
 // Load loads all alert rules from the database.
 func (s *Service) Load(ctx context.Context) error {
 	rows, err := s.db.Pool.Query(ctx, `
 		SELECT id, name, description, condition, severity, enabled,
-			cooldown_seconds, last_triggered
+			cooldown_seconds, COALESCE(notify_webhook, false),
+			COALESCE(notify_email, false), COALESCE(email_recipients, ''),
+			COALESCE(notify_visual, true), COALESCE(notify_audible, true),
+			last_triggered
 		FROM alert_rules`)
 	if err != nil {
 		return err
@@ -83,7 +104,10 @@ func (s *Service) Load(ctx context.Context) error {
 		var r Rule
 		var condJSON []byte
 		if err := rows.Scan(&r.ID, &r.Name, &r.Description, &condJSON,
-			&r.Severity, &r.Enabled, &r.CooldownSeconds, &r.LastTriggered); err != nil {
+			&r.Severity, &r.Enabled, &r.CooldownSeconds,
+			&r.NotifyWebhook, &r.NotifyEmail, &r.EmailRecipients,
+			&r.NotifyVisual, &r.NotifyAudible,
+			&r.LastTriggered); err != nil {
 			continue
 		}
 		json.Unmarshal(condJSON, &r.Condition)
@@ -113,13 +137,22 @@ func (s *Service) Trigger(ctx context.Context, ruleID string, title, message str
 	}
 	s.mu.Unlock()
 
+	notifyVisual := true
+	notifyAudible := true
+	if exists {
+		notifyVisual = rule.NotifyVisual
+		notifyAudible = rule.NotifyAudible
+	}
+
 	evt := &Event{
-		RuleID:    ruleID,
-		Severity:  severity,
-		Title:     title,
-		Message:   message,
-		Data:      data,
-		CreatedAt: time.Now(),
+		RuleID:        ruleID,
+		Severity:      severity,
+		Title:         title,
+		Message:       message,
+		Data:          data,
+		NotifyVisual:  notifyVisual,
+		NotifyAudible: notifyAudible,
+		CreatedAt:     time.Now(),
 	}
 
 	// Persist
@@ -135,11 +168,16 @@ func (s *Service) Trigger(ctx context.Context, ruleID string, title, message str
 		return err
 	}
 
-	// Broadcast
+	// Broadcast via WebSocket
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventAlert,
 		Payload: evt,
 	})
+
+	// Send email notification if configured
+	if exists && rule.NotifyEmail && rule.EmailRecipients != "" && s.emailSender != nil {
+		go s.sendAlertEmail(rule, evt)
+	}
 
 	slog.Info("alert triggered", "rule", ruleID, "title", title, "severity", severity)
 	return nil
@@ -180,14 +218,40 @@ func (s *Service) Acknowledge(ctx context.Context, eventID, userID string) error
 	return err
 }
 
+// sendAlertEmail sends email notifications for a triggered alert.
+func (s *Service) sendAlertEmail(rule *Rule, evt *Event) {
+	recipients := strings.Split(rule.EmailRecipients, ",")
+	subject := fmt.Sprintf("[DigiNode CC] Alert: %s", rule.Name)
+	body := fmt.Sprintf(`
+		<h2>DigiNode CC — Alert Triggered</h2>
+		<p><strong>Rule:</strong> %s</p>
+		<p><strong>Severity:</strong> %s</p>
+		<p><strong>Title:</strong> %s</p>
+		<p><strong>Message:</strong> %s</p>
+		<p><strong>Time:</strong> %s</p>
+	`, rule.Name, string(evt.Severity), evt.Title, evt.Message, evt.CreatedAt.Format(time.RFC3339))
+
+	for _, to := range recipients {
+		to = strings.TrimSpace(to)
+		if to == "" {
+			continue
+		}
+		if err := s.emailSender(to, subject, body); err != nil {
+			slog.Error("failed to send alert email", "to", to, "rule", rule.Name, "error", err)
+		}
+	}
+}
+
 // CreateRule adds a new alert rule.
 func (s *Service) CreateRule(ctx context.Context, r *Rule) error {
 	condJSON, _ := json.Marshal(r.Condition)
 	err := s.db.Pool.QueryRow(ctx, `
-		INSERT INTO alert_rules (name, description, condition, severity, enabled, cooldown_seconds)
-		VALUES ($1, $2, $3, $4, $5, $6)
+		INSERT INTO alert_rules (name, description, condition, severity, enabled, cooldown_seconds,
+			notify_webhook, notify_email, email_recipients, notify_visual, notify_audible)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id`,
 		r.Name, r.Description, condJSON, string(r.Severity), r.Enabled, r.CooldownSeconds,
+		r.NotifyWebhook, r.NotifyEmail, r.EmailRecipients, r.NotifyVisual, r.NotifyAudible,
 	).Scan(&r.ID)
 	if err != nil {
 		return err
@@ -203,9 +267,12 @@ func (s *Service) UpdateRule(ctx context.Context, id string, r *Rule) error {
 	condJSON, _ := json.Marshal(r.Condition)
 	_, err := s.db.Pool.Exec(ctx, `
 		UPDATE alert_rules SET name = $2, description = $3, condition = $4,
-			severity = $5, enabled = $6, cooldown_seconds = $7
+			severity = $5, enabled = $6, cooldown_seconds = $7,
+			notify_webhook = $8, notify_email = $9, email_recipients = $10,
+			notify_visual = $11, notify_audible = $12
 		WHERE id = $1`,
-		id, r.Name, r.Description, condJSON, string(r.Severity), r.Enabled, r.CooldownSeconds)
+		id, r.Name, r.Description, condJSON, string(r.Severity), r.Enabled, r.CooldownSeconds,
+		r.NotifyWebhook, r.NotifyEmail, r.EmailRecipients, r.NotifyVisual, r.NotifyAudible)
 	if err != nil {
 		return err
 	}

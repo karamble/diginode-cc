@@ -49,9 +49,13 @@ type Config struct {
 	MQTTConnectTimeoutMS int
 
 	// ADS-B
-	ADSBEnabled        bool
-	ADSBURL            string
-	ADSBPollIntervalMS int
+	ADSBEnabled              bool
+	ADSBURL                  string
+	ADSBPollIntervalMS       int
+	ADSBOpenSkyEnabled       bool
+	ADSBOpenSkyClientID      string
+	ADSBOpenSkyClientSecret  string
+	ADSBPlanespottersEnabled bool
 
 	// ACARS
 	ACARSEnabled bool
@@ -133,7 +137,11 @@ func Load() (*Config, error) {
 		// ADS-B
 		ADSBEnabled:        envOrDefaultBool("ADSB_ENABLED", false),
 		ADSBURL:            envOrDefault("ADSB_URL", "http://localhost:8080/data/aircraft.json"),
-		ADSBPollIntervalMS: envOrDefaultInt("ADSB_POLL_INTERVAL_MS", 3000),
+		ADSBPollIntervalMS:       envOrDefaultInt("ADSB_POLL_INTERVAL_MS", 3000),
+		ADSBOpenSkyEnabled:       envOrDefaultBool("ADSB_OPENSKY_ENABLED", false),
+		ADSBOpenSkyClientID:      envOrDefault("ADSB_OPENSKY_CLIENT_ID", ""),
+		ADSBOpenSkyClientSecret:  envOrDefault("ADSB_OPENSKY_CLIENT_SECRET", ""),
+		ADSBPlanespottersEnabled: envOrDefaultBool("ADSB_PLANESPOTTERS_ENABLED", true),
 
 		// ACARS
 		ACARSEnabled: envOrDefaultBool("ACARS_ENABLED", false),

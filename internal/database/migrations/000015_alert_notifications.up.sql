@@ -1,0 +1,4 @@
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS notify_email BOOLEAN DEFAULT false;
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS email_recipients TEXT DEFAULT '';
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS notify_visual BOOLEAN DEFAULT true;
+ALTER TABLE alert_rules ADD COLUMN IF NOT EXISTS notify_audible BOOLEAN DEFAULT true;

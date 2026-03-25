@@ -10,6 +10,11 @@ interface AlertRule {
   severity: 'INFO' | 'NOTICE' | 'ALERT' | 'CRITICAL'
   enabled: boolean
   cooldownSeconds: number
+  notifyWebhook: boolean
+  notifyEmail: boolean
+  emailRecipients?: string
+  notifyVisual: boolean
+  notifyAudible: boolean
   lastTriggered?: string
 }
 
@@ -43,6 +48,11 @@ interface RuleFormState {
   messageTemplate: string
   cooldownSeconds: number
   enabled: boolean
+  notifyWebhook: boolean
+  notifyEmail: boolean
+  emailRecipients: string
+  notifyVisual: boolean
+  notifyAudible: boolean
 }
 
 const defaultForm: RuleFormState = {
@@ -59,6 +69,11 @@ const defaultForm: RuleFormState = {
   messageTemplate: '',
   cooldownSeconds: 300,
   enabled: true,
+  notifyWebhook: false,
+  notifyEmail: false,
+  emailRecipients: '',
+  notifyVisual: true,
+  notifyAudible: true,
 }
 
 function severityBadge(s: string) {
@@ -168,7 +183,7 @@ export default function AlertsPage() {
 
   // Create rule
   const createRule = useMutation({
-    mutationFn: (body: { name: string; description: string; condition: Record<string, unknown>; severity: Severity; enabled: boolean; cooldownSeconds: number }) =>
+    mutationFn: (body: Record<string, unknown>) =>
       api.post('/alerts/rules', body),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['alertRules'] })
@@ -185,6 +200,11 @@ export default function AlertsPage() {
       severity: form.severity,
       enabled: form.enabled,
       cooldownSeconds: form.cooldownSeconds,
+      notifyWebhook: form.notifyWebhook,
+      notifyEmail: form.notifyEmail,
+      emailRecipients: form.emailRecipients,
+      notifyVisual: form.notifyVisual,
+      notifyAudible: form.notifyAudible,
     })
   }
 
@@ -406,6 +426,46 @@ export default function AlertsPage() {
               <p className="text-[10px] text-dark-600 mt-0.5">
                 Placeholders: {'{mac}'} {'{ssid}'} {'{rssi}'} {'{channel}'} {'{oui}'} {'{nodeId}'} {'{nodeName}'} {'{rule}'} {'{severity}'}
               </p>
+            </div>
+
+            {/* Notification Channels */}
+            <div>
+              <div className="text-xs font-medium text-dark-300 mb-2 uppercase tracking-wider">Notifications</div>
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                {([
+                  { key: 'notifyVisual' as const, label: 'Visual' },
+                  { key: 'notifyAudible' as const, label: 'Audible' },
+                  { key: 'notifyWebhook' as const, label: 'Webhook' },
+                  { key: 'notifyEmail' as const, label: 'Email' },
+                ] as const).map(({ key, label }) => (
+                  <div key={key} className="flex items-center gap-2">
+                    <button
+                      onClick={() => updateField(key, !form[key])}
+                      className={`relative inline-flex h-5 w-9 rounded-full transition-colors ${
+                        form[key] ? 'bg-primary-600' : 'bg-dark-700'
+                      }`}
+                    >
+                      <span className={`inline-block w-3.5 h-3.5 rounded-full bg-white shadow transform transition-transform mt-[3px] ${
+                        form[key] ? 'translate-x-[18px]' : 'translate-x-[3px]'
+                      }`} />
+                    </button>
+                    <span className="text-xs text-dark-400">{label}</span>
+                  </div>
+                ))}
+              </div>
+              {form.notifyEmail && (
+                <div className="mt-2">
+                  <label className={labelClass}>Email Recipients</label>
+                  <input
+                    type="text"
+                    placeholder="admin@example.com, ops@example.com"
+                    value={form.emailRecipients}
+                    onChange={e => updateField('emailRecipients', e.target.value)}
+                    className={inputClass}
+                  />
+                  <p className="text-[10px] text-dark-600 mt-0.5">Comma-separated email addresses</p>
+                </div>
+              )}
             </div>
 
             {/* Actions */}

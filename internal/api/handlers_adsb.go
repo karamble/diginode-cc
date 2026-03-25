@@ -196,6 +196,36 @@ func (s *Server) handleUpdateADSBAlertRule(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, http.StatusOK, rule)
 }
 
+// ---- ADS-B Aircraft Enrichment ----
+
+func (s *Server) handleADSBOpenSkyLookup(w http.ResponseWriter, r *http.Request) {
+	hex := chi.URLParam(r, "hex")
+	result, err := s.svc.ADSB.LookupOpenSky(hex)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if result == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleADSBPlanespottersLookup(w http.ResponseWriter, r *http.Request) {
+	hex := chi.URLParam(r, "hex")
+	result, err := s.svc.ADSB.LookupPlanespotters(hex)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	if result == nil {
+		writeJSON(w, http.StatusOK, map[string]interface{}{})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
 func (s *Server) handleDeleteADSBAlertRule(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
