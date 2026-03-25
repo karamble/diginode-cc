@@ -9,11 +9,17 @@ import (
 // Service handles git-based self-updates.
 type Service struct {
 	repoPath string
+	remote   string
+	branch   string
 }
 
 // NewService creates a new update service.
-func NewService(repoPath string) *Service {
-	return &Service{repoPath: repoPath}
+func NewService(repoPath, remote, branch string) *Service {
+	return &Service{repoPath: repoPath, remote: remote, branch: branch}
+}
+
+func (s *Service) ref() string {
+	return s.remote + "/" + s.branch
 }
 
 // CheckUpdate checks if a newer version is available.
@@ -24,8 +30,8 @@ func (s *Service) CheckUpdate() (bool, string, error) {
 		return false, "", err
 	}
 
-	// Compare HEAD with origin/master
-	cmd = exec.Command("git", "-C", s.repoPath, "rev-list", "--count", "HEAD..origin/master")
+	// Compare HEAD with remote/branch
+	cmd = exec.Command("git", "-C", s.repoPath, "rev-list", "--count", "HEAD.."+s.ref())
 	out, err := cmd.Output()
 	if err != nil {
 		return false, "", err
@@ -37,7 +43,7 @@ func (s *Service) CheckUpdate() (bool, string, error) {
 	}
 
 	// Get latest commit message
-	cmd = exec.Command("git", "-C", s.repoPath, "log", "--oneline", "-1", "origin/master")
+	cmd = exec.Command("git", "-C", s.repoPath, "log", "--oneline", "-1", s.ref())
 	msg, _ := cmd.Output()
 
 	slog.Info("update available", "commits_behind", count)

@@ -43,16 +43,18 @@ type Hub struct {
 	unregister chan *Client
 	mu         sync.RWMutex
 	done       chan struct{}
+	maxClients int
 }
 
 // NewHub creates a new WebSocket hub.
-func NewHub() *Hub {
+func NewHub(maxClients int) *Hub {
 	return &Hub{
 		clients:    make(map[*Client]bool),
 		broadcast:  make(chan []byte, 256),
 		register:   make(chan *Client),
 		unregister: make(chan *Client),
 		done:       make(chan struct{}),
+		maxClients: maxClients,
 	}
 }
 
@@ -62,6 +64,12 @@ func (h *Hub) Run() {
 		select {
 		case client := <-h.register:
 			h.mu.Lock()
+			if h.maxClients > 0 && len(h.clients) >= h.maxClients {
+				h.mu.Unlock()
+				close(client.send)
+				slog.Warn("WebSocket client rejected, max clients reached", "max", h.maxClients)
+				continue
+			}
 			h.clients[client] = true
 			h.mu.Unlock()
 			slog.Debug("WebSocket client connected", "clients", len(h.clients))

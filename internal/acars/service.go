@@ -33,6 +33,7 @@ type Message struct {
 // Service listens for ACARS messages on a UDP port.
 type Service struct {
 	hub      *ws.Hub
+	host     string
 	port     int
 	messages []*Message
 	mu       sync.RWMutex
@@ -40,9 +41,10 @@ type Service struct {
 }
 
 // NewService creates a new ACARS listener.
-func NewService(hub *ws.Hub, port int) *Service {
+func NewService(hub *ws.Hub, host string, port int) *Service {
 	return &Service{
 		hub:    hub,
+		host:   host,
 		port:   port,
 		stopCh: make(chan struct{}),
 	}
@@ -50,7 +52,7 @@ func NewService(hub *ws.Hub, port int) *Service {
 
 // Start begins listening for ACARS UDP messages.
 func (s *Service) Start() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", s.port))
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", s.host, s.port))
 	if err != nil {
 		return err
 	}

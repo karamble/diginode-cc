@@ -59,24 +59,40 @@ type Claims struct {
 	Role   Role   `json:"role"`
 }
 
+// AuthConfig holds configurable auth parameters.
+type AuthConfig struct {
+	JWTExpiry                 string
+	LockoutThreshold          int
+	LockoutDurationMinutes    int
+	PasswordResetExpiryHours  int
+	TwoFactorIssuer           string
+}
+
 // Service handles authentication and user management.
 type Service struct {
 	db           *database.DB
 	jwtSecret    []byte
 	serviceToken string // shared secret for machine-to-machine auth (gotailme → DigiNode CC)
+	authCfg      AuthConfig
 }
 
 // DB returns the underlying database for direct queries (e.g., password reset tokens).
 func (s *Service) DB() *database.DB { return s.db }
 
+// PasswordResetExpiry returns the configured password reset token expiry.
+func (s *Service) PasswordResetExpiry() time.Duration {
+	return time.Duration(s.authCfg.PasswordResetExpiryHours) * time.Hour
+}
+
 // NewService creates a new auth service.
 // The jwtSecret doubles as the service token for machine-to-machine auth,
 // allowing gotailme to authenticate without user credentials.
-func NewService(db *database.DB, jwtSecret string) *Service {
+func NewService(db *database.DB, jwtSecret string, cfg AuthConfig) *Service {
 	return &Service{
 		db:           db,
 		jwtSecret:    []byte(jwtSecret),
 		serviceToken: jwtSecret,
+		authCfg:      cfg,
 	}
 }
 
@@ -117,11 +133,11 @@ func (s *Service) Login(ctx context.Context, email, password, clientIP string) (
 
 	if err := bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password)); err != nil {
 		// Increment failed attempts and lock if threshold reached
-		_, _ = s.db.Pool.Exec(ctx, `
+		_, _ = s.db.Pool.Exec(ctx, fmt.Sprintf(`
 			UPDATE users SET failed_login_attempts = COALESCE(failed_login_attempts, 0) + 1,
-			locked_at = CASE WHEN COALESCE(failed_login_attempts, 0) >= 4 THEN NOW() ELSE locked_at END,
-			locked_until = CASE WHEN COALESCE(failed_login_attempts, 0) >= 4 THEN NOW() + interval '15 minutes' ELSE locked_until END
-			WHERE id = $1`, id)
+			locked_at = CASE WHEN COALESCE(failed_login_attempts, 0) >= %d THEN NOW() ELSE locked_at END,
+			locked_until = CASE WHEN COALESCE(failed_login_attempts, 0) >= %d THEN NOW() + interval '%d minutes' ELSE locked_until END
+			WHERE id = $1`, s.authCfg.LockoutThreshold, s.authCfg.LockoutThreshold, s.authCfg.LockoutDurationMinutes), id)
 		return "", nil, ErrInvalidCredentials
 	}
 
@@ -255,7 +271,7 @@ func (s *Service) SetupTOTP(ctx context.Context, userID string) (string, string,
 	}
 
 	key, err := totp.Generate(totp.GenerateOpts{
-		Issuer:      "DigiNode CC",
+		Issuer:      s.authCfg.TwoFactorIssuer,
 		AccountName: email,
 	})
 	if err != nil {
@@ -292,9 +308,13 @@ func (s *Service) VerifyTOTP(ctx context.Context, userID, code string) error {
 }
 
 func (s *Service) generateToken(user *User) (string, error) {
+	expiry, err := time.ParseDuration(s.authCfg.JWTExpiry)
+	if err != nil {
+		expiry = 24 * time.Hour
+	}
 	claims := &Claims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(time.Now().Add(24 * time.Hour)),
+			ExpiresAt: jwt.NewNumericDate(time.Now().Add(expiry)),
 			IssuedAt:  jwt.NewNumericDate(time.Now()),
 			Issuer:    "diginode-cc",
 			Subject:   user.ID,
@@ -441,7 +461,7 @@ func (s *Service) GeneratePasswordResetToken(ctx context.Context, userID string)
 		return "", fmt.Errorf("failed to generate reset token: %w", err)
 	}
 	token := hex.EncodeToString(tokenBytes)
-	expiresAt := time.Now().Add(1 * time.Hour)
+	expiresAt := time.Now().Add(time.Duration(s.authCfg.PasswordResetExpiryHours) * time.Hour)
 
 	_, err = s.db.Pool.Exec(ctx, `
 		INSERT INTO password_resets (user_id, token, expires_at)
