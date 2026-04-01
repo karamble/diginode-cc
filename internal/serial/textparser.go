@@ -189,6 +189,27 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*ANOMALY-(?P<anomKind>NEW|RETURN|RSSI):\s*(?P<type>\w+)\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})(?:\s+RSSI:(?P<rssi>-?\d+))?(?:\s+Old:(?P<old>-?\d+)\s+New:(?P<new>-?\d+)\s+Delta:(?P<delta>-?\d+))?(?:\s+Name:(?P<name>[^ ]+))?`),
 			handler: p.handleAnomaly,
 		},
+		// CAM: camera detection: "CAM: front_door person 87% ZONE:driveway GPS:48.1234,11.5678"
+		{
+			name: "cam-detection",
+			regex: regexp.MustCompile(
+				`(?i)^CAM:\s+(?P<camera>\S+)\s+(?P<label>\S+)\s+(?P<score>\d+)%(?:\s+ZONE:(?P<zone>\S+))?(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+			handler: p.handleCamDetection,
+		},
+		// CAM_FACE: face recognition: "CAM_FACE: front_door John GPS:48.1234,11.5678"
+		{
+			name: "cam-face",
+			regex: regexp.MustCompile(
+				`(?i)^CAM_FACE:\s+(?P<camera>\S+)\s+(?P<name>\S+)(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+			handler: p.handleCamFace,
+		},
+		// CAM_PLATE: license plate: "CAM_PLATE: driveway ABC123 GPS:48.1234,11.5678"
+		{
+			name: "cam-plate",
+			regex: regexp.MustCompile(
+				`(?i)^CAM_PLATE:\s+(?P<camera>\S+)\s+(?P<plate>\S+)(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+			handler: p.handleCamPlate,
+		},
 		// STARTUP: "nodeId: STARTUP: firmware v1.0"
 		{
 			name: "startup",
@@ -789,6 +810,75 @@ func (p *TextParser) handleTamper(match []string, names []string, raw string) []
 		Category: "tamper",
 		NodeID:   nodeID,
 		Data:     map[string]interface{}{"kind": g["tamperKind"]},
+		Raw:      raw,
+	}}
+}
+
+// --- Camera alert handlers ---
+
+func (p *TextParser) handleCamDetection(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"camera": g["camera"],
+		"label":  g["label"],
+		"score":  parseOptInt(g["score"]),
+	}
+	if v := g["zone"]; v != "" {
+		data["zone"] = v
+	}
+	if v := g["lat"]; v != "" {
+		data["lat"] = parseOptFloat(v)
+	}
+	if v := g["lon"]; v != "" {
+		data["lon"] = parseOptFloat(v)
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "NOTICE",
+		Category: "camera",
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleCamFace(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"camera": g["camera"],
+		"name":   g["name"],
+	}
+	if v := g["lat"]; v != "" {
+		data["lat"] = parseOptFloat(v)
+	}
+	if v := g["lon"]; v != "" {
+		data["lon"] = parseOptFloat(v)
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "ALERT",
+		Category: "camera-face",
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleCamPlate(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"camera": g["camera"],
+		"plate":  g["plate"],
+	}
+	if v := g["lat"]; v != "" {
+		data["lat"] = parseOptFloat(v)
+	}
+	if v := g["lon"]; v != "" {
+		data["lon"] = parseOptFloat(v)
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "NOTICE",
+		Category: "camera-plate",
+		Data:     data,
 		Raw:      raw,
 	}}
 }
