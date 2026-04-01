@@ -26,7 +26,10 @@ func isSensorData(text string) bool {
 		strings.Contains(upper, "ANOMALY-") ||
 		strings.Contains(upper, "VIBRATION:") ||
 		strings.Contains(upper, "BASELINE_STATUS:") ||
-		strings.Contains(upper, "TRIANGULATE_")
+		strings.Contains(upper, "TRIANGULATE_") ||
+		strings.Contains(upper, "CAM:") ||
+		strings.Contains(upper, "CAM_FACE:") ||
+		strings.Contains(upper, "CAM_PLATE:")
 }
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
