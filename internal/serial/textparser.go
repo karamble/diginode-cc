@@ -593,14 +593,34 @@ func (p *TextParser) handleStatus(match []string, names []string, raw string) []
 		data["hdop"] = parseOptFloat(v)
 	}
 
-	return []*ParsedEvent{{
-		Kind:     "alert",
-		Level:    "NOTICE",
-		Category: "status",
-		NodeID:   nodeID,
-		Data:     data,
-		Raw:      raw,
-	}}
+	// AntiHunter firmware replies to a STATUS command with a plain "STATUS:"
+	// frame rather than a STATUS_ACK, so without a synthetic ACK a pending
+	// STATUS row in DigiNode CC would stay SENT forever. Emit a companion
+	// command-ack event with ackType=STATUS_ACK so the matcher in the commands
+	// service can close out the lifecycle. This is a small improvement over
+	// CC PRO, which leaves plain STATUS queries permanently in SENT.
+	statusAck := &ParsedEvent{
+		Kind:   "command-ack",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"ackType":     "STATUS_ACK",
+			"status":      "OK",
+			"synthesized": true,
+		},
+		Raw: raw,
+	}
+
+	return []*ParsedEvent{
+		{
+			Kind:     "alert",
+			Level:    "NOTICE",
+			Category: "status",
+			NodeID:   nodeID,
+			Data:     data,
+			Raw:      raw,
+		},
+		statusAck,
+	}
 }
 
 func (p *TextParser) handleDrone(match []string, names []string, raw string) []*ParsedEvent {
