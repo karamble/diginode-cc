@@ -22,43 +22,43 @@ const NodeOnlineTimeout = 16 * time.Minute
 type NodeType string
 
 const (
-	NodeTypeUnknown    NodeType = ""            // Not yet classified
-	NodeTypeGotailme   NodeType = "gotailme"    // C2 gateway (runs DigiNode CC / CC PRO)
-	NodeTypeAntihunter NodeType = "antihunter"  // AntiHunter detection sensor node
+	NodeTypeUnknown    NodeType = ""           // Not yet classified
+	NodeTypeGotailme   NodeType = "gotailme"   // C2 gateway (runs DigiNode CC / CC PRO)
+	NodeTypeAntihunter NodeType = "antihunter" // AntiHunter detection sensor node
 )
 
 // Node represents a tracked mesh node in memory.
 type Node struct {
-	ID                 string    `json:"id"`
-	NodeNum            uint32    `json:"nodeNum"`
-	NodeID             string    `json:"nodeId,omitempty"`
-	NodeType           NodeType  `json:"nodeType,omitempty"`
-	LongName           string    `json:"longName,omitempty"`
-	ShortName          string    `json:"shortName,omitempty"`
-	HWModel            string    `json:"hwModel,omitempty"`
-	MacAddr            string    `json:"macAddr,omitempty"`
-	Role               string    `json:"role,omitempty"`
-	FirmwareVersion    string    `json:"firmwareVersion,omitempty"`
-	Latitude           float64   `json:"latitude,omitempty"`
-	Longitude          float64   `json:"longitude,omitempty"`
-	Altitude           float64   `json:"altitude,omitempty"`
-	BatteryLevel       uint32    `json:"batteryLevel,omitempty"`
-	Voltage            float32   `json:"voltage,omitempty"`
-	ChannelUtilization float32   `json:"channelUtilization,omitempty"`
-	AirUtilTx          float32   `json:"airUtilTx,omitempty"`
-	Temperature        float64   `json:"temperature,omitempty"`
-	SNR                float32   `json:"snr,omitempty"`
-	RSSI               int32     `json:"rssi"`
-	LastHeard          time.Time `json:"lastHeard"`
-	IsOnline           bool      `json:"isOnline"`
-	IsLocal            bool      `json:"isLocal,omitempty"`
-	SiteID             string    `json:"siteId,omitempty"`
-	OriginSiteID       string    `json:"originSiteId,omitempty"`
-	LastMessage        string    `json:"lastMessage,omitempty"`
-	TemperatureC          float64    `json:"temperatureC,omitempty"`
-	TemperatureF          float64    `json:"temperatureF,omitempty"`
-	TemperatureUpdatedAt  *time.Time `json:"temperatureUpdatedAt,omitempty"`
-	TelemetryUpdatedAt    *time.Time `json:"telemetryUpdatedAt,omitempty"`
+	ID                   string     `json:"id"`
+	NodeNum              uint32     `json:"nodeNum"`
+	NodeID               string     `json:"nodeId,omitempty"`
+	NodeType             NodeType   `json:"nodeType,omitempty"`
+	LongName             string     `json:"longName,omitempty"`
+	ShortName            string     `json:"shortName,omitempty"`
+	HWModel              string     `json:"hwModel,omitempty"`
+	MacAddr              string     `json:"macAddr,omitempty"`
+	Role                 string     `json:"role,omitempty"`
+	FirmwareVersion      string     `json:"firmwareVersion,omitempty"`
+	Latitude             float64    `json:"latitude,omitempty"`
+	Longitude            float64    `json:"longitude,omitempty"`
+	Altitude             float64    `json:"altitude,omitempty"`
+	BatteryLevel         uint32     `json:"batteryLevel,omitempty"`
+	Voltage              float32    `json:"voltage,omitempty"`
+	ChannelUtilization   float32    `json:"channelUtilization,omitempty"`
+	AirUtilTx            float32    `json:"airUtilTx,omitempty"`
+	Temperature          float64    `json:"temperature,omitempty"`
+	SNR                  float32    `json:"snr,omitempty"`
+	RSSI                 int32      `json:"rssi"`
+	LastHeard            time.Time  `json:"lastHeard"`
+	IsOnline             bool       `json:"isOnline"`
+	IsLocal              bool       `json:"isLocal,omitempty"`
+	SiteID               string     `json:"siteId,omitempty"`
+	OriginSiteID         string     `json:"originSiteId,omitempty"`
+	LastMessage          string     `json:"lastMessage,omitempty"`
+	TemperatureC         float64    `json:"temperatureC,omitempty"`
+	TemperatureF         float64    `json:"temperatureF,omitempty"`
+	TemperatureUpdatedAt *time.Time `json:"temperatureUpdatedAt,omitempty"`
+	TelemetryUpdatedAt   *time.Time `json:"telemetryUpdatedAt,omitempty"`
 }
 
 // Service manages mesh node state.
@@ -132,8 +132,8 @@ func (s *Service) TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32) {
 	node, exists := s.nodes[nodeNum]
 	if !exists {
 		node = &Node{
-			NodeNum: nodeNum,
-			NodeID:  fmt.Sprintf("!%08x", nodeNum),
+			NodeNum:  nodeNum,
+			NodeID:   fmt.Sprintf("!%08x", nodeNum),
 			IsOnline: true,
 		}
 		s.nodes[nodeNum] = node
@@ -335,6 +335,82 @@ func (s *Service) HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
 	go s.persistNode(node)
 }
 
+// HandleAntihunterHeartbeat applies position + temperature extracted from an
+// AntiHunter TEXTMSG heartbeat. AntiHunter never emits a protobuf Position or
+// Telemetry packet — everything rides inside the text body — so this is the
+// only path that refreshes a remote sensor's map coordinates and OLED temp
+// reading. The data map may carry `lat`, `lon`, `temperatureC`, `temperatureF`.
+func (s *Service) HandleAntihunterHeartbeat(from uint32, lat, lon float64, data map[string]interface{}) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[from]
+	if !exists {
+		node = &Node{NodeNum: from}
+		s.nodes[from] = node
+	}
+
+	now := time.Now()
+	changed := false
+
+	if lat != 0 || lon != 0 {
+		node.Latitude = lat
+		node.Longitude = lon
+		changed = true
+	}
+	if v, ok := data["temperatureC"].(float64); ok && v != 0 {
+		node.Temperature = v
+		node.TemperatureC = v
+		if tf, ok := data["temperatureF"].(float64); ok && tf != 0 {
+			node.TemperatureF = tf
+		} else {
+			node.TemperatureF = v*9.0/5.0 + 32.0
+		}
+		node.TemperatureUpdatedAt = &now
+		changed = true
+	}
+
+	node.LastHeard = now
+	node.IsOnline = true
+
+	if !changed {
+		// Nothing extracted — don't spam WS updates.
+		return
+	}
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+	go s.persistNode(node)
+}
+
+// SetLastMessage stores the most recent sensor line from a node and broadcasts
+// a node update. Only called for recognizable AntiHunter TEXTMSG payloads so the
+// expanded node detail in the UI shows what that sensor last reported.
+func (s *Service) SetLastMessage(from uint32, msg string) {
+	if msg == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[from]
+	if !exists {
+		node = &Node{NodeNum: from}
+		s.nodes[from] = node
+	}
+	node.LastMessage = msg
+	node.LastHeard = time.Now()
+	node.IsOnline = true
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+	go s.persistNode(node)
+}
+
 // HandlePosition processes a position update from a mesh packet.
 func (s *Service) HandlePosition(from uint32, pos *serial.PositionData) {
 	s.mu.Lock()
@@ -353,7 +429,7 @@ func (s *Service) HandlePosition(from uint32, pos *serial.PositionData) {
 	node.IsOnline = true
 
 	s.hub.Broadcast(ws.Event{
-		Type:    ws.EventNodePosition,
+		Type: ws.EventNodePosition,
 		Payload: map[string]interface{}{
 			"nodeNum":   from,
 			"latitude":  node.Latitude,

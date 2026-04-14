@@ -239,6 +239,134 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*TAMPER_(?P<tamperKind>DETECTED|CANCELLED):?(?:\s*(?P<msg>.+))?`),
 			handler: p.handleTamper,
 		},
+		// SCAN_DONE: "nodeId: SCAN_DONE: W=42 B=15 U=30 Targets=5 Remaining=2"
+		{
+			name: "scan-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*SCAN_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("scan"),
+		},
+		// DEAUTH_DONE: "nodeId: DEAUTH_DONE: Total=8 Deauth=5 Disassoc=3 TX=7 Remaining=1"
+		{
+			name: "deauth-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DEAUTH_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("deauth"),
+		},
+		// LIST_SCAN_DONE: "nodeId: LIST_SCAN_DONE: Hits=15 Unique=10 Targets=8 TX=8 Remaining=0"
+		{
+			name: "list-scan-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*LIST_SCAN_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("list-scan"),
+		},
+		// DRONE_DONE: "nodeId: DRONE_DONE: Detected=3 Unique=3 TX=3 Remaining=0"
+		{
+			name: "drone-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DRONE_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("drone"),
+		},
+		// RANDOMIZATION_DONE: "nodeId: RANDOMIZATION_DONE: Identities=5 Sessions=2 TX=5 Remaining=0"
+		{
+			name: "randomization-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*RANDOMIZATION_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("randomization"),
+		},
+		// BASELINE_STATUS: "nodeId: BASELINE_STATUS: Scanning:YES Established:NO Devices:42 Anomalies:2 Phase1:PENDING"
+		{
+			name: "baseline-status",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BASELINE_STATUS:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("baseline-status"),
+		},
+		// IDENTITY: "nodeId: IDENTITY:ID123 W -68 Hits:4 MACs:3"
+		{
+			name: "identity",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*IDENTITY:(?P<identityId>\S+)\s+(?P<band>[A-Za-z])\s+(?P<rssi>-?\d+)(?:\s+Hits:(?P<hits>\d+))?(?:\s+MACs:(?P<macs>\d+))?`),
+			handler: p.handleIdentity,
+		},
+		// SETUP_MODE: "nodeId: SETUP_MODE: Auto-erase activates in 30s"
+		{
+			name: "setup-mode",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*SETUP_MODE:\s*(?P<msg>.+)$`),
+			handler: p.handleSetupMode,
+		},
+		// BATTERY_SAVER: "nodeId: BATTERY_SAVER: ENABLED Interval:5min" / "DISABLED"
+		{
+			name: "battery-saver-state",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BATTERY_SAVER:\s*(?P<state>ENABLED|DISABLED)(?:\s+Interval:(?P<interval>\S+))?`),
+			handler: p.handleBatterySaverState,
+		},
+		// BATTERY_SAVER_STATUS: "nodeId: BATTERY_SAVER_STATUS: Enabled Interval:5min"
+		{
+			name: "battery-saver-status",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BATTERY_SAVER_STATUS:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummary("battery-saver-status"),
+		},
+		// ERASE_EXECUTING: "nodeId: ERASE_EXECUTING: reason GPS:12.34,56.78"
+		{
+			name: "erase-executing",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*ERASE_EXECUTING:\s*(?P<msg>.+?)(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?$`),
+			handler: p.handleEraseEvent("executing", "CRITICAL"),
+		},
+		// ERASE_COMPLETE: "nodeId: ERASE_COMPLETE"
+		{
+			name: "erase-complete",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*ERASE_COMPLETE\b\s*(?P<msg>.*)$`),
+			handler: p.handleEraseEvent("complete", "CRITICAL"),
+		},
+		// ERASE_TOKEN: "nodeId: ERASE_TOKEN:ABC123DEF456 Expires:300s"
+		{
+			name: "erase-token",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*ERASE_TOKEN:(?P<token>\S+)(?:\s+Expires:(?P<expires>\d+)s?)?`),
+			handler: p.handleEraseToken,
+		},
+		// RTC_SYNC: "nodeId: RTC_SYNC: GPS"
+		{
+			name: "rtc-sync",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*RTC_SYNC:\s*(?P<source>\S+)`),
+			handler: p.handleRTCSync,
+		},
+		// @ALL broadcast commands — these are commands relayed through the mesh,
+		// no node-id prefix. Useful for classification + audit, low-value for state.
+		// "@ALL TRIANGULATE_START:AA:BB:CC:DD:EE:FF:60:NODE1"
+		{
+			name: "bcast-triangulate-start",
+			regex: regexp.MustCompile(
+				`(?i)^@ALL\s+TRIANGULATE_START:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}):(?P<duration>\d+):(?P<initiator>\S+)`),
+			handler: p.handleBroadcastCommand("triangulate-start"),
+		},
+		// "@ALL TRI_CYCLE_START:5000:NODE1,NODE2,NODE3"
+		{
+			name: "bcast-tri-cycle-start",
+			regex: regexp.MustCompile(
+				`(?i)^@ALL\s+TRI_CYCLE_START:(?P<intervalMs>\d+):(?P<nodes>.+)$`),
+			handler: p.handleBroadcastCommand("tri-cycle-start"),
+		},
+		// "@ALL TRIANGULATE_STOP"
+		{
+			name: "bcast-triangulate-stop",
+			regex: regexp.MustCompile(
+				`(?i)^@ALL\s+TRIANGULATE_STOP\b`),
+			handler: p.handleBroadcastCommand("triangulate-stop"),
+		},
+		// "@ALL SYNC:1740512445.320 (drift-corrected)"
+		{
+			name: "bcast-sync",
+			regex: regexp.MustCompile(
+				`(?i)^@ALL\s+SYNC:(?P<timestamp>\d+(?:\.\d+)?)(?:\s+\((?P<note>[^)]+)\))?`),
+			handler: p.handleBroadcastCommand("sync"),
+		},
 	}
 }
 
@@ -1032,4 +1160,187 @@ func ParseNodeNum(nodeID string) uint32 {
 // nodeIDHex formats a uint32 node number as a "!XXXXXXXX" hex string.
 func nodeIDHex(num uint32) string {
 	return fmt.Sprintf("!%08x", num)
+}
+
+// kvBodyRe parses "Key=Value" and "Key:Value" pairs out of a done-summary or
+// status body. Values stop at whitespace; keys are alphanumeric + underscore.
+var kvBodyRe = regexp.MustCompile(`([A-Za-z][A-Za-z0-9_]*)\s*[=:]\s*([^\s]+)`)
+
+// parseKVBody extracts all Key=Value / Key:Value pairs from `body` into a map,
+// converting numeric-looking values to int or float when possible. Used for
+// SCAN_DONE, DEAUTH_DONE, BASELINE_STATUS, etc. which all follow the same shape.
+func parseKVBody(body string) map[string]interface{} {
+	out := map[string]interface{}{}
+	for _, m := range kvBodyRe.FindAllStringSubmatch(body, -1) {
+		key := strings.ToLower(m[1])
+		val := m[2]
+		if i, err := strconv.ParseInt(val, 10, 64); err == nil {
+			out[key] = i
+			continue
+		}
+		if f, err := strconv.ParseFloat(val, 64); err == nil {
+			out[key] = f
+			continue
+		}
+		out[key] = val
+	}
+	return out
+}
+
+// handleDoneSummary builds a pattern handler that parses a trailing KV body
+// (e.g. "W=42 B=15 U=30 Targets=5") and emits a single alert event tagged with
+// the given category. Used for every *_DONE / *_STATUS line AntiHunter emits.
+func (p *TextParser) handleDoneSummary(category string) func([]string, []string, string) []*ParsedEvent {
+	return func(match []string, names []string, raw string) []*ParsedEvent {
+		g := extractGroups(match, names)
+		data := parseKVBody(g["body"])
+		return []*ParsedEvent{{
+			Kind:     "alert",
+			Level:    "INFO",
+			Category: category,
+			NodeID:   g["id"],
+			Data:     data,
+			Raw:      raw,
+		}}
+	}
+}
+
+func (p *TextParser) handleIdentity(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"identityId": g["identityId"],
+		"band":       g["band"],
+		"rssi":       parseOptInt(g["rssi"]),
+	}
+	if v := g["hits"]; v != "" {
+		data["hits"] = parseOptInt(v)
+	}
+	if v := g["macs"]; v != "" {
+		data["macs"] = parseOptInt(v)
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "NOTICE",
+		Category: "identity",
+		NodeID:   g["id"],
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleSetupMode(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "NOTICE",
+		Category: "setup-mode",
+		NodeID:   g["id"],
+		Data:     map[string]interface{}{"message": g["msg"]},
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleBatterySaverState(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"state": strings.ToUpper(g["state"]),
+	}
+	if v := g["interval"]; v != "" {
+		data["interval"] = v
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "INFO",
+		Category: "battery-saver",
+		NodeID:   g["id"],
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+// handleEraseEvent returns a handler that emits a tamper-category alert at the
+// given level. Used for ERASE_EXECUTING and ERASE_COMPLETE, both of which signal
+// secure-erase state transitions that operators must see immediately.
+func (p *TextParser) handleEraseEvent(kind, level string) func([]string, []string, string) []*ParsedEvent {
+	return func(match []string, names []string, raw string) []*ParsedEvent {
+		g := extractGroups(match, names)
+		data := map[string]interface{}{"kind": kind}
+		if v := g["msg"]; v != "" {
+			data["message"] = v
+		}
+		if v := g["lat"]; v != "" {
+			data["lat"] = parseOptFloat(v)
+		}
+		if v := g["lon"]; v != "" {
+			data["lon"] = parseOptFloat(v)
+		}
+		return []*ParsedEvent{{
+			Kind:     "alert",
+			Level:    level,
+			Category: "erase",
+			NodeID:   g["id"],
+			Data:     data,
+			Raw:      raw,
+		}}
+	}
+}
+
+func (p *TextParser) handleEraseToken(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{"token": g["token"]}
+	if v := g["expires"]; v != "" {
+		data["expiresSeconds"] = parseOptInt(v)
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "CRITICAL",
+		Category: "erase-token",
+		NodeID:   g["id"],
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleRTCSync(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "INFO",
+		Category: "rtc-sync",
+		NodeID:   g["id"],
+		Data:     map[string]interface{}{"source": g["source"]},
+		Raw:      raw,
+	}}
+}
+
+// handleBroadcastCommand returns a handler that captures @ALL mesh commands
+// (TRIANGULATE_START, TRI_CYCLE_START, TRIANGULATE_STOP, SYNC). There's no
+// node-id prefix — these are relayed commands — so the event has an empty
+// NodeID and all matched groups go straight into Data.
+func (p *TextParser) handleBroadcastCommand(category string) func([]string, []string, string) []*ParsedEvent {
+	return func(match []string, names []string, raw string) []*ParsedEvent {
+		g := extractGroups(match, names)
+		data := map[string]interface{}{}
+		for k, v := range g {
+			if v == "" {
+				continue
+			}
+			if i, err := strconv.ParseInt(v, 10, 64); err == nil {
+				data[k] = i
+				continue
+			}
+			if f, err := strconv.ParseFloat(v, 64); err == nil {
+				data[k] = f
+				continue
+			}
+			data[k] = v
+		}
+		return []*ParsedEvent{{
+			Kind:     "alert",
+			Level:    "INFO",
+			Category: "mesh-command:" + category,
+			Data:     data,
+			Raw:      raw,
+		}}
+	}
 }

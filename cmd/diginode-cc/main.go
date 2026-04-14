@@ -240,18 +240,11 @@ func main() {
 	dispatcher.SetSerialManager(serialMgr)
 	serialMgr.RegisterHandler(dispatcher.HandlePacket)
 
-	// AntiHunter heartbeats arrive as text over the mesh (no Position protobuf).
-	// Promote the embedded GPS fix into a node position update so remote sensor
-	// nodes show up on the map and their lastHeard/position refreshes without a
-	// separate Meshtastic Position packet.
-	serialMgr.SetMeshTelemetryCallback(func(from uint32, lat, lon float64, _ map[string]interface{}) {
-		pos := &serial.PositionData{
-			LatitudeI:  int32(lat * 1e7),
-			LongitudeI: int32(lon * 1e7),
-			Time:       uint32(time.Now().Unix()),
-		}
-		nodesSvc.HandlePosition(from, pos)
-	})
+	// AntiHunter heartbeats arrive as text over the mesh (no Position or
+	// Telemetry protobuf). Promote the embedded GPS fix and temperature reading
+	// into a node update so remote sensor nodes show up on the map and the
+	// expanded node-list row shows temp + last line without polling alerts.
+	serialMgr.SetMeshTelemetryCallback(nodesSvc.HandleAntihunterHeartbeat)
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
 	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {

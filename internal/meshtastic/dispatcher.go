@@ -45,6 +45,13 @@ func isSensorData(text string) bool {
 		strings.Contains(upper, "T_D:") ||
 		strings.Contains(upper, "T_F:") ||
 		strings.Contains(upper, "T_C:") ||
+		strings.Contains(upper, "_DONE:") ||
+		strings.Contains(upper, "ERASE_") ||
+		strings.Contains(upper, "IDENTITY:") ||
+		strings.Contains(upper, "SETUP_MODE:") ||
+		strings.Contains(upper, "BATTERY_SAVER") ||
+		strings.Contains(upper, "RTC_SYNC:") ||
+		strings.HasPrefix(upper, "@ALL ") ||
 		// Normal heartbeat: "nodeId: Time:X Temp:Y GPS:lat,lon" — no single unique
 		// keyword, but the Temp+GPS combo only appears on AntiHunter frames.
 		(strings.Contains(upper, "TEMP:") && strings.Contains(upper, "GPS:"))
@@ -80,6 +87,9 @@ type NodeHandler interface {
 	ClassifyNode(nodeNum uint32, nodeType string)
 	// MarkLocal flags a node as the local C2 gateway.
 	MarkLocal(nodeNum uint32)
+	// SetLastMessage stores the most recent sensor TEXTMSG body so the UI can
+	// show what that node last reported without polling alerts separately.
+	SetLastMessage(nodeNum uint32, msg string)
 }
 
 // DroneHandler processes drone detection events.
@@ -267,7 +277,15 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		// fixes, target hits, drone telemetry, and triangulation frames reach the
 		// same pipeline as locally-parsed console output.
 		if d.serialMgr != nil && len(mp.Payload) > 0 {
-			d.serialMgr.ProcessMeshText(mp.From, mp.To, mp.Channel, string(mp.Payload))
+			payload := string(mp.Payload)
+			d.serialMgr.ProcessMeshText(mp.From, mp.To, mp.Channel, payload)
+			// Stash the last sensor line on the node so the expanded UI row shows
+			// what the node is currently doing. Only do this for recognizably
+			// AntiHunter output to avoid overwriting a node's row with arbitrary
+			// user chat.
+			if d.nodeHandler != nil && isSensorData(payload) {
+				d.nodeHandler.SetLastMessage(mp.From, payload)
+			}
 		}
 
 	case PortNumPosition:
