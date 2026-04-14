@@ -16,6 +16,11 @@ import (
 )
 
 // isSensorData returns true if the text looks like AntiHunter DigiNode sensor output.
+// The keyword set mirrors every message shape the AntiHunter firmware can emit over
+// TEXTMSG — detections, heartbeats (normal + battery-saver), ACKs, triangulation,
+// startup, tamper, anomaly, camera events, and the boot self-test ping. Without
+// this breadth, a sensor that only emitted a heartbeat would get classified as a
+// generic gotailme node until it happened to fire a detection.
 func isSensorData(text string) bool {
 	upper := strings.ToUpper(text)
 	return strings.Contains(upper, "STATUS:") ||
@@ -29,7 +34,20 @@ func isSensorData(text string) bool {
 		strings.Contains(upper, "TRIANGULATE_") ||
 		strings.Contains(upper, "CAM:") ||
 		strings.Contains(upper, "CAM_FACE:") ||
-		strings.Contains(upper, "CAM_PLATE:")
+		strings.Contains(upper, "CAM_PLATE:") ||
+		strings.Contains(upper, "HEARTBEAT:") ||
+		strings.Contains(upper, "NODE_HB") ||
+		strings.Contains(upper, "STARTUP:") ||
+		strings.Contains(upper, "TAMPER_") ||
+		strings.Contains(upper, "_ACK:") ||
+		strings.Contains(upper, "_ACK ") ||
+		strings.Contains(upper, "ANTIHUNTER") ||
+		strings.Contains(upper, "T_D:") ||
+		strings.Contains(upper, "T_F:") ||
+		strings.Contains(upper, "T_C:") ||
+		// Normal heartbeat: "nodeId: Time:X Temp:Y GPS:lat,lon" — no single unique
+		// keyword, but the Temp+GPS combo only appears on AntiHunter frames.
+		(strings.Contains(upper, "TEMP:") && strings.Contains(upper, "GPS:"))
 }
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
