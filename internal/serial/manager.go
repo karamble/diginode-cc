@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -27,25 +28,26 @@ type TextMessage struct {
 
 // Manager handles Meshtastic serial port communication.
 type Manager struct {
-	cfg          *config.Config
-	hub          *ws.Hub
-	port         serial.Port
-	mu           sync.Mutex
-	connected    bool
-	stopCh       chan struct{}
-	handlers     []PacketHandler
-	textMessages []TextMessage
-	textSeq      int64
-	textMu       sync.RWMutex
-	deviceTime   time.Time
-	deviceTimeMu sync.RWMutex
-	protocol          string      // "binary" or "text" (default "text")
-	textParser        *TextParser // text-mode line parser
-	syntheticID       atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
-	onTargetDetected  func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)
-	onTriData         func(mac, nodeID string, rssi int, lat, lon float64)
-	onTriFinal        func(mac string, lat, lon, confidence, uncertainty float64)
-	onTriComplete     func(mac string, nodes int)
+	cfg              *config.Config
+	hub              *ws.Hub
+	port             serial.Port
+	mu               sync.Mutex
+	connected        bool
+	stopCh           chan struct{}
+	handlers         []PacketHandler
+	textMessages     []TextMessage
+	textSeq          int64
+	textMu           sync.RWMutex
+	deviceTime       time.Time
+	deviceTimeMu     sync.RWMutex
+	protocol         string        // "binary" or "text" (default "text")
+	textParser       *TextParser   // text-mode line parser
+	syntheticID      atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
+	onTargetDetected func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)
+	onTriData        func(mac, nodeID string, rssi int, lat, lon float64)
+	onTriFinal       func(mac string, lat, lon, confidence, uncertainty float64)
+	onTriComplete    func(mac string, nodes int)
+	onMeshTelemetry  func(from uint32, lat, lon float64, data map[string]interface{})
 	// Stored radio config sections (populated during wantConfig dump)
 	radioConfig   map[string]*ConfigPayload
 	radioConfigMu sync.RWMutex
@@ -68,6 +70,13 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 // SetTargetDetectedCallback sets the handler for target/device detection events from mesh sensors.
 func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)) {
 	m.onTargetDetected = fn
+}
+
+// SetMeshTelemetryCallback sets the handler for node-telemetry events extracted from
+// remote AntiHunter TEXTMSG payloads (heartbeats, STATUS lines with embedded GPS).
+// The "from" argument is the authoritative Meshtastic node number of the sender.
+func (m *Manager) SetMeshTelemetryCallback(fn func(from uint32, lat, lon float64, data map[string]interface{})) {
+	m.onMeshTelemetry = fn
 }
 
 // SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
@@ -521,12 +530,54 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 			m.onTriComplete(mac, nodes)
 		}
 
+	case "node-telemetry":
+		// Emitted by AntiHunter NODE_HB lines (normal + battery-saver variants) and
+		// STATUS frames that carry an embedded GPS fix. Forward lat/lon to the node
+		// handler so the sender's position is refreshed even though the AntiHunter
+		// firmware never emits a protobuf Position packet.
+		lat, _ := evt.Data["lat"].(float64)
+		lon, _ := evt.Data["lon"].(float64)
+		from := parseNodeNum(evt.NodeID)
+		if m.onMeshTelemetry != nil && from != 0 && (lat != 0 || lon != 0) {
+			m.onMeshTelemetry(from, lat, lon, evt.Data)
+		}
+
 	default:
-		// Other event types (alert, node-telemetry, command-ack, raw)
-		// are logged for debug; downstream consumers can be added later.
+		// Other event types (alert, command-ack, raw) are logged for debug;
+		// downstream consumers can be added later.
 		if evt.Kind != "raw" {
 			slog.Debug("text event", "kind", evt.Kind, "nodeId", evt.NodeID,
 				"category", evt.Category, "level", evt.Level)
+		}
+	}
+}
+
+// ProcessMeshText feeds a Meshtastic TEXTMSG payload received from a remote node
+// through the AntiHunter text parser. Any structured events embedded in the text
+// (heartbeats with GPS, target detections, drone telemetry, triangulation frames)
+// are routed into the same dispatch pipeline as locally-parsed console lines. The
+// Meshtastic source node number overrides whatever NodeID prefix the sensor used,
+// since the mesh identity is authoritative.
+func (m *Manager) ProcessMeshText(from, to, channel uint32, text string) {
+	if m.textParser == nil || text == "" {
+		return
+	}
+	meshNodeID := fmt.Sprintf("!%08x", from)
+	for _, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		events := m.textParser.ParseLine(line)
+		for _, evt := range events {
+			if evt.Kind == "raw" || evt.Kind == "text-message" {
+				continue
+			}
+			evt.NodeID = meshNodeID
+			if evt.ToNode == 0 {
+				evt.ToNode = to
+			}
+			m.dispatchTextEvent(evt)
 		}
 	}
 }
