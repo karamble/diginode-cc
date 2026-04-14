@@ -9,12 +9,12 @@ import (
 
 // CommandDef defines a command type with its validation rules.
 type CommandDef struct {
-	Name        string
-	Group       string
-	Description string
-	Params      []ParamDef
-	AllowForever bool   // supports FOREVER token as last param
-	SingleNode   bool   // cannot target @ALL
+	Name         string
+	Group        string
+	Description  string
+	Params       []ParamDef
+	AllowForever bool // supports FOREVER token as last param
+	SingleNode   bool // cannot target @ALL
 }
 
 // ParamDef defines a single parameter for a command.
@@ -53,7 +53,7 @@ var Registry = map[string]*CommandDef{
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
 		{Key: "channels", Label: "Channels", Type: "channels", Placeholder: "1,6,11 or 1..14"},
 	}},
-	"SCAN_STOP":        {Name: "SCAN_STOP", Group: "Scanning", Description: "Stop scanning"},
+	"SCAN_STOP": {Name: "SCAN_STOP", Group: "Scanning", Description: "Stop scanning"},
 	"DEVICE_SCAN_START": {Name: "DEVICE_SCAN_START", Group: "Scanning", Description: "Start device scan", AllowForever: true, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
@@ -65,7 +65,7 @@ var Registry = map[string]*CommandDef{
 	"DRONE_START": {Name: "DRONE_START", Group: "Detection", Description: "Start drone detection", AllowForever: true, Params: []ParamDef{
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
 	}},
-	"DRONE_STOP":  {Name: "DRONE_STOP", Group: "Detection", Description: "Stop drone detection"},
+	"DRONE_STOP": {Name: "DRONE_STOP", Group: "Detection", Description: "Stop drone detection"},
 	"DEAUTH_START": {Name: "DEAUTH_START", Group: "Detection", Description: "Start deauth detection", AllowForever: true, Params: []ParamDef{
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
 	}},
@@ -106,11 +106,11 @@ var Registry = map[string]*CommandDef{
 	}},
 
 	// Security / Erase
-	"ERASE_REQUEST":    {Name: "ERASE_REQUEST", Group: "Security", Description: "Request erase token from node"},
-	"ERASE_FORCE":      {Name: "ERASE_FORCE", Group: "Security", Description: "Force erase with token", Params: []ParamDef{
+	"ERASE_REQUEST": {Name: "ERASE_REQUEST", Group: "Security", Description: "Request erase token from node"},
+	"ERASE_FORCE": {Name: "ERASE_FORCE", Group: "Security", Description: "Force erase with token", Params: []ParamDef{
 		{Key: "token", Label: "Erase Token", Type: "text", Required: true, Placeholder: "AH_XXXXXXXX_XXXXXXXX_XXXXXXXX"},
 	}},
-	"ERASE_CANCEL":     {Name: "ERASE_CANCEL", Group: "Security", Description: "Cancel pending erase"},
+	"ERASE_CANCEL": {Name: "ERASE_CANCEL", Group: "Security", Description: "Cancel pending erase"},
 	"AUTOERASE_ENABLE": {Name: "AUTOERASE_ENABLE", Group: "Security", Description: "Enable auto-erase on tamper", Params: []ParamDef{
 		{Key: "setupDelay", Label: "Setup Delay (sec)", Type: "number", Min: 30, Max: 600},
 		{Key: "eraseDelay", Label: "Erase Delay (sec)", Type: "number", Min: 10, Max: 300},
@@ -130,23 +130,44 @@ var Registry = map[string]*CommandDef{
 
 	// System
 	"REBOOT": {Name: "REBOOT", Group: "System", Description: "Reboot node"},
+
+	// Heartbeat control (mesh-level STATUS heartbeats)
+	"HB_ON":  {Name: "HB_ON", Group: "Status", Description: "Enable periodic status heartbeats"},
+	"HB_OFF": {Name: "HB_OFF", Group: "Status", Description: "Disable periodic status heartbeats"},
+	"HB_INTERVAL": {Name: "HB_INTERVAL", Group: "Status", Description: "Set heartbeat interval", Params: []ParamDef{
+		{Key: "minutes", Label: "Interval (min)", Type: "number", Required: true, Min: 1, Max: 60},
+	}},
+
+	// Triangulation coordinator-only sync pulse (issued by initiator to participants)
+	"TRI_CYCLE_START": {Name: "TRI_CYCLE_START", Group: "Triangulation", Description: "Sync participant scan cycle (coordinator only)", Params: []ParamDef{
+		{Key: "intervalMs", Label: "Interval (ms)", Type: "number", Required: true, Min: 1000, Max: 60000},
+		{Key: "nodes", Label: "Node list", Type: "text", Placeholder: "NODE1,NODE2,NODE3"},
+	}},
 }
 
-// ACK-to-command mapping for matching incoming ACKs to pending commands.
+// ACKMap maps an AntiHunter ACK frame name to the command it acknowledges.
+// The firmware emits exactly these ACK types — see the ack pattern in
+// internal/serial/textparser.go:188. CONFIG commands all ack as CONFIG_ACK
+// (with the kind embedded in the status field), so they collapse to a single
+// map entry and the matcher picks the most recent pending CONFIG_* row.
 var ACKMap = map[string]string{
-	"SCAN_ACK":            "SCAN_START",
-	"DEVICE_SCAN_ACK":     "DEVICE_SCAN_START",
-	"DRONE_ACK":           "DRONE_START",
-	"DEAUTH_ACK":          "DEAUTH_START",
-	"RANDOMIZATION_ACK":   "RANDOMIZATION_START",
-	"BASELINE_ACK":        "BASELINE_START",
-	"TRIANGULATE_ACK":     "TRIANGULATE_START",
-	"TRIANGULATE_STOP_ACK":"TRIANGULATE_STOP",
-	"ERASE_ACK":           "ERASE_FORCE",
-	"CHANNELS_ACK":        "CONFIG_CHANNELS",
-	"TARGETS_ACK":         "CONFIG_TARGETS",
-	"AUTOERASE_ACK":       "AUTOERASE_ENABLE",
-	"AUTOERASE_STATUS_ACK":"AUTOERASE_STATUS",
+	"SCAN_ACK":             "SCAN_START",
+	"DEVICE_SCAN_ACK":      "DEVICE_SCAN_START",
+	"DRONE_ACK":            "DRONE_START",
+	"DEAUTH_ACK":           "DEAUTH_START",
+	"RANDOMIZATION_ACK":    "RANDOMIZATION_START",
+	"BASELINE_ACK":         "BASELINE_START",
+	"TRI_START_ACK":        "TRIANGULATE_START",
+	"TRIANGULATE_ACK":      "TRIANGULATE_START", // back-compat alias
+	"TRIANGULATE_STOP_ACK": "TRIANGULATE_STOP",
+	"ERASE_ACK":            "ERASE_FORCE",
+	"CONFIG_ACK":           "CONFIG_CHANNELS", // latest CONFIG_* pending wins
+	"AUTOERASE_ACK":        "AUTOERASE_ENABLE",
+	"AUTOERASE_STATUS_ACK": "AUTOERASE_STATUS",
+	"BATTERY_SAVER_ACK":    "BATTERY_SAVER_START",
+	"HB_ACK":               "HB_ON",
+	"STOP_ACK":             "STOP",
+	"REBOOT_ACK":           "REBOOT",
 }
 
 // Build validates inputs and produces a formatted mesh text line.

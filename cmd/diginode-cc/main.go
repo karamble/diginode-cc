@@ -128,6 +128,16 @@ func main() {
 	chatSvc := chat.NewService(db, hub)
 	chatSvc.SetBufferCallback(serialMgr.AddTextMessage)
 	commandsSvc := commands.NewService(db, hub)
+	// Every AntiHunter command rides a Meshtastic TEXTMSG whose body is the
+	// on-wire line built by commands.Build (e.g. "@ALL SCAN_START:2:60:1,6,11").
+	// The AntiHunter dispatcher inside each remote Heltec parses the @TARGET
+	// prefix itself, so we always broadcast at the mesh layer and let the
+	// firmware filter by node-id — no per-target Meshtastic routing needed.
+	commandsSvc.SetSendFunc(func(_ uint32, _ string, payload []byte) error {
+		return serialMgr.SendToRadio(
+			serial.BuildTextMessage(serial.BroadcastAddr, string(payload)),
+		)
+	})
 	alertsSvc := alerts.NewService(db, hub)
 	webhooksSvc := webhooks.NewService(db)
 	geofencesSvc := geofences.NewService(db, hub)
@@ -245,6 +255,12 @@ func main() {
 	// into a node update so remote sensor nodes show up on the map and the
 	// expanded node-list row shows temp + last line without polling alerts.
 	serialMgr.SetMeshTelemetryCallback(nodesSvc.HandleAntihunterHeartbeat)
+
+	// AntiHunter reply frames (*_ACK lines) close out pending command rows.
+	// The serial manager parses them into command-ack events and hands them
+	// to the commands service, which matches by ACK type and flips the
+	// lifecycle to OK / ERROR.
+	serialMgr.SetCommandAckCallback(commandsSvc.HandleStructuredACK)
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
 	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {

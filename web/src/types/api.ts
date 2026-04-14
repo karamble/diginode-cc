@@ -68,6 +68,8 @@ export interface MeshNode {
   siteCity?: string
   lastMessage?: string
   temperatureUpdatedAt?: string
+  ahShortId?: string
+  nodeType?: string
 }
 
 // Alert types

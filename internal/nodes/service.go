@@ -29,32 +29,38 @@ const (
 
 // Node represents a tracked mesh node in memory.
 type Node struct {
-	ID                   string     `json:"id"`
-	NodeNum              uint32     `json:"nodeNum"`
-	NodeID               string     `json:"nodeId,omitempty"`
-	NodeType             NodeType   `json:"nodeType,omitempty"`
-	LongName             string     `json:"longName,omitempty"`
-	ShortName            string     `json:"shortName,omitempty"`
-	HWModel              string     `json:"hwModel,omitempty"`
-	MacAddr              string     `json:"macAddr,omitempty"`
-	Role                 string     `json:"role,omitempty"`
-	FirmwareVersion      string     `json:"firmwareVersion,omitempty"`
-	Latitude             float64    `json:"latitude,omitempty"`
-	Longitude            float64    `json:"longitude,omitempty"`
-	Altitude             float64    `json:"altitude,omitempty"`
-	BatteryLevel         uint32     `json:"batteryLevel,omitempty"`
-	Voltage              float32    `json:"voltage,omitempty"`
-	ChannelUtilization   float32    `json:"channelUtilization,omitempty"`
-	AirUtilTx            float32    `json:"airUtilTx,omitempty"`
-	Temperature          float64    `json:"temperature,omitempty"`
-	SNR                  float32    `json:"snr,omitempty"`
-	RSSI                 int32      `json:"rssi"`
-	LastHeard            time.Time  `json:"lastHeard"`
-	IsOnline             bool       `json:"isOnline"`
-	IsLocal              bool       `json:"isLocal,omitempty"`
-	SiteID               string     `json:"siteId,omitempty"`
-	OriginSiteID         string     `json:"originSiteId,omitempty"`
-	LastMessage          string     `json:"lastMessage,omitempty"`
+	ID                 string    `json:"id"`
+	NodeNum            uint32    `json:"nodeNum"`
+	NodeID             string    `json:"nodeId,omitempty"`
+	NodeType           NodeType  `json:"nodeType,omitempty"`
+	LongName           string    `json:"longName,omitempty"`
+	ShortName          string    `json:"shortName,omitempty"`
+	HWModel            string    `json:"hwModel,omitempty"`
+	MacAddr            string    `json:"macAddr,omitempty"`
+	Role               string    `json:"role,omitempty"`
+	FirmwareVersion    string    `json:"firmwareVersion,omitempty"`
+	Latitude           float64   `json:"latitude,omitempty"`
+	Longitude          float64   `json:"longitude,omitempty"`
+	Altitude           float64   `json:"altitude,omitempty"`
+	BatteryLevel       uint32    `json:"batteryLevel,omitempty"`
+	Voltage            float32   `json:"voltage,omitempty"`
+	ChannelUtilization float32   `json:"channelUtilization,omitempty"`
+	AirUtilTx          float32   `json:"airUtilTx,omitempty"`
+	Temperature        float64   `json:"temperature,omitempty"`
+	SNR                float32   `json:"snr,omitempty"`
+	RSSI               int32     `json:"rssi"`
+	LastHeard          time.Time `json:"lastHeard"`
+	IsOnline           bool      `json:"isOnline"`
+	IsLocal            bool      `json:"isLocal,omitempty"`
+	SiteID             string    `json:"siteId,omitempty"`
+	OriginSiteID       string    `json:"originSiteId,omitempty"`
+	LastMessage        string    `json:"lastMessage,omitempty"`
+	// AHShortID is the 2–5 char string the AntiHunter firmware uses as its own
+	// address in TEXTMSG frames ("AH01" in "AH01: STATUS: ..."). It's set by
+	// the sensor's CONFIG_NODEID and is what the remote dispatcher matches
+	// against the @TARGET prefix — without this, @NODE_<meshShortName> routed
+	// commands are silently dropped.
+	AHShortID            string     `json:"ahShortId,omitempty"`
 	TemperatureC         float64    `json:"temperatureC,omitempty"`
 	TemperatureF         float64    `json:"temperatureF,omitempty"`
 	TemperatureUpdatedAt *time.Time `json:"temperatureUpdatedAt,omitempty"`
@@ -378,6 +384,32 @@ func (s *Service) HandleAntihunterHeartbeat(from uint32, lat, lon float64, data 
 		return
 	}
 
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+	go s.persistNode(node)
+}
+
+// SetAHShortID records the AntiHunter short id for a node (the 2–5 char
+// CONFIG_NODEID string, e.g. "AH01"). Only broadcasts on first discovery or
+// when the id changes, so repeated heartbeats don't spam the WS hub.
+func (s *Service) SetAHShortID(from uint32, shortID string) {
+	if shortID == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	node, exists := s.nodes[from]
+	if !exists {
+		node = &Node{NodeNum: from}
+		s.nodes[from] = node
+	}
+	if node.AHShortID == shortID {
+		return
+	}
+	node.AHShortID = shortID
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventNodeUpdate,
 		Payload: node,

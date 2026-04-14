@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -14,6 +15,56 @@ import (
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
+
+// ahShortIDRe pulls the 2–5 char AntiHunter CONFIG_NODEID prefix out of the
+// leading "AH01:" segment of a TEXTMSG body. The firmware emits this on every
+// frame it transmits (heartbeats, STATUS, detections, ACKs). Intentionally
+// strict: uppercase alphanumeric only, rejects names that collide with
+// AntiHunter reserved keywords (ALL, DRONE, SCAN, etc.) so a message like
+// "DRONE: ..." without a node-id prefix doesn't get misread as node "DRONE".
+var ahShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
+
+// ahShortIDReservedKeywords are AntiHunter message-type words that could
+// syntactically match the prefix regex but aren't node ids.
+var ahShortIDReservedKeywords = map[string]bool{
+	"ALL":     true,
+	"STATUS":  true,
+	"DRONE":   true,
+	"SCAN":    true,
+	"TARGET":  true,
+	"DEVICE":  true,
+	"ATTACK":  true,
+	"GPS":     true,
+	"CAM":     true,
+	"TAMPER":  true,
+	"SETUP":   true,
+	"ERASE":   true,
+	"RTC":     true,
+	"CONFIG":  true,
+	"STOP":    true,
+	"REBOOT":  true,
+	"HB":      true,
+	"BASE":    true,
+	"RANDOM":  true,
+	"DEAUTH":  true,
+	"TRI":     true,
+	"BATT":    true,
+	"VIBR":    true,
+	"ANOM":    true,
+	"STARTUP": true,
+	"NODE":    true,
+}
+
+func extractAHShortID(payload string) string {
+	m := ahShortIDRe.FindStringSubmatch(strings.TrimLeft(payload, " \t"))
+	if m == nil {
+		return ""
+	}
+	if ahShortIDReservedKeywords[m[1]] {
+		return ""
+	}
+	return m[1]
+}
 
 // isSensorData returns true if the text looks like AntiHunter DigiNode sensor output.
 // The keyword set mirrors every message shape the AntiHunter firmware can emit over
@@ -90,6 +141,11 @@ type NodeHandler interface {
 	// SetLastMessage stores the most recent sensor TEXTMSG body so the UI can
 	// show what that node last reported without polling alerts separately.
 	SetLastMessage(nodeNum uint32, msg string)
+	// SetAHShortID records the AntiHunter CONFIG_NODEID short id extracted
+	// from the leading "AH01:" prefix in sensor TEXTMSG frames. Commands must
+	// target this string (@AH01) — Meshtastic short-names are ignored by the
+	// sensor dispatcher.
+	SetAHShortID(nodeNum uint32, shortID string)
 }
 
 // DroneHandler processes drone detection events.
@@ -285,6 +341,13 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 			// user chat.
 			if d.nodeHandler != nil && isSensorData(payload) {
 				d.nodeHandler.SetLastMessage(mp.From, payload)
+				// Extract the AntiHunter CONFIG_NODEID prefix ("AH01:" in
+				// "AH01: STATUS: ..."). This is what the remote dispatcher
+				// matches against the @TARGET in outbound commands, so it
+				// must be surfaced on the node record for the UI to target.
+				if shortID := extractAHShortID(payload); shortID != "" {
+					d.nodeHandler.SetAHShortID(mp.From, shortID)
+				}
 			}
 		}
 

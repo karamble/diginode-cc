@@ -20,9 +20,9 @@ const (
 	StatusPending CommandStatus = "PENDING"
 	StatusSent    CommandStatus = "SENT"
 	StatusAcked   CommandStatus = "ACKED"
-	StatusOK      CommandStatus = "OK"      // CC PRO compat
+	StatusOK      CommandStatus = "OK" // CC PRO compat
 	StatusFailed  CommandStatus = "FAILED"
-	StatusError   CommandStatus = "ERROR"    // CC PRO compat
+	StatusError   CommandStatus = "ERROR" // CC PRO compat
 	StatusTimeout CommandStatus = "TIMEOUT"
 )
 
@@ -47,15 +47,15 @@ type Command struct {
 	CreatedAt   time.Time              `json:"createdAt"`
 
 	// Structured command fields (CC PRO parity)
-	Target  string   `json:"target,omitempty"`  // @ALL, @NODE_22, etc.
-	Name    string   `json:"name,omitempty"`    // STATUS, SCAN_START, etc.
-	Params  []string `json:"params,omitempty"`  // command parameters
-	Line    string   `json:"line,omitempty"`    // formatted mesh text line
+	Target string   `json:"target,omitempty"` // @ALL, @NODE_22, etc.
+	Name   string   `json:"name,omitempty"`   // STATUS, SCAN_START, etc.
+	Params []string `json:"params,omitempty"` // command parameters
+	Line   string   `json:"line,omitempty"`   // formatted mesh text line
 
 	// ACK enrichment
-	AckKind   string `json:"ackKind,omitempty"`   // e.g. SCAN_ACK
-	AckStatus string `json:"ackStatus,omitempty"` // e.g. COMPLETE, ERROR
-	AckNode   string `json:"ackNode,omitempty"`   // node that sent ACK
+	AckKind    string `json:"ackKind,omitempty"`   // e.g. SCAN_ACK
+	AckStatus  string `json:"ackStatus,omitempty"` // e.g. COMPLETE, ERROR
+	AckNode    string `json:"ackNode,omitempty"`   // node that sent ACK
 	ResultText string `json:"resultText,omitempty"`
 	ErrorText  string `json:"errorText,omitempty"`
 }
@@ -149,11 +149,27 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// CONFIG_ACK is generic — firmware emits it for every CONFIG_* command with
+	// the specific kind embedded in the status field. Match any pending
+	// CONFIG_* row; for all other ACK types the name must equal exactly.
+	wantPrefix := ""
+	if ackKind == "CONFIG_ACK" {
+		wantPrefix = "CONFIG_"
+	}
+
 	// Find the latest PENDING/SENT command matching this name + target
 	var match *Command
 	var matchKey string
 	for id, cmd := range s.pending {
-		if cmd.Name != cmdName && cmd.CommandType != cmdName {
+		name := cmd.Name
+		if name == "" {
+			name = cmd.CommandType
+		}
+		nameMatches := name == cmdName
+		if wantPrefix != "" && strings.HasPrefix(name, wantPrefix) {
+			nameMatches = true
+		}
+		if !nameMatches {
 			continue
 		}
 		if cmd.Status != StatusPending && cmd.Status != StatusSent {
@@ -211,7 +227,15 @@ func (s *Service) send(cmd *Command) {
 		return
 	}
 
-	payload, _ := json.Marshal(cmd.Payload)
+	// Structured commands (built via Build()) already hold the on-wire text
+	// in cmd.Line — e.g. "@ALL SCAN_START:2:60:1,6,11". Prefer that over the
+	// legacy JSON payload path which predates the AntiHunter wire format.
+	var payload []byte
+	if cmd.Line != "" {
+		payload = []byte(cmd.Line)
+	} else {
+		payload, _ = json.Marshal(cmd.Payload)
+	}
 
 	err := sendFn(cmd.TargetNode, cmd.CommandType, payload)
 
