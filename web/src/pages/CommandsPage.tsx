@@ -48,6 +48,7 @@ interface NodeRow {
   shortName?: string
   isOnline: boolean
   nodeType?: string
+  ahShortId?: string
 }
 
 function statusBadge(status: string) {
@@ -152,12 +153,21 @@ export default function CommandsPage() {
               className="w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded text-sm text-dark-200 focus:border-primary-500 focus:outline-none"
             >
               <option value="@ALL">@ALL (broadcast)</option>
-              {onlineNodes.map(n => (
-                <option key={n.id} value={`@NODE_${n.shortName || n.nodeNum}`}>
-                  @NODE_{n.shortName || n.nodeNum} — {n.name}
-                  {n.nodeType === 'antihunter' ? ' [AH]' : ' [GTM]'}
-                </option>
-              ))}
+              {onlineNodes.map(n => {
+                // AntiHunter sensors only honour their CONFIG_NODEID (ahShortId)
+                // as a target prefix — Meshtastic short-names are ignored by the
+                // sensor dispatcher. Fall back to @NODE_<shortName> for gotailme
+                // gateways or sensors whose short id hasn't been heard yet.
+                const targetValue = n.nodeType === 'antihunter' && n.ahShortId
+                  ? `@${n.ahShortId}`
+                  : `@NODE_${n.shortName || n.nodeNum}`
+                const badge = n.nodeType === 'antihunter' ? ' [AH]' : ' [GTM]'
+                return (
+                  <option key={n.id} value={targetValue}>
+                    {targetValue} — {n.name}{badge}
+                  </option>
+                )
+              })}
             </select>
           </div>
 

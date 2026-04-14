@@ -48,6 +48,7 @@ type Manager struct {
 	onTriFinal       func(mac string, lat, lon, confidence, uncertainty float64)
 	onTriComplete    func(mac string, nodes int)
 	onMeshTelemetry  func(from uint32, lat, lon float64, data map[string]interface{})
+	onCommandAck     func(ackKind, ackStatus, ackNode string, data map[string]interface{})
 	// Stored radio config sections (populated during wantConfig dump)
 	radioConfig   map[string]*ConfigPayload
 	radioConfigMu sync.RWMutex
@@ -77,6 +78,13 @@ func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string
 // The "from" argument is the authoritative Meshtastic node number of the sender.
 func (m *Manager) SetMeshTelemetryCallback(fn func(from uint32, lat, lon float64, data map[string]interface{})) {
 	m.onMeshTelemetry = fn
+}
+
+// SetCommandAckCallback sets the handler for command-ack events parsed out of
+// TEXTMSG lines like "AH01: SCAN_ACK:STARTED". The callback is responsible for
+// matching the ACK against a pending command and updating its lifecycle.
+func (m *Manager) SetCommandAckCallback(fn func(ackKind, ackStatus, ackNode string, data map[string]interface{})) {
+	m.onCommandAck = fn
 }
 
 // SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
@@ -540,6 +548,16 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 		from := parseNodeNum(evt.NodeID)
 		if m.onMeshTelemetry != nil && from != 0 && (lat != 0 || lon != 0) {
 			m.onMeshTelemetry(from, lat, lon, evt.Data)
+		}
+
+	case "command-ack":
+		// AntiHunter replies to commands with lines like "AH01: SCAN_ACK:STARTED".
+		// Hand the kind/status/node off to the commands service so it can match
+		// the ACK against a pending command and move it to OK/ERROR.
+		if m.onCommandAck != nil {
+			ackKind, _ := evt.Data["ackType"].(string)
+			ackStatus, _ := evt.Data["status"].(string)
+			m.onCommandAck(ackKind, ackStatus, evt.NodeID, evt.Data)
 		}
 
 	default:
