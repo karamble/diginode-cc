@@ -168,6 +168,10 @@ var ACKMap = map[string]string{
 	"HB_ACK":               "HB_ON",
 	"STOP_ACK":             "STOP",
 	"REBOOT_ACK":           "REBOOT",
+	// STATUS_ACK is synthesized by the textparser from the plain STATUS: reply
+	// frame (the firmware never emits a real *_ACK for STATUS). Lets STATUS
+	// commands close out as OK instead of sitting in SENT forever.
+	"STATUS_ACK": "STATUS",
 }
 
 // Build validates inputs and produces a formatted mesh text line.
