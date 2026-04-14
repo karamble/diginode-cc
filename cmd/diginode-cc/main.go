@@ -12,9 +12,9 @@ import (
 
 	"github.com/karamble/diginode-cc/internal/adsb"
 	"github.com/karamble/diginode-cc/internal/alarms"
-	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/api"
+	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/auth"
 	"github.com/karamble/diginode-cc/internal/chat"
 	"github.com/karamble/diginode-cc/internal/commands"
@@ -136,11 +136,11 @@ func main() {
 		hits := make([]drones.GeofenceHit, len(triggered))
 		for i, g := range triggered {
 			hits[i] = drones.GeofenceHit{
-				ID:             g.ID,
-				Name:           g.Name,
-				AlarmLevel:     g.AlarmLevel,
-				AlarmMessage:   g.AlarmMessage,
-				NotifyWebhook:  g.NotifyWebhook,
+				ID:            g.ID,
+				Name:          g.Name,
+				AlarmLevel:    g.AlarmLevel,
+				AlarmMessage:  g.AlarmMessage,
+				NotifyWebhook: g.NotifyWebhook,
 			}
 		}
 		return hits
@@ -239,6 +239,19 @@ func main() {
 	dispatcher.SetWebhookCallback(webhooksSvc.Dispatch)
 	dispatcher.SetSerialManager(serialMgr)
 	serialMgr.RegisterHandler(dispatcher.HandlePacket)
+
+	// AntiHunter heartbeats arrive as text over the mesh (no Position protobuf).
+	// Promote the embedded GPS fix into a node position update so remote sensor
+	// nodes show up on the map and their lastHeard/position refreshes without a
+	// separate Meshtastic Position packet.
+	serialMgr.SetMeshTelemetryCallback(func(from uint32, lat, lon float64, _ map[string]interface{}) {
+		pos := &serial.PositionData{
+			LatitudeI:  int32(lat * 1e7),
+			LongitudeI: int32(lon * 1e7),
+			Time:       uint32(time.Now().Unix()),
+		}
+		nodesSvc.HandlePosition(from, pos)
+	})
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
 	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {
@@ -362,23 +375,23 @@ func main() {
 
 	// Bundle services for the API server
 	svc := &api.Services{
-		Auth:      authSvc,
-		Users:     usersSvc,
-		Sites:     sitesSvc,
-		Nodes:     nodesSvc,
-		Drones:    dronesSvc,
-		Chat:      chatSvc,
-		Commands:  commandsSvc,
-		Alerts:    alertsSvc,
-		Geofences: geofencesSvc,
-		Targets:   targetsSvc,
-		Inventory: inventorySvc,
-		Webhooks:  webhooksSvc,
-		Alarms:    alarmsSvc,
-		Firewall:  firewallSvc,
-		FAA:       faaSvc,
-		Exports:   exportsSvc,
-		Mail:      mailSvc,
+		Auth:        authSvc,
+		Users:       usersSvc,
+		Sites:       sitesSvc,
+		Nodes:       nodesSvc,
+		Drones:      dronesSvc,
+		Chat:        chatSvc,
+		Commands:    commandsSvc,
+		Alerts:      alertsSvc,
+		Geofences:   geofencesSvc,
+		Targets:     targetsSvc,
+		Inventory:   inventorySvc,
+		Webhooks:    webhooksSvc,
+		Alarms:      alarmsSvc,
+		Firewall:    firewallSvc,
+		FAA:         faaSvc,
+		Exports:     exportsSvc,
+		Mail:        mailSvc,
 		AppCfg:      appCfg,
 		Permissions: permsSvc,
 		Audit:       auditSvc,

@@ -34,19 +34,19 @@ func isSensorData(text string) bool {
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
 type Dispatcher struct {
-	hub            *ws.Hub
-	nodeHandler    NodeHandler
-	droneHandler   DroneHandler
-	chatHandler    ChatHandler
-	posHandler     PositionHandler
-	onDeviceTime   func(t time.Time)
-	onAlertEval    func(ctx context.Context, evt alerts.DetectionEvent)
-	onWebhookFire  func(eventType string, payload interface{})
-	dedup          map[uint64]time.Time // packet hash → last seen
-	dedupMu        sync.Mutex
-	localNodeSeen  bool   // true after first NodeInfo from wantConfig
-	localNodeNum   uint32 // our local Heltec's mesh node number
-	serialMgr      *serial.Manager
+	hub           *ws.Hub
+	nodeHandler   NodeHandler
+	droneHandler  DroneHandler
+	chatHandler   ChatHandler
+	posHandler    PositionHandler
+	onDeviceTime  func(t time.Time)
+	onAlertEval   func(ctx context.Context, evt alerts.DetectionEvent)
+	onWebhookFire func(eventType string, payload interface{})
+	dedup         map[uint64]time.Time // packet hash → last seen
+	dedupMu       sync.Mutex
+	localNodeSeen bool   // true after first NodeInfo from wantConfig
+	localNodeNum  uint32 // our local Heltec's mesh node number
+	serialMgr     *serial.Manager
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -242,6 +242,14 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 				"channel": mp.Channel,
 				"text":    string(mp.Payload),
 			})
+		}
+		// AntiHunter sensors transmit their detection and heartbeat frames as plain
+		// ASCII inside TEXTMSG packets (they have no protobuf Position/Telemetry
+		// stack). Run the payload through the serial text parser so embedded GPS
+		// fixes, target hits, drone telemetry, and triangulation frames reach the
+		// same pipeline as locally-parsed console output.
+		if d.serialMgr != nil && len(mp.Payload) > 0 {
+			d.serialMgr.ProcessMeshText(mp.From, mp.To, mp.Channel, string(mp.Payload))
 		}
 
 	case PortNumPosition:

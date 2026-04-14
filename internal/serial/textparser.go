@@ -168,6 +168,14 @@ func (p *TextParser) initPatterns() {
 				`(?i)^\[NODE_HB\]\s*(?P<id>[A-Za-z0-9_.:-]+)\s+Time:(?P<time>[^ ]+)\s+Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleNodeHB,
 		},
+		// Battery-saver heartbeat: "nodeId: HEARTBEAT: Temp:38c/100F GPS:12.34,56.78 Battery:SAVER"
+		// Must precede node-hb-inline since that pattern would otherwise swallow the "HEARTBEAT:" token.
+		{
+			name: "node-hb-saver",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*HEARTBEAT:\s*Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?(?:\s+Battery:(?P<battery>\S+))?`),
+			handler: p.handleNodeHB,
+		},
 		// NODE_HB inline: "nodeId: Time:12345 Temp:38c/100F GPS:12.34,56.78"
 		{
 			name: "node-hb-inline",
@@ -473,9 +481,9 @@ func (p *TextParser) handleDrone(match []string, names []string, raw string) []*
 
 	// Keys must match DroneDetection JSON tags in drones/detection.go
 	data := map[string]interface{}{
-		"uasId":    g["droneId"],
-		"mac":      strings.ToUpper(g["mac"]),
-		"rssi":     parseOptInt(g["rssi"]),
+		"uasId":     g["droneId"],
+		"mac":       strings.ToUpper(g["mac"]),
+		"rssi":      parseOptInt(g["rssi"]),
 		"latitude":  parseOptFloat(g["lat"]),
 		"longitude": parseOptFloat(g["lon"]),
 	}
