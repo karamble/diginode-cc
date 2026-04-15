@@ -610,17 +610,41 @@ func (p *TextParser) handleStatus(match []string, names []string, raw string) []
 		Raw: raw,
 	}
 
-	return []*ParsedEvent{
-		{
-			Kind:     "alert",
-			Level:    "NOTICE",
-			Category: "status",
-			NodeID:   nodeID,
-			Data:     data,
-			Raw:      raw,
-		},
-		statusAck,
+	// Promote tempC / lat / lon into a node-telemetry event so the Nodes UI
+	// reflects the reading from a STATUS frame, not just from a heartbeat.
+	// Without this, STATUS replies update the alert feed but leave the node
+	// record's Temperature / Latitude / Longitude stale.
+	telemetryData := map[string]interface{}{}
+	if v, ok := data["temperatureC"]; ok {
+		telemetryData["temperatureC"] = v
 	}
+	if v, ok := data["temperatureF"]; ok {
+		telemetryData["temperatureF"] = v
+	}
+	if v, ok := data["lat"]; ok {
+		telemetryData["lat"] = v
+	}
+	if v, ok := data["lon"]; ok {
+		telemetryData["lon"] = v
+	}
+
+	// A STATUS frame is a query response, not an alert — it belongs in the
+	// node-telemetry stream and as a synthetic STATUS_ACK. Adding it to the
+	// alert feed would spam operators with routine heartbeat noise every time
+	// a STATUS command fired. If a specific field warrants an alert in the
+	// future (e.g. temperature over threshold), route that through the alert
+	// rules engine instead.
+	events := []*ParsedEvent{}
+	if len(telemetryData) > 0 {
+		events = append(events, &ParsedEvent{
+			Kind:   "node-telemetry",
+			NodeID: nodeID,
+			Data:   telemetryData,
+			Raw:    raw,
+		})
+	}
+	events = append(events, statusAck)
+	return events
 }
 
 func (p *TextParser) handleDrone(match []string, names []string, raw string) []*ParsedEvent {
