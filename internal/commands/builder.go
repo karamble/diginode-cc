@@ -103,8 +103,8 @@ var Registry = map[string]*CommandDef{
 	"CONFIG_RSSI": {Name: "CONFIG_RSSI", Group: "Configuration", Description: "Configure RSSI threshold", Params: []ParamDef{
 		{Key: "rssi", Label: "RSSI Threshold", Type: "number", Required: true, Min: -120, Max: -1},
 	}},
-	"CONFIG_NODEID": {Name: "CONFIG_NODEID", Group: "Configuration", Description: "Set node ID", SingleNode: true, Params: []ParamDef{
-		{Key: "nodeId", Label: "Node ID", Type: "text", Required: true, Placeholder: "AH03 (2-6 chars)"},
+	"CONFIG_NODEID": {Name: "CONFIG_NODEID", Group: "Configuration", Description: "Set node ID (AH + 1–3 digits, e.g. AH07)", SingleNode: true, Params: []ParamDef{
+		{Key: "nodeId", Label: "Node ID", Type: "text", Required: true, Placeholder: "AH07"},
 	}},
 
 	// Security / Erase
@@ -286,13 +286,17 @@ func validateParam(pd ParamDef, val string) error {
 		}
 	case "text":
 		if pd.Key == "nodeId" {
+			// AntiHunter firmware's sanitizeNodeId (hardware.cpp) forces an "AH"
+			// prefix + digits and silently mutates anything else, so only strings
+			// shaped AH + 1–3 digits round-trip without surprise. The firmware's
+			// own validator accepts any 2–5 alphanumeric chars, but the sanitize
+			// step strips letters after position 2 and pads with random digits —
+			// meaning "NODE1" becomes something like "AH1XX". Reject early here
+			// to keep the UI honest.
 			upper := strings.ToUpper(val)
-			if len(upper) < 2 || len(upper) > 6 {
-				return fmt.Errorf("node ID must be 2-6 characters")
-			}
-			matched, _ := regexp.MatchString(`^[A-Z0-9]+$`, upper)
+			matched, _ := regexp.MatchString(`^AH\d{1,3}$`, upper)
 			if !matched {
-				return fmt.Errorf("node ID must be uppercase alphanumeric")
+				return fmt.Errorf(`node ID must match "AH" + 1–3 digits (e.g. AH07, AH123)`)
 			}
 		}
 	}
