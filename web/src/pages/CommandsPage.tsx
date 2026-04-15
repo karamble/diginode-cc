@@ -79,6 +79,22 @@ function formatAge(dateStr?: string): string {
 
 const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System']
 
+// ValidationAlert renders backend validation errors as a compact alert box.
+// The Go builder's error messages already include a concrete example
+// ("node ID must match 'AH' + 1–3 digits (e.g. AH07, AH123)"), so we just
+// need a consistent visual frame with a warning glyph to make the rejection
+// obvious without drowning the rest of the form.
+function ValidationAlert({ message }: { message: string }) {
+  return (
+    <div className="flex items-start gap-2 px-2.5 py-2 bg-red-500/10 border border-red-500/30 rounded text-xs text-red-300">
+      <svg className="w-3.5 h-3.5 mt-0.5 flex-shrink-0 text-red-400" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+        <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />
+      </svg>
+      <span className="font-mono break-words">{message}</span>
+    </div>
+  )
+}
+
 export default function CommandsPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -323,9 +339,7 @@ export default function CommandsPage() {
           <div className="mt-3 pt-3 border-t border-dark-700/30">
             <label className="text-[11px] text-dark-500 block mb-1">Preview</label>
             {previewError ? (
-              <code className="block px-2 py-1.5 bg-dark-800/50 border border-red-500/30 rounded text-xs text-red-400 font-mono">
-                {previewError}
-              </code>
+              <ValidationAlert message={previewError} />
             ) : (
               <code className="block px-2 py-1.5 bg-dark-800/50 border border-dark-700/50 rounded text-xs text-primary-300 font-mono break-all">
                 {previewLine || '...'}
@@ -334,11 +348,11 @@ export default function CommandsPage() {
           </div>
         )}
 
-        {/* Error display */}
+        {/* Error display — send failed after validation passed (e.g. rate limit, transport) */}
         {sendMutation.isError && (
-          <p className="text-xs text-red-400 mt-2">
-            {(sendMutation.error as Error).message}
-          </p>
+          <div className="mt-2">
+            <ValidationAlert message={(sendMutation.error as Error).message} />
+          </div>
         )}
 
         {/* Raw command escape hatch — bypasses Build() for power users */}
@@ -366,7 +380,9 @@ export default function CommandsPage() {
             </button>
           </div>
           {rawMutation.isError && (
-            <p className="text-xs text-red-400 mt-1">{(rawMutation.error as Error).message}</p>
+            <div className="mt-2">
+              <ValidationAlert message={(rawMutation.error as Error).message} />
+            </div>
           )}
         </div>
       </div>
