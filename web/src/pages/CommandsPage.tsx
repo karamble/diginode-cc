@@ -50,6 +50,10 @@ interface NodeRow {
   isOnline: boolean
   nodeType?: string
   ahShortId?: string
+  siteName?: string
+  siteColor?: string
+  siteCountry?: string
+  siteCity?: string
 }
 
 function statusBadge(status: string) {
@@ -82,6 +86,9 @@ export default function CommandsPage() {
   const [target, setTarget] = useState('@ALL')
   const [paramValues, setParamValues] = useState<Record<string, string>>({})
   const [forever, setForever] = useState(false)
+  const [rawLine, setRawLine] = useState('')
+  const [previewLine, setPreviewLine] = useState('')
+  const [previewError, setPreviewError] = useState('')
 
   // Pick up ?target=@AH34 when the user jumps here from the Nodes page.
   // Consume the query param after applying it so a page refresh doesn't keep
@@ -128,6 +135,17 @@ export default function CommandsPage() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['commands'] }),
   })
 
+  // Raw command send: bypasses Build(), transmits the user's literal @TARGET
+  // COMMAND:... string. Shares the same history / ACK pipeline as structured
+  // sends, just without form validation.
+  const rawMutation = useMutation({
+    mutationFn: (line: string) => api.post('/commands/send-raw', { line }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['commands'] })
+      setRawLine('')
+    },
+  })
+
   // Group commands by category
   const grouped = useMemo(() => {
     const groups: Record<string, CommandDef[]> = {}
@@ -140,6 +158,27 @@ export default function CommandsPage() {
 
   const activeDef = cmdTypes.find(c => c.name === selectedCmd)
 
+  // Live preview of the on-wire line. Hits /commands/preview which reuses the
+  // Go builder's Build() — single source of truth, so operators see exactly
+  // the text that will be transmitted (including FOREVER trailer, param
+  // joining, validation errors) before they commit to sending.
+  useEffect(() => {
+    if (!selectedCmd) {
+      setPreviewLine('')
+      setPreviewError('')
+      return
+    }
+    const params = (activeDef?.params || []).map(p => paramValues[p.key] || '')
+    const handle = setTimeout(() => {
+      api.post<{ line: string }>('/commands/preview', {
+        target, name: selectedCmd, params, forever,
+      })
+        .then(res => { setPreviewLine(res.line); setPreviewError('') })
+        .catch(err => { setPreviewLine(''); setPreviewError((err as Error).message) })
+    }, 200)
+    return () => clearTimeout(handle)
+  }, [selectedCmd, target, paramValues, forever, activeDef])
+
   const handleSend = () => {
     if (!selectedCmd) return
     const params = (activeDef?.params || []).map(p => paramValues[p.key] || '')
@@ -149,8 +188,6 @@ export default function CommandsPage() {
   const setParam = (key: string, val: string) => {
     setParamValues(prev => ({ ...prev, [key]: val }))
   }
-
-  const onlineNodes = nodes.filter(n => n.isOnline)
 
   return (
     <div className="p-6 space-y-6">
@@ -167,8 +204,8 @@ export default function CommandsPage() {
               onChange={e => setTarget(e.target.value)}
               className="w-full px-3 py-2 bg-dark-800 border border-dark-600 rounded text-sm text-dark-200 focus:border-primary-500 focus:outline-none"
             >
-              <option value="@ALL">@ALL (broadcast)</option>
-              {onlineNodes.map(n => {
+              <option value="@ALL">@ALL — broadcast</option>
+              {nodes.map(n => {
                 // AntiHunter sensors only honour their CONFIG_NODEID (ahShortId)
                 // as a target prefix — Meshtastic short-names are ignored by the
                 // sensor dispatcher. Fall back to @NODE_<shortName> for gotailme
@@ -176,11 +213,18 @@ export default function CommandsPage() {
                 const targetValue = n.nodeType === 'antihunter' && n.ahShortId
                   ? `@${n.ahShortId}`
                   : `@NODE_${n.shortName || n.nodeNum}`
-                const badge = n.nodeType === 'antihunter' ? ' [AH]' : ' [GTM]'
+                const kind = n.nodeType === 'antihunter' ? 'AH' : 'GTM'
+                const loc = [n.siteCountry, n.siteCity].filter(Boolean).join('/')
+                const siteLabel = loc || n.siteName || ''
+                const state = n.isOnline ? 'online' : 'offline'
+                const label = [
+                  `${targetValue} [${kind}]`,
+                  n.name || n.shortName,
+                  siteLabel && `(${siteLabel})`,
+                  `· ${state}`,
+                ].filter(Boolean).join(' ')
                 return (
-                  <option key={n.id} value={targetValue}>
-                    {targetValue} — {n.name}{badge}
-                  </option>
+                  <option key={n.id} value={targetValue}>{label}</option>
                 )
               })}
             </select>
@@ -274,12 +318,57 @@ export default function CommandsPage() {
           <p className="text-[10px] text-dark-500">{activeDef.description}</p>
         )}
 
+        {/* Live preview of the on-wire line (same formatting the backend transmits) */}
+        {selectedCmd && (
+          <div className="mt-3 pt-3 border-t border-dark-700/30">
+            <label className="text-[11px] text-dark-500 block mb-1">Preview</label>
+            {previewError ? (
+              <code className="block px-2 py-1.5 bg-dark-800/50 border border-red-500/30 rounded text-xs text-red-400 font-mono">
+                {previewError}
+              </code>
+            ) : (
+              <code className="block px-2 py-1.5 bg-dark-800/50 border border-dark-700/50 rounded text-xs text-primary-300 font-mono break-all">
+                {previewLine || '...'}
+              </code>
+            )}
+          </div>
+        )}
+
         {/* Error display */}
         {sendMutation.isError && (
           <p className="text-xs text-red-400 mt-2">
             {(sendMutation.error as Error).message}
           </p>
         )}
+
+        {/* Raw command escape hatch — bypasses Build() for power users */}
+        <div className="mt-4 pt-4 border-t border-dark-700/30">
+          <label className="text-[11px] text-dark-500 block mb-1">
+            Raw command <span className="text-dark-600">(advanced — bypasses validation)</span>
+          </label>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={rawLine}
+              onChange={e => setRawLine(e.target.value)}
+              placeholder="@ALL STATUS  or  @AH34 SCAN_START:2:60:1,6,11"
+              className="flex-1 px-2 py-1.5 bg-dark-800 border border-dark-600 rounded text-xs text-dark-200 font-mono focus:border-primary-500 focus:outline-none"
+              onKeyDown={e => {
+                if (e.key === 'Enter' && rawLine.trim()) rawMutation.mutate(rawLine)
+              }}
+            />
+            <button
+              onClick={() => rawMutation.mutate(rawLine)}
+              disabled={!rawLine.trim() || rawMutation.isPending}
+              className="px-3 py-1.5 bg-dark-700 hover:bg-dark-600 disabled:bg-dark-800 disabled:text-dark-600 text-dark-200 text-xs rounded font-medium transition-colors"
+            >
+              {rawMutation.isPending ? 'Sending...' : 'Send Raw'}
+            </button>
+          </div>
+          {rawMutation.isError && (
+            <p className="text-xs text-red-400 mt-1">{(rawMutation.error as Error).message}</p>
+          )}
+        </div>
       </div>
 
       {/* Command History */}
