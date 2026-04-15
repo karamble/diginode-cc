@@ -46,6 +46,8 @@ var Registry = map[string]*CommandDef{
 	"STATUS":           {Name: "STATUS", Group: "Status", Description: "Request node status report"},
 	"BASELINE_STATUS":  {Name: "BASELINE_STATUS", Group: "Status", Description: "Request baseline scan status"},
 	"VIBRATION_STATUS": {Name: "VIBRATION_STATUS", Group: "Status", Description: "Request vibration sensor status"},
+	"VIBRATION_OFF":    {Name: "VIBRATION_OFF", Group: "Status", Description: "Disable vibration TEXTMSG broadcasts (detection still runs locally)"},
+	"VIBRATION_ON":     {Name: "VIBRATION_ON", Group: "Status", Description: "Enable vibration TEXTMSG broadcasts"},
 
 	// Scanning
 	"SCAN_START": {Name: "SCAN_START", Group: "Scanning", Description: "Start WiFi/BLE scanning", AllowForever: true, Params: []ParamDef{
@@ -171,7 +173,9 @@ var ACKMap = map[string]string{
 	// STATUS_ACK is synthesized by the textparser from the plain STATUS: reply
 	// frame (the firmware never emits a real *_ACK for STATUS). Lets STATUS
 	// commands close out as OK instead of sitting in SENT forever.
-	"STATUS_ACK": "STATUS",
+	"STATUS_ACK":        "STATUS",
+	"VIBRATION_OFF_ACK": "VIBRATION_OFF",
+	"VIBRATION_ON_ACK":  "VIBRATION_ON",
 }
 
 // Build validates inputs and produces a formatted mesh text line.
