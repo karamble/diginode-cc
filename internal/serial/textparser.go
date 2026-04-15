@@ -184,10 +184,13 @@ func (p *TextParser) initPatterns() {
 			handler: p.handleNodeHB,
 		},
 		// ACK lines: "nodeId: SCAN_ACK:OK" / "nodeId: DRONE_ACK:" etc.
+		// VIBRATION_(ON|OFF)_ACK is included so the new firmware vibration toggle
+		// (commit 1d9477d in karamble/AntiHunter feature/vibration-toggle) closes
+		// the command lifecycle in DigiNode CC.
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?)_ACK):?(?P<status>[A-Z_]*)`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF))_ACK):?(?P<status>[A-Z_]*)`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"
