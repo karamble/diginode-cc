@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import api from '../api/client'
 
 interface NodeRow {
@@ -8,7 +9,9 @@ interface NodeRow {
   nodeType?: string  // "gotailme" | "antihunter" | ""
   name: string
   shortName?: string
+  ahShortId?: string
   hwModel?: string
+  macAddr?: string
   role?: string
   firmwareVersion?: string
   lat?: number
@@ -21,6 +24,7 @@ interface NodeRow {
   temperature?: number
   temperatureC?: number
   temperatureF?: number
+  temperatureUpdatedAt?: string
   snr?: number
   rssi?: number
   lastHeard?: string
@@ -32,6 +36,16 @@ interface NodeRow {
   siteColor?: string
   lastMessage?: string
   telemetryUpdatedAt?: string
+}
+
+// timeAgo returns a compact relative string like "4m ago" / "2h ago".
+function timeAgo(iso?: string): string {
+  if (!iso) return '-'
+  const diff = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  if (diff < 60) return `${diff}s ago`
+  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
+  if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
+  return `${Math.floor(diff / 86400)}d ago`
 }
 
 function nodeTypeBadge(nodeType?: string): { label: string; color: string } | null {
@@ -61,18 +75,19 @@ function signalStrength(rssi: number | undefined): { label: string; color: strin
   return { label: 'Weak', color: 'text-status-hostile' }
 }
 
-function timeAgo(ts: string | undefined): string {
-  if (!ts) return '-'
-  const diff = Date.now() - new Date(ts).getTime()
-  if (diff < 60_000) return `${Math.floor(diff / 1000)}s ago`
-  if (diff < 3600_000) return `${Math.floor(diff / 60_000)}m ago`
-  if (diff < 86400_000) return `${Math.floor(diff / 3600_000)}h ago`
-  return `${Math.floor(diff / 86400_000)}d ago`
-}
-
 export default function NodesPage() {
   const queryClient = useQueryClient()
+  const navigate = useNavigate()
   const [expandedId, setExpandedId] = useState<string | null>(null)
+
+  // resolveTarget returns the @TARGET string the firmware / UI expects.
+  // AntiHunter sensors only honour their CONFIG_NODEID (AH34) — Meshtastic
+  // short names are dropped — so prefer ahShortId when present, fall back to
+  // @NODE_<shortName|nodeNum> for gotailme gateways.
+  function resolveTarget(n: NodeRow): string {
+    if (n.nodeType === 'antihunter' && n.ahShortId) return `@${n.ahShortId}`
+    return `@NODE_${n.shortName || n.nodeNum}`
+  }
 
   const { data: nodes = [], isLoading, error } = useQuery({
     queryKey: ['nodes'],
@@ -210,6 +225,7 @@ export default function NodesPage() {
                           )}
                         </div>
                         <div className="text-dark-500 text-xs font-mono mt-0.5">
+                          {n.ahShortId ? `${n.ahShortId} · ` : ''}
                           {n.shortName ? `${n.shortName} / ` : ''}{n.id}
                         </div>
                       </td>
@@ -307,48 +323,187 @@ export default function NodesPage() {
                     {expandedId === n.id && (
                       <tr key={`${n.id}-detail`} className="border-b border-dark-700/30 bg-dark-800/20">
                         <td colSpan={10} className="px-6 py-4">
-                          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-xs">
+                          <div className="space-y-4">
+                            {/* Identity */}
                             <div>
-                              <span className="text-dark-500 block">Position</span>
-                              <span className="text-dark-300 font-mono">
-                                {n.lat && n.lon ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}` : 'No position'}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-dark-500 block">Altitude</span>
-                              <span className="text-dark-300 font-mono">
-                                {n.altitude ? `${n.altitude.toFixed(0)}m` : '-'}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-dark-500 block">Channel Util / Air TX</span>
-                              <span className="text-dark-300 font-mono">
-                                {n.channelUtilization?.toFixed(1) ?? '-'}% / {n.airUtilTx?.toFixed(1) ?? '-'}%
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-dark-500 block">Temperature</span>
-                              <span className="text-dark-300 font-mono">
-                                {n.temperatureC ? `${n.temperatureC.toFixed(1)}C` : n.temperature ? `${n.temperature.toFixed(1)}C` : '-'}
-                                {n.temperatureF ? ` / ${n.temperatureF.toFixed(1)}F` : ''}
-                              </span>
-                            </div>
-                            <div>
-                              <span className="text-dark-500 block">Firmware</span>
-                              <span className="text-dark-300">{n.firmwareVersion || '-'}</span>
-                            </div>
-                            <div>
-                              <span className="text-dark-500 block">Node Number</span>
-                              <span className="text-dark-300 font-mono">{n.nodeNum}</span>
-                            </div>
-                            {n.lastMessage && (
-                              <div className="col-span-2">
-                                <span className="text-dark-500 block">Last Message</span>
-                                <span className="text-dark-300">{n.lastMessage}</span>
+                              <div className="text-dark-500 text-[10px] uppercase tracking-wider mb-1.5">Identity</div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <div>
+                                  <span className="text-dark-500 block">Long Name</span>
+                                  <span className="text-dark-300">{n.name || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Short Name</span>
+                                  <span className="text-dark-300 font-mono">{n.shortName || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">AH Node ID</span>
+                                  <span className="text-dark-300 font-mono">{n.ahShortId || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Node Type</span>
+                                  <span className="text-dark-300">
+                                    {n.nodeType === 'antihunter' ? 'AntiHunter sensor' : n.nodeType === 'gotailme' ? 'gotailme C2 gateway' : 'unclassified'}
+                                    {n.isLocal && <span className="ml-1 text-dark-500">(local)</span>}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Mesh Node ID</span>
+                                  <span className="text-dark-300 font-mono">{n.id}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Node Number</span>
+                                  <span className="text-dark-300 font-mono">{n.nodeNum}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">MAC Address</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.macAddr ? n.macAddr.toUpperCase() : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Online</span>
+                                  <span className={n.isOnline ? 'text-green-400' : 'text-dark-500'}>
+                                    {n.isOnline ? 'yes' : 'no'}
+                                  </span>
+                                </div>
                               </div>
-                            )}
+                            </div>
+
+                            {/* Hardware / Firmware */}
+                            <div>
+                              <div className="text-dark-500 text-[10px] uppercase tracking-wider mb-1.5">Hardware</div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <div>
+                                  <span className="text-dark-500 block">Model</span>
+                                  <span className="text-dark-300">{n.hwModel || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Role</span>
+                                  <span className="text-dark-300">{n.role || '-'}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Firmware</span>
+                                  <span className="text-dark-300 font-mono">{n.firmwareVersion || '-'}</span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Telemetry */}
+                            <div>
+                              <div className="text-dark-500 text-[10px] uppercase tracking-wider mb-1.5">
+                                Telemetry
+                                {n.telemetryUpdatedAt && (
+                                  <span className="ml-2 text-dark-600 normal-case">· updated {timeAgo(n.telemetryUpdatedAt)}</span>
+                                )}
+                              </div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <div>
+                                  <span className="text-dark-500 block">Battery</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.batteryLevel && n.batteryLevel > 0 ? `${n.batteryLevel}%` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Voltage</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.voltage && n.voltage > 0.1 ? `${n.voltage.toFixed(2)} V` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">
+                                    Temperature
+                                    {n.temperatureUpdatedAt && (
+                                      <span className="text-dark-600 normal-case"> · {timeAgo(n.temperatureUpdatedAt)}</span>
+                                    )}
+                                  </span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.temperatureC ? `${n.temperatureC.toFixed(1)}°C` : n.temperature ? `${n.temperature.toFixed(1)}°C` : '-'}
+                                    {n.temperatureF ? ` / ${n.temperatureF.toFixed(1)}°F` : ''}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Signal</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.rssi !== undefined && n.rssi !== 0 ? `${n.rssi} dBm` : '-'}
+                                    {n.snr !== undefined && n.snr !== 0 ? ` / ${n.snr.toFixed(1)} dB SNR` : ''}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Channel Util</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.channelUtilization !== undefined ? `${n.channelUtilization.toFixed(1)}%` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Air TX</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.airUtilTx !== undefined ? `${n.airUtilTx.toFixed(2)}%` : '-'}
+                                  </span>
+                                </div>
+                              </div>
+                            </div>
+
+                            {/* Location */}
+                            <div>
+                              <div className="text-dark-500 text-[10px] uppercase tracking-wider mb-1.5">Location</div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <div>
+                                  <span className="text-dark-500 block">Coordinates</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.lat && n.lon ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}` : 'No position'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Altitude</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.altitude ? `${n.altitude.toFixed(0)} m` : '-'}
+                                  </span>
+                                </div>
+                                {n.siteName && (
+                                  <div>
+                                    <span className="text-dark-500 block">Site</span>
+                                    <span className="text-dark-300" style={n.siteColor ? { color: n.siteColor } : undefined}>
+                                      {n.siteName}
+                                    </span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+
+                            {/* Activity */}
+                            <div>
+                              <div className="text-dark-500 text-[10px] uppercase tracking-wider mb-1.5">Activity</div>
+                              <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                <div>
+                                  <span className="text-dark-500 block">Last Heard</span>
+                                  <span className="text-dark-300">{timeAgo(n.lastHeard)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Last Seen</span>
+                                  <span className="text-dark-300">{timeAgo(n.lastSeen)}</span>
+                                </div>
+                              </div>
+                              {n.lastMessage && (
+                                <div className="mt-2">
+                                  <span className="text-dark-500 block text-xs">Last Message</span>
+                                  <span className="text-dark-300 font-mono text-xs break-all">{n.lastMessage}</span>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                          <div className="mt-3 pt-3 border-t border-dark-700/30 flex gap-2">
+                          <div className="mt-3 pt-3 border-t border-dark-700/30 flex gap-2 flex-wrap">
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                const target = resolveTarget(n)
+                                navigate(`/commands?target=${encodeURIComponent(target)}`)
+                              }}
+                              className="px-3 py-1 text-xs rounded bg-primary-600/20 text-primary-300 hover:bg-primary-600/30 hover:text-primary-200 transition-colors border border-primary-600/40"
+                              title={`Open Commands page with ${resolveTarget(n)} pre-selected`}
+                            >
+                              Send Command → {resolveTarget(n)}
+                            </button>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation()

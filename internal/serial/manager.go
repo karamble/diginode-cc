@@ -540,13 +540,16 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 
 	case "node-telemetry":
 		// Emitted by AntiHunter NODE_HB lines (normal + battery-saver variants) and
-		// STATUS frames that carry an embedded GPS fix. Forward lat/lon to the node
-		// handler so the sender's position is refreshed even though the AntiHunter
-		// firmware never emits a protobuf Position packet.
+		// STATUS frames. Forward lat/lon + temperature to the node handler so the
+		// sender's position and OLED temp reading are refreshed even though the
+		// AntiHunter firmware never emits a protobuf Position or Telemetry packet.
+		// Fire whenever ANY useful field is set — plain "Time:X Temp:Y" heartbeats
+		// without GPS would otherwise silently drop the temperature update.
 		lat, _ := evt.Data["lat"].(float64)
 		lon, _ := evt.Data["lon"].(float64)
+		tempC, _ := evt.Data["temperatureC"].(float64)
 		from := parseNodeNum(evt.NodeID)
-		if m.onMeshTelemetry != nil && from != 0 && (lat != 0 || lon != 0) {
+		if m.onMeshTelemetry != nil && from != 0 && (lat != 0 || lon != 0 || tempC != 0) {
 			m.onMeshTelemetry(from, lat, lon, evt.Data)
 		}
 

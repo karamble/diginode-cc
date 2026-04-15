@@ -1,5 +1,6 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState, useMemo } from 'react'
+import { useState, useMemo, useEffect } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 
 interface ParamDef {
@@ -76,10 +77,24 @@ const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Config
 
 export default function CommandsPage() {
   const queryClient = useQueryClient()
+  const [searchParams, setSearchParams] = useSearchParams()
   const [selectedCmd, setSelectedCmd] = useState<string>('')
   const [target, setTarget] = useState('@ALL')
   const [paramValues, setParamValues] = useState<Record<string, string>>({})
   const [forever, setForever] = useState(false)
+
+  // Pick up ?target=@AH34 when the user jumps here from the Nodes page.
+  // Consume the query param after applying it so a page refresh doesn't keep
+  // re-overriding the dropdown on subsequent state changes.
+  useEffect(() => {
+    const t = searchParams.get('target')
+    if (t) {
+      setTarget(t)
+      const next = new URLSearchParams(searchParams)
+      next.delete('target')
+      setSearchParams(next, { replace: true })
+    }
+  }, [searchParams, setSearchParams])
 
   const { data: cmdTypes = [] } = useQuery<CommandDef[]>({
     queryKey: ['command-types'],
