@@ -1199,6 +1199,27 @@ func parseNodeNum(nodeID string) uint32 {
 	return uint32(n)
 }
 
+// ExtractMeshFrom pulls the mesh node number out of a Meshtastic debug echo
+// line like "[Router] Received text msg from=0x0406a7a8 ...". AntiHunter
+// STATUS / heartbeat payloads are prefixed with the sensor's CONFIG_NODEID
+// (e.g. "AH34"), which carries no mesh addressing, so the telemetry dispatcher
+// needs this as a fallback when the regex-captured NodeID can't be parsed as
+// a hex mesh number.
+func (p *TextParser) ExtractMeshFrom(raw string) uint32 {
+	if raw == "" || p.fromExtract == nil {
+		return 0
+	}
+	m := p.fromExtract.FindStringSubmatch(raw)
+	if m == nil {
+		return 0
+	}
+	n, err := strconv.ParseUint(m[1], 16, 32)
+	if err != nil {
+		return 0
+	}
+	return uint32(n)
+}
+
 // ParseNodeNum is the exported version of parseNodeNum.
 func ParseNodeNum(nodeID string) uint32 {
 	return parseNodeNum(nodeID)

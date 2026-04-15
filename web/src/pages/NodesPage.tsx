@@ -225,8 +225,7 @@ export default function NodesPage() {
                           )}
                         </div>
                         <div className="text-dark-500 text-xs font-mono mt-0.5">
-                          {n.ahShortId ? `${n.ahShortId} · ` : ''}
-                          {n.shortName ? `${n.shortName} / ` : ''}{n.id}
+                          {[n.ahShortId || n.shortName || n.id, n.nodeType].filter(Boolean).join(' · ')}
                         </div>
                       </td>
 

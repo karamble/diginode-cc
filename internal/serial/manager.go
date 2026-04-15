@@ -549,6 +549,14 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 		lon, _ := evt.Data["lon"].(float64)
 		tempC, _ := evt.Data["temperatureC"].(float64)
 		from := parseNodeNum(evt.NodeID)
+		// AntiHunter STATUS / heartbeat events carry the sensor's CONFIG_NODEID
+		// ("AH34") as NodeID, which parseNodeNum can't resolve. When the frame
+		// arrives as a Meshtastic debug-console echo the real mesh node number
+		// is on the raw line as "from=0x...", so fall back to that — otherwise
+		// the temperature update is silently dropped for local-serial echoes.
+		if from == 0 && m.textParser != nil {
+			from = m.textParser.ExtractMeshFrom(evt.Raw)
+		}
 		if m.onMeshTelemetry != nil && from != 0 && (lat != 0 || lon != 0 || tempC != 0) {
 			m.onMeshTelemetry(from, lat, lon, evt.Data)
 		}

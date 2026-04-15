@@ -216,6 +216,8 @@ func (s *Server) setupRoutes() chi.Router {
 			r.Route("/commands", func(r chi.Router) {
 				r.Get("/", s.handleListCommands)
 				r.Post("/", s.handleCreateCommand)
+				r.Post("/preview", s.handleCommandPreview)
+				r.Post("/send-raw", s.handleSendRawCommand)
 				r.Get("/types", s.handleListCommandTypes)
 				r.Get("/{id}", s.handleGetCommand)
 				r.Delete("/{id}", s.handleDeleteCommand)
