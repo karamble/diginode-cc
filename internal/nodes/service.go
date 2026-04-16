@@ -84,6 +84,124 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 	}
 }
 
+// Load hydrates the in-memory node map from the database. Without this, a CC
+// restart loses every node's last_heard until the mesh radio happens to hear
+// it again — and the radio's NodeInfoLite dump frequently reports last_heard=0
+// for nodes the radio itself hasn't heard this boot, leaving offline nodes
+// stuck at Go's zero time.
+func (s *Service) Load(ctx context.Context) error {
+	rows, err := s.db.Pool.Query(ctx, `
+		SELECT node_num, node_id, long_name, short_name, hw_model, role,
+			latitude, longitude, altitude, battery_level, voltage,
+			channel_utilization, air_util_tx, snr, last_heard, is_online,
+			site_id, origin_site_id, temperature_c, temperature_f,
+			temperature_updated_at, last_message
+		FROM nodes`)
+	if err != nil {
+		return fmt.Errorf("query nodes: %w", err)
+	}
+	defer rows.Close()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	loaded := 0
+	for rows.Next() {
+		var (
+			nodeNum                                 uint32
+			nodeID, longName, shortName, hwModel    *string
+			role, lastMessage                       *string
+			siteID, originSiteID                    *string
+			lat, lon, alt                           *float64
+			battery                                 *int32
+			voltage, chanUtil, airUtilTx, snr       *float64
+			lastHeard, tempUpdatedAt                *time.Time
+			isOnline                                *bool
+			tempC, tempF                            *float64
+		)
+		if err := rows.Scan(&nodeNum, &nodeID, &longName, &shortName, &hwModel, &role,
+			&lat, &lon, &alt, &battery, &voltage, &chanUtil, &airUtilTx, &snr,
+			&lastHeard, &isOnline, &siteID, &originSiteID, &tempC, &tempF,
+			&tempUpdatedAt, &lastMessage); err != nil {
+			slog.Error("nodes.Load: scan failed", "error", err)
+			continue
+		}
+
+		n := &Node{NodeNum: nodeNum}
+		if nodeID != nil {
+			n.NodeID = *nodeID
+		} else {
+			n.NodeID = fmt.Sprintf("!%08x", nodeNum)
+		}
+		if longName != nil {
+			n.LongName = *longName
+		}
+		if shortName != nil {
+			n.ShortName = *shortName
+		}
+		if hwModel != nil {
+			n.HWModel = *hwModel
+		}
+		if role != nil {
+			n.Role = *role
+		}
+		if lat != nil {
+			n.Latitude = *lat
+		}
+		if lon != nil {
+			n.Longitude = *lon
+		}
+		if alt != nil {
+			n.Altitude = *alt
+		}
+		if battery != nil {
+			n.BatteryLevel = uint32(*battery)
+		}
+		if voltage != nil {
+			n.Voltage = float32(*voltage)
+		}
+		if chanUtil != nil {
+			n.ChannelUtilization = float32(*chanUtil)
+		}
+		if airUtilTx != nil {
+			n.AirUtilTx = float32(*airUtilTx)
+		}
+		if snr != nil {
+			n.SNR = float32(*snr)
+		}
+		if lastHeard != nil {
+			n.LastHeard = *lastHeard
+		}
+		if siteID != nil {
+			n.SiteID = *siteID
+		}
+		if originSiteID != nil {
+			n.OriginSiteID = *originSiteID
+		}
+		if tempC != nil {
+			n.TemperatureC = *tempC
+			n.Temperature = *tempC
+		}
+		if tempF != nil {
+			n.TemperatureF = *tempF
+		}
+		if tempUpdatedAt != nil {
+			n.TemperatureUpdatedAt = tempUpdatedAt
+		}
+		if lastMessage != nil {
+			n.LastMessage = *lastMessage
+		}
+		n.IsOnline = isNodeOnline(n)
+		s.nodes[nodeNum] = n
+		loaded++
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate nodes: %w", err)
+	}
+	slog.Info("loaded nodes from database", "count", loaded)
+	return nil
+}
+
 // isNodeOnline returns true if the node was heard within the online timeout window.
 func isNodeOnline(n *Node) bool {
 	if n.IsLocal {
@@ -540,7 +658,7 @@ func (s *Service) persistNode(node *Node) {
 			channel_utilization = COALESCE(EXCLUDED.channel_utilization, nodes.channel_utilization),
 			air_util_tx = COALESCE(EXCLUDED.air_util_tx, nodes.air_util_tx),
 			snr = COALESCE(EXCLUDED.snr, nodes.snr),
-			last_heard = EXCLUDED.last_heard,
+			last_heard = COALESCE(EXCLUDED.last_heard, nodes.last_heard),
 			is_online = EXCLUDED.is_online,
 			updated_at = NOW()`,
 		node.NodeNum, nullStr(node.NodeID), nullStr(node.LongName), nullStr(node.ShortName),
@@ -549,7 +667,7 @@ func (s *Service) persistNode(node *Node) {
 		nullInt(int(node.BatteryLevel)), nullFloat(float64(node.Voltage)),
 		nullFloat(float64(node.ChannelUtilization)), nullFloat(float64(node.AirUtilTx)),
 		nullFloat(float64(node.SNR)),
-		node.LastHeard, node.IsOnline,
+		nullTime(node.LastHeard), node.IsOnline,
 	)
 	if err != nil {
 		slog.Error("failed to persist node", "nodeNum", node.NodeNum, "error", err)
@@ -594,4 +712,11 @@ func nullInt(i int) interface{} {
 		return nil
 	}
 	return i
+}
+
+func nullTime(t time.Time) interface{} {
+	if t.IsZero() {
+		return nil
+	}
+	return t
 }

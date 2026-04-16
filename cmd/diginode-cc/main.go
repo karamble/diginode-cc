@@ -99,6 +99,11 @@ func main() {
 	usersSvc := users.NewService(db, cfg.InviteExpiryHours)
 	sitesSvc := sites.NewService(db)
 	nodesSvc := nodes.NewService(db, hub)
+	loadCtx, loadCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := nodesSvc.Load(loadCtx); err != nil {
+		slog.Warn("failed to load persisted nodes", "error", err)
+	}
+	loadCancel()
 	dronesSvc := drones.NewService(db, hub)
 	dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)
 	inventorySvc := inventory.NewService(db, hub)

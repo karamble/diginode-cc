@@ -39,9 +39,14 @@ interface NodeRow {
 }
 
 // timeAgo returns a compact relative string like "4m ago" / "2h ago".
+// Treat missing, unparseable, or pre-2001 timestamps as unknown — the backend
+// may emit Go's zero time ("0001-01-01T00:00:00Z") for nodes the radio knows
+// about but never heard in this session.
 function timeAgo(iso?: string): string {
   if (!iso) return '-'
-  const diff = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
+  const t = new Date(iso).getTime()
+  if (!isFinite(t) || t < 978307200000) return '-' // before 2001-01-01
+  const diff = Math.max(0, Math.floor((Date.now() - t) / 1000))
   if (diff < 60) return `${diff}s ago`
   if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
   if (diff < 86400) return `${Math.floor(diff / 3600)}h ago`
