@@ -48,6 +48,7 @@ function nodeName(n: NodeRow): string {
 export default function ChatPage() {
   const queryClient = useQueryClient()
   const [message, setMessage] = useState('')
+  const [channelsOpen, setChannelsOpen] = useState(false)
   const messagesEndRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
@@ -124,12 +125,14 @@ export default function ChatPage() {
 
   const handleSelectBroadcast = () => {
     setActiveChat({ mode: 'broadcast' })
+    setChannelsOpen(false)
     queryClient.invalidateQueries({ queryKey: ['chatMessages'] })
   }
 
   const handleSelectNode = (nodeNum: number) => {
     setActiveChat({ mode: 'dm', peerNodeNum: nodeNum })
     clearUnread(nodeNum)
+    setChannelsOpen(false)
     queryClient.invalidateQueries({ queryKey: ['chatMessages'] })
   }
 
@@ -152,26 +155,39 @@ export default function ChatPage() {
     : `Direct message to ${peerNode ? nodeName(peerNode) : formatNodeId(activeChat.peerNodeNum)}`
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full relative">
       {/* Message area */}
       <div className="flex-1 flex flex-col min-w-0">
         {/* Terminal header */}
         <div className="px-4 py-3 border-b border-blue-500/20 bg-[#0B1120] flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <span className="text-blue-500 font-mono text-sm font-semibold">{headerTitle}</span>
-            <span className="text-blue-500/40 font-mono text-xs">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-blue-500 font-mono text-sm font-semibold truncate">{headerTitle}</span>
+            <span className="text-blue-500/40 font-mono text-xs flex-shrink-0">
               [{messages.length} msg{messages.length !== 1 ? 's' : ''}]
             </span>
           </div>
-          <button
-            onClick={() => {
-              if (messages.length > 0 && confirm('Clear all chat messages?')) clearMessages.mutate()
-            }}
-            disabled={messages.length === 0}
-            className="px-2 py-1 text-[10px] font-mono rounded bg-blue-500/10 text-blue-500/60 hover:bg-blue-500/20 hover:text-blue-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-blue-500/20"
-          >
-            CLEAR
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => {
+                if (messages.length > 0 && confirm('Clear all chat messages?')) clearMessages.mutate()
+              }}
+              disabled={messages.length === 0}
+              className="px-2 py-1 text-[10px] font-mono rounded bg-blue-500/10 text-blue-500/60 hover:bg-blue-500/20 hover:text-blue-400 disabled:opacity-30 disabled:cursor-not-allowed transition-colors border border-blue-500/20"
+            >
+              CLEAR
+            </button>
+            {/* Mobile-only Channels toggle; right sidebar is hidden <md and shown as drawer */}
+            <button
+              onClick={() => setChannelsOpen(true)}
+              className="md:hidden px-2 py-1 text-[10px] font-mono rounded bg-blue-500/10 text-blue-500/80 hover:bg-blue-500/20 hover:text-blue-300 transition-colors border border-blue-500/30 flex items-center gap-1"
+              aria-label="Open channels"
+            >
+              <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+              CH
+            </button>
+          </div>
         </div>
 
         {/* Messages area */}
@@ -273,10 +289,35 @@ export default function ChatPage() {
         </form>
       </div>
 
-      {/* Right sidebar — node list */}
-      <div className="w-48 flex-shrink-0 border-l border-blue-500/20 bg-[#0B1120] flex flex-col">
-        <div className="px-3 py-3 border-b border-blue-500/20">
+      {/* Mobile drawer backdrop — tap outside to close */}
+      {channelsOpen && (
+        <div
+          onClick={() => setChannelsOpen(false)}
+          className="md:hidden fixed inset-0 z-30 bg-black/60"
+          aria-hidden="true"
+        />
+      )}
+
+      {/* Right sidebar — node list.
+          Desktop: static flex column. Mobile: fixed drawer sliding in from the right,
+          hidden by default, toggled via the CH button in the header. */}
+      <div
+        className={`flex-shrink-0 border-l border-blue-500/20 bg-[#0B1120] flex flex-col
+          md:static md:w-48 md:translate-x-0
+          fixed inset-y-0 right-0 z-40 w-64 transition-transform duration-200 ease-out
+          ${channelsOpen ? 'translate-x-0' : 'translate-x-full md:translate-x-0'}`}
+      >
+        <div className="px-3 py-3 border-b border-blue-500/20 flex items-center justify-between">
           <span className="text-blue-500/60 font-mono text-[10px] uppercase tracking-widest">Channels</span>
+          <button
+            onClick={() => setChannelsOpen(false)}
+            className="md:hidden text-blue-500/60 hover:text-blue-400 p-1"
+            aria-label="Close channels"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
         </div>
 
         <div className="flex-1 overflow-y-auto">
