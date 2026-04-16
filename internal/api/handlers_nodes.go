@@ -37,8 +37,8 @@ type nodeResponse struct {
 	TelemetryUpdatedAt   *time.Time `json:"telemetryUpdatedAt,omitempty"`
 	SNR                  float32    `json:"snr,omitempty"`
 	RSSI                 int32      `json:"rssi,omitempty"`
-	Ts                   time.Time  `json:"ts"`
-	LastHeard            time.Time  `json:"lastHeard"`
+	Ts                   *time.Time `json:"ts,omitempty"`
+	LastHeard            *time.Time `json:"lastHeard,omitempty"`
 	LastSeen             *time.Time `json:"lastSeen,omitempty"`
 	IsOnline             bool       `json:"isOnline"`
 	IsLocal              bool       `json:"isLocal,omitempty"`
@@ -55,6 +55,17 @@ type nodeResponse struct {
 // mapNodeToResponse converts an internal Node to the CC PRO-compatible
 // response format expected by gotailme.
 func mapNodeToResponse(n *nodes.Node) nodeResponse {
+	// Nodes learned only from the radio's NodeInfoLite dump may have no valid
+	// LastHeard (radio DB reported 0). Emitting Go's zero time on the wire
+	// turns into "739721d ago" in the UI, so omit the timestamp fields in
+	// that case and let the client render "—".
+	var ts, lastHeard, lastSeen *time.Time
+	if !n.LastHeard.IsZero() {
+		lh := n.LastHeard
+		ts = &lh
+		lastHeard = &lh
+		lastSeen = &lh
+	}
 	return nodeResponse{
 		ID:                   n.NodeID, // CC PRO uses the hex node ID string
 		NodeNum:              n.NodeNum,
@@ -79,9 +90,9 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		TelemetryUpdatedAt:   n.TelemetryUpdatedAt,
 		SNR:                  n.SNR,
 		RSSI:                 n.RSSI,
-		Ts:                   n.LastHeard,
-		LastHeard:            n.LastHeard,
-		LastSeen:             &n.LastHeard,
+		Ts:                   ts,
+		LastHeard:            lastHeard,
+		LastSeen:             lastSeen,
 		IsOnline:             n.IsOnline,
 		IsLocal:              n.IsLocal,
 		SiteID:               n.SiteID,
