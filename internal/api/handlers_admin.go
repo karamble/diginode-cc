@@ -1,10 +1,31 @@
 package api
 
 import (
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"github.com/karamble/diginode-cc/internal/serial"
 )
+
+// resetHeltecNodedb fires a nodedb-reset admin command to the local Heltec best-effort.
+// Used by clear-operational and factory-reset to wipe the radio's on-device node table
+// so the mesh node list doesn't immediately repopulate from the radio's own cache.
+// Failures (serial not connected, local node num unknown) are logged but non-fatal —
+// a wipe that half-succeeds is still better than one that refuses because the radio is offline.
+func (s *Server) resetHeltecNodedb() {
+	nodeNum := s.svc.Nodes.GetLocalNodeNum()
+	if nodeNum == 0 {
+		slog.Warn("skipping Heltec nodedb reset: local node number unknown")
+		return
+	}
+	if err := s.serialMgr.SendToRadio(serial.BuildAdminNodedbReset(nodeNum)); err != nil {
+		slog.Warn("Heltec nodedb reset send failed", "error", err)
+		return
+	}
+	slog.Info("Heltec nodedb reset sent", "nodeNum", nodeNum)
+}
 
 // handleDatabaseStats returns row counts and cache sizes for the Data Management panel.
 func (s *Server) handleDatabaseStats(w http.ResponseWriter, r *http.Request) {
@@ -80,16 +101,24 @@ func (s *Server) handleClearDetectionData(w http.ResponseWriter, r *http.Request
 }
 
 // handleClearOperationalData wipes all operational data: detection data +
-// chat, commands, alerts, audit log. Keeps users, sites, config, rules, geofences.
+// chat, commands, alerts, audit log, and the mesh node list. Keeps users,
+// sites, config, rules, geofences. Also fires a nodedb-reset admin command
+// to the Heltec so the radio's on-device cache doesn't immediately replay
+// the old nodes back into our table.
 func (s *Server) handleClearOperationalData(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	// Detection data
+	// Reset the Heltec first so any NodeInfo traffic it replays after our
+	// DELETE goes into a freshly wiped on-device table.
+	s.resetHeltecNodedb()
+
+	// In-memory + table clears via services (these also wipe caches)
 	s.svc.Drones.ClearAll(ctx)
 	s.svc.Targets.ClearAll(ctx)
 	s.svc.Inventory.ClearAll(ctx)
+	s.svc.Nodes.ClearAll(ctx)
 
-	// History tables
+	// History tables that have no service-level clear method
 	tables := []string{
 		"drone_detections", "target_positions", "node_positions",
 		"chat_messages", "commands", "alert_events", "audit_log",
@@ -152,6 +181,10 @@ func (s *Server) handleFactoryReset(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Wipe the Heltec's on-device node database before clearing our tables.
+	// Best-effort: a factory reset proceeds even if the radio is unreachable.
+	s.resetHeltecNodedb()
+
 	// Order matters: delete dependent tables first
 	tables := []string{
 		"drone_detections", "target_positions", "node_positions",
@@ -178,10 +211,11 @@ func (s *Server) handleFactoryReset(w http.ResponseWriter, r *http.Request) {
 			'Admin', 'ADMIN'
 		WHERE NOT EXISTS (SELECT 1 FROM users)`)
 
-	// Clear in-memory caches
+	// Clear in-memory caches (DELETEs above already emptied their tables)
 	s.svc.Drones.ClearAll(ctx)
 	s.svc.Targets.ClearAll(ctx)
 	s.svc.Inventory.ClearAll(ctx)
+	s.svc.Nodes.ClearAll(ctx)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "factory reset complete, default admin restored"})
 }
