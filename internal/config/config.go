@@ -170,7 +170,7 @@ func Load() (*Config, error) {
 		SMTPFrom:     envOrDefault("SMTP_FROM", ""),
 
 		// Tiles
-		JawgAccessToken: envOrDefault("JAWG_ACCESS_TOKEN", ""),
+		JawgAccessToken: envOrDefault("JAWG_ACCESS_TOKEN", "c1nOIqryTf4jWClKtjMV4vPsVYh3CQ0JI2uIAVHe7kWHIwwSB4fGzljPrAz5OOTF"),
 
 		// Updates
 		AutoUpdateBranch: envOrDefault("AUTO_UPDATE_BRANCH", "master"),
