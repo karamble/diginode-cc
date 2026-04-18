@@ -14,7 +14,16 @@ const categories: Record<string, string[]> = {
   retention: ['nodePosRetentionDays', 'commandRetentionDays', 'auditRetentionDays'],
   auth: ['invitationExpiryHours', 'passwordResetExpiryHours'],
   rateLimit: ['perNodeCmdRate', 'globalCmdRate'],
+  meshBroadcast: ['gpsBroadcastEnabled', 'statusBroadcastEnabled', 'statusBroadcastIntervalSecs'],
 }
+
+// Keys that should render as an instant toggle switch instead of the generic
+// text input. Flipping the switch writes immediately (no Save button). The
+// backend fires a hardware side-effect when gpsBroadcastEnabled changes.
+const toggleKeys = new Set<string>(['gpsBroadcastEnabled', 'statusBroadcastEnabled'])
+
+// Keys that render as a clamped number input with Save/Cancel.
+const intervalKeys = new Set<string>(['statusBroadcastIntervalSecs'])
 
 function getCategoryForKey(key: string): string {
   for (const [cat, keys] of Object.entries(categories)) {
@@ -31,6 +40,7 @@ const categoryLabels: Record<string, string> = {
   retention: 'Data Retention',
   auth: 'Authentication',
   rateLimit: 'Command Rate Limiting',
+  meshBroadcast: 'Mesh Broadcast',
   other: 'Other',
 }
 
@@ -42,6 +52,7 @@ const categoryDescriptions: Record<string, string> = {
   retention: 'How long to keep node positions, commands, and audit logs',
   auth: 'Invitation and password reset token expiry periods',
   rateLimit: 'Per-node and global command rate limits',
+  meshBroadcast: 'Periodic STATUS heartbeat over LoRa mesh + GPS visibility (mirrored with gotailme position toggle)',
   other: 'Additional configuration settings',
 }
 
@@ -53,10 +64,11 @@ const categoryIcons: Record<string, string> = {
   retention: 'R',
   auth: 'A',
   rateLimit: 'L',
+  meshBroadcast: 'B',
   other: 'O',
 }
 
-const categoryOrder = ['system', 'serial', 'detection', 'map', 'retention', 'auth', 'rateLimit', 'other']
+const categoryOrder = ['system', 'serial', 'detection', 'map', 'retention', 'auth', 'rateLimit', 'meshBroadcast', 'other']
 
 export default function ConfigPage() {
   const queryClient = useQueryClient()
@@ -198,7 +210,66 @@ export default function ConfigPage() {
                             <span className="text-sm font-mono text-dark-300">{key}</span>
                           </div>
                           <div className="flex items-center gap-2 flex-shrink-0">
-                            {editingKey === key ? (
+                            {toggleKeys.has(key) ? (
+                              <button
+                                role="switch"
+                                aria-checked={Boolean(value)}
+                                disabled={updateMutation.isPending}
+                                onClick={() => updateMutation.mutate({ key, value: !value })}
+                                className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors disabled:opacity-50 ${
+                                  value ? 'bg-primary-600' : 'bg-dark-700'
+                                }`}
+                              >
+                                <span
+                                  className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                    value ? 'translate-x-6' : 'translate-x-1'
+                                  }`}
+                                />
+                              </button>
+                            ) : intervalKeys.has(key) ? (
+                              editingKey === key ? (
+                                <>
+                                  <input
+                                    type="number"
+                                    min={60}
+                                    max={3600}
+                                    step={60}
+                                    value={editValue}
+                                    onChange={(e) => setEditValue(e.target.value)}
+                                    onKeyDown={(e) => {
+                                      if (e.key === 'Enter') saveEdit(key)
+                                      if (e.key === 'Escape') cancelEdit()
+                                    }}
+                                    className="w-32 px-2 py-1 bg-dark-800 border border-primary-500 rounded text-dark-100 text-sm font-mono focus:outline-none"
+                                    autoFocus
+                                  />
+                                  <span className="text-xs text-dark-500">sec (60-3600)</span>
+                                  <button
+                                    onClick={() => saveEdit(key)}
+                                    disabled={updateMutation.isPending}
+                                    className="px-3 py-1 bg-green-600 hover:bg-green-700 disabled:opacity-50 text-white text-xs rounded transition-colors"
+                                  >
+                                    {updateMutation.isPending ? '...' : 'Save'}
+                                  </button>
+                                  <button
+                                    onClick={cancelEdit}
+                                    className="px-3 py-1 bg-dark-700 hover:bg-dark-600 text-dark-300 text-xs rounded transition-colors"
+                                  >
+                                    Cancel
+                                  </button>
+                                </>
+                              ) : (
+                                <>
+                                  <span className="text-sm font-mono text-amber-400">{formatValue(value)}s</span>
+                                  <button
+                                    onClick={() => startEdit(key, value)}
+                                    className="px-3 py-1 bg-dark-700 hover:bg-dark-600 text-dark-300 text-xs rounded transition-colors"
+                                  >
+                                    Edit
+                                  </button>
+                                </>
+                              )
+                            ) : editingKey === key ? (
                               <>
                                 <input
                                   type="text"

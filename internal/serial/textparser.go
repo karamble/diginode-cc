@@ -75,10 +75,15 @@ func NewTextParser() *TextParser {
 func (p *TextParser) initPatterns() {
 	p.patterns = []patternEntry{
 		// STATUS line: "nodeId: STATUS: Mode:SCAN Scan:1..14 Hits:42 Temp:38c/100F Up:01:23:45 GPS:12.34,56.78"
+		//
+		// Optional trailing Batt: field is emitted by diginode-cc's own STATUS
+		// broadcaster (C2 node, has INA219 wired to its Heltec) — the
+		// AntiHunter sensor firmware has no battery hardware and never emits
+		// this field. The regex makes it optional so both variants parse.
 		{
 			name: "status",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+)?:?\s*STATUS:\s*Mode:(?P<mode>\S+)\s+Scan:(?P<scan>\S+)\s+Hits:(?P<hits>\d+)\s+(?:Targets:(?P<targets>\d+)\s+)?Temp:(?P<tempC>-?\d+(?:\.\d+)?)[cC](?:/(?P<tempF>-?\d+(?:\.\d+)?)[Ff])?\s+Up:(?P<up>[0-9:]+)(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?(?:\s+HDOP[:=](?P<hdop>-?\d+(?:\.\d+)?))?`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+)?:?\s*STATUS:\s*Mode:(?P<mode>\S+)\s+Scan:(?P<scan>\S+)\s+Hits:(?P<hits>\d+)\s+(?:Targets:(?P<targets>\d+)\s+)?Temp:(?P<tempC>-?\d+(?:\.\d+)?)[cC](?:/(?P<tempF>-?\d+(?:\.\d+)?)[Ff])?\s+Up:(?P<up>[0-9:]+)(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?(?:\s+HDOP[:=](?P<hdop>-?\d+(?:\.\d+)?))?(?:\s+Batt[:=](?P<battery>\d+)%?)?`),
 			handler: p.handleStatus,
 		},
 		// DRONE line: "nodeId: DRONE: MAC:AA:BB:CC:DD:EE:FF ID:drone1 R-75 GPS:12.34,56.78 ALT:100 SPD:20 OP:12.35,56.79"
@@ -595,6 +600,11 @@ func (p *TextParser) handleStatus(match []string, names []string, raw string) []
 	if v := g["hdop"]; v != "" {
 		data["hdop"] = parseOptFloat(v)
 	}
+	if v := g["battery"]; v != "" {
+		// Stored as float64 for consistency with other parseOptFloat fields —
+		// HandleAntihunterHeartbeat in nodes/service.go asserts .(float64).
+		data["battery"] = parseOptFloat(v)
+	}
 
 	// AntiHunter firmware replies to a STATUS command with a plain "STATUS:"
 	// frame rather than a STATUS_ACK, so without a synthetic ACK a pending
@@ -629,6 +639,9 @@ func (p *TextParser) handleStatus(match []string, names []string, raw string) []
 	}
 	if v, ok := data["lon"]; ok {
 		telemetryData["lon"] = v
+	}
+	if v, ok := data["battery"]; ok {
+		telemetryData["battery"] = v
 	}
 
 	// A STATUS frame is a query response, not an alert — it belongs in the

@@ -493,6 +493,21 @@ func (s *Service) HandleAntihunterHeartbeat(from uint32, lat, lon float64, data 
 		node.TemperatureUpdatedAt = &now
 		changed = true
 	}
+	// Battery rides in STATUS frames emitted by a peer C2 (diginode-cc) —
+	// AntiHunter sensors never provide it. Only update on a non-zero reading
+	// so a sensor's STATUS (without Batt) doesn't clobber a previously known
+	// percentage from its own TELEMETRY_APP broadcasts.
+	if v, ok := data["battery"].(float64); ok && v > 0 {
+		pct := uint32(v)
+		if pct > 100 {
+			pct = 100
+		}
+		if node.BatteryLevel != pct {
+			node.BatteryLevel = pct
+			node.TelemetryUpdatedAt = &now
+			changed = true
+		}
+	}
 
 	node.LastHeard = now
 	node.IsOnline = true

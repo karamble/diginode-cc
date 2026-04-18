@@ -32,6 +32,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/ratelimit"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
+	"github.com/karamble/diginode-cc/internal/statusbroadcast"
 	"github.com/karamble/diginode-cc/internal/targets"
 	"github.com/karamble/diginode-cc/internal/tiles"
 	"github.com/karamble/diginode-cc/internal/updates"
@@ -67,6 +68,7 @@ type Services struct {
 	MQTT        *mqtt.Service
 	Updates     *updates.Service
 	Database    *database.DB
+	StatusBroadcast *statusbroadcast.Service
 }
 
 // DB returns the database handle for direct queries (admin operations).
@@ -366,6 +368,13 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/position-config", s.handleSendSerialPositionConfig)
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/nodedb-reset", s.handleSendSerialNodedbReset)
+				// GPS broadcast toggle — writes gpsBroadcastEnabled app_config
+				// and pushes the matching gps_mode to the Heltec. Mirror point
+				// for gotailme's position-broadcast toggle.
+				r.Post("/gps-broadcast", s.handleGpsBroadcastToggle)
+				// Fire an immediate STATUS mesh broadcast (for UI "Test now" button
+				// and post-deploy verification without waiting for the next tick).
+				r.Post("/status-broadcast/trigger", s.handleStatusBroadcastTrigger)
 				r.Post("/wake", s.handleWakeDevice)
 				r.Get("/config", s.handleGetRadioConfig)
 				r.Post("/simulate", s.handleSerialSimulate)

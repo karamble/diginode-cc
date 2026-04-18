@@ -9,6 +9,55 @@ import (
 	"github.com/karamble/diginode-cc/internal/serial"
 )
 
+// handleGpsBroadcastToggle is a convenience wrapper around PUT /config/gpsBroadcastEnabled.
+// It accepts {"enabled": bool} and returns {"enabled": bool, "applied": bool} — "applied"
+// is true when the Heltec gps_mode push succeeded. Used by gotailme's connector.
+func (s *Server) handleGpsBroadcastToggle(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := readJSON(r, &body); err != nil || body.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "request must include {\"enabled\": bool}")
+		return
+	}
+	if err := s.svc.AppCfg.Set(r.Context(), "gpsBroadcastEnabled", *body.Enabled); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to persist gpsBroadcastEnabled")
+		return
+	}
+	// Run the hardware push manually (same path as the generic PUT handler).
+	applied := true
+	if err := s.applyGpsBroadcast(r.Context(), jsonBool(*body.Enabled)); err != nil {
+		slog.Warn("gps-broadcast hardware push failed", "error", err)
+		applied = false
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"enabled": *body.Enabled,
+		"applied": applied,
+	})
+}
+
+// handleStatusBroadcastTrigger fires an immediate STATUS broadcast. Useful
+// for verifying the feature after a toggle change without waiting for the
+// next tick. Returns {"triggered": true/false} — false if a trigger was
+// already queued.
+func (s *Server) handleStatusBroadcastTrigger(w http.ResponseWriter, r *http.Request) {
+	if s.svc.StatusBroadcast == nil {
+		writeError(w, http.StatusServiceUnavailable, "status broadcaster not running")
+		return
+	}
+	ok := s.svc.StatusBroadcast.Trigger()
+	writeJSON(w, http.StatusOK, map[string]bool{"triggered": ok})
+}
+
+// jsonBool returns a JSON-encoded bool as json.RawMessage for side-effect
+// handlers that expect their value pre-parsed from the PUT body.
+func jsonBool(b bool) []byte {
+	if b {
+		return []byte("true")
+	}
+	return []byte("false")
+}
+
 // resetHeltecNodedb fires a nodedb-reset admin command to the local Heltec best-effort.
 // Used by clear-operational and factory-reset to wipe the radio's on-device node table
 // so the mesh node list doesn't immediately repopulate from the radio's own cache.
