@@ -363,6 +363,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/device-metrics", s.handleSendSerialDeviceMetrics)
 				r.Post("/display-config", s.handleSendSerialDisplayConfig)
 				r.Post("/bluetooth-config", s.handleSendSerialBluetoothConfig)
+				r.Post("/position-config", s.handleSendSerialPositionConfig)
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/nodedb-reset", s.handleSendSerialNodedbReset)
 				r.Post("/wake", s.handleWakeDevice)

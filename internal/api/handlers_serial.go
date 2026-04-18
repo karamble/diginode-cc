@@ -439,6 +439,34 @@ func (s *Server) handleSendSerialBluetoothConfig(w http.ResponseWriter, r *http.
 	writeJSON(w, http.StatusOK, map[string]string{"status": "bluetooth config sent, reboot in 5s"})
 }
 
+func (s *Server) handleSendSerialPositionConfig(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		GpsMode uint32 `json:"gpsMode"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	// 0=DISABLED, 1=ENABLED, 2=NOT_PRESENT (per Meshtastic Config.PositionConfig.GpsMode)
+	if req.GpsMode > 2 {
+		writeError(w, http.StatusBadRequest, "gpsMode must be 0 (DISABLED), 1 (ENABLED), or 2 (NOT_PRESENT)")
+		return
+	}
+
+	nodeNum := s.localNodeNum(w)
+	if nodeNum == 0 {
+		return
+	}
+
+	data := serial.BuildAdminPositionConfig(nodeNum, req.GpsMode)
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]string{"status": "position config sent"})
+}
+
 // handleGetRadioConfig returns the stored Meshtastic radio config sections.
 func (s *Server) handleGetRadioConfig(w http.ResponseWriter, r *http.Request) {
 	configs := s.serialMgr.GetRadioConfig()

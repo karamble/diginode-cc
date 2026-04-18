@@ -220,6 +220,24 @@ func BuildAdminBluetoothConfig(nodeNum uint32, enabled bool, mode uint32, fixedP
 	return buildToRadio(mp)
 }
 
+// BuildAdminPositionConfig builds a ToRadio containing an admin command to set the GPS mode.
+//
+//	AdminMessage: field 34 = set_config (Config, length-delimited)
+//	Config: field 2 = position (PositionConfig, length-delimited)
+//	PositionConfig: field 13 = gps_mode (enum/varint; 0=DISABLED, 1=ENABLED, 2=NOT_PRESENT)
+//
+// gotailme uses this to flip between NOT_PRESENT (Heltec accepts externally fed
+// positions and broadcasts them) and DISABLED (Heltec ignores position service).
+func BuildAdminPositionConfig(nodeNum uint32, gpsMode uint32) []byte {
+	posCfg := encodeVarintField(13, uint64(gpsMode))
+	config := encodeLengthDelimited(2, posCfg)
+	admin := encodeLengthDelimited(34, config)
+
+	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(nodeNum, data)
+	return buildToRadio(mp)
+}
+
 // BuildAdminNodedbReset builds a ToRadio containing an admin command to reset the node database.
 //   AdminMessage: field 100 = nodedb_reset (bool)
 func BuildAdminNodedbReset(nodeNum uint32) []byte {
