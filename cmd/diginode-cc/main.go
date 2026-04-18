@@ -33,6 +33,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/permissions"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
+	"github.com/karamble/diginode-cc/internal/statusbroadcast"
 	"github.com/karamble/diginode-cc/internal/targets"
 	"github.com/karamble/diginode-cc/internal/updates"
 	"github.com/karamble/diginode-cc/internal/users"
@@ -380,6 +381,11 @@ func main() {
 		go adsbSvc.Start(ctx)
 	}
 
+	// Mesh STATUS heartbeat broadcaster. Reads its enable + interval from
+	// AppConfig on each tick so UI edits take effect without a restart.
+	statusSvc := statusbroadcast.NewService(appCfg, nodesSvc, serialMgr, dispatcher)
+	go statusSvc.Start(ctx)
+
 	// Start MQTT service
 	if mqttSvc != nil {
 		if err := mqttSvc.Start(); err != nil {
@@ -413,6 +419,7 @@ func main() {
 		MQTT:        mqttSvc,
 		Updates:     updatesSvc,
 		Database:    db,
+		StatusBroadcast: statusSvc,
 	}
 
 	// HTTP server

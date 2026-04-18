@@ -123,6 +123,14 @@ type Dispatcher struct {
 	localNodeSeen bool   // true after first NodeInfo from wantConfig
 	localNodeNum  uint32 // our local Heltec's mesh node number
 	serialMgr     *serial.Manager
+
+	// On-demand DeviceMetrics request state. Only one outstanding query is
+	// supported at a time; callers that try to overlap will get ErrBusy.
+	// The status broadcaster uses this before each STATUS frame so the
+	// Batt:XX% field reflects current reading (the passive mesh telemetry
+	// cadence is firmware-floored at 30 min).
+	metricsReqMu sync.Mutex
+	metricsReqCh chan *serial.DeviceMetrics
 }
 
 // NodeHandler processes node info and telemetry updates.
@@ -173,6 +181,70 @@ func NewDispatcher(hub *ws.Hub) *Dispatcher {
 
 // SetSerialManager sets the serial manager for config storage.
 func (d *Dispatcher) SetSerialManager(m *serial.Manager) { d.serialMgr = m }
+
+// LocalNodeNum returns the local Heltec's mesh node number, or 0 if not
+// yet known (first NodeInfo from the wantConfig dump hasn't arrived).
+func (d *Dispatcher) LocalNodeNum() uint32 { return d.localNodeNum }
+
+// RequestDeviceMetrics sends a TELEMETRY_APP packet with want_response=true
+// to the local Heltec and waits for its reply. Returns the fresh DeviceMetrics
+// or an error if the serial link is down, no local node is known yet, a
+// previous request is still in flight, or the context expires first.
+//
+// Only one request may be in flight at a time — callers should treat this
+// as a best-effort freshness bump, not a hard synchronization primitive.
+func (d *Dispatcher) RequestDeviceMetrics(ctx context.Context) (*serial.DeviceMetrics, error) {
+	if d.serialMgr == nil {
+		return nil, fmt.Errorf("serial manager not attached")
+	}
+	nodeNum := d.localNodeNum
+	if nodeNum == 0 {
+		return nil, fmt.Errorf("local node number not yet known")
+	}
+
+	d.metricsReqMu.Lock()
+	if d.metricsReqCh != nil {
+		d.metricsReqMu.Unlock()
+		return nil, fmt.Errorf("device metrics request already in flight")
+	}
+	ch := make(chan *serial.DeviceMetrics, 1)
+	d.metricsReqCh = ch
+	d.metricsReqMu.Unlock()
+
+	defer func() {
+		d.metricsReqMu.Lock()
+		d.metricsReqCh = nil
+		d.metricsReqMu.Unlock()
+	}()
+
+	if err := d.serialMgr.SendToRadio(serial.BuildTelemetryRequest(nodeNum)); err != nil {
+		return nil, fmt.Errorf("send telemetry request: %w", err)
+	}
+
+	select {
+	case dm := <-ch:
+		return dm, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+// deliverMetricsResponse is invoked from handleMeshPacket when a TELEMETRY_APP
+// packet arrives from the local Heltec. If a RequestDeviceMetrics call is
+// pending, it hands the metrics over via the one-slot channel. Never blocks.
+func (d *Dispatcher) deliverMetricsResponse(dm *serial.DeviceMetrics) {
+	d.metricsReqMu.Lock()
+	ch := d.metricsReqCh
+	d.metricsReqMu.Unlock()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- dm:
+	default:
+		// Channel already has a value from an earlier delivery — ignore.
+	}
+}
 
 // SetNodeHandler sets the node handler.
 func (d *Dispatcher) SetNodeHandler(h NodeHandler) { d.nodeHandler = h }
@@ -373,13 +445,19 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		}
 
 	case PortNumTelemetry:
-		if d.nodeHandler != nil && len(mp.Payload) > 0 {
+		if len(mp.Payload) > 0 {
 			dm, em := decodeTelemetryPayload(mp.Payload)
-			if dm != nil {
+			if dm != nil && d.nodeHandler != nil {
 				d.nodeHandler.HandleTelemetry(mp.From, dm)
 			}
-			if em != nil {
+			if em != nil && d.nodeHandler != nil {
 				d.nodeHandler.HandleEnvironment(mp.From, em)
+			}
+			// Deliver to any pending RequestDeviceMetrics call if this came
+			// from our local Heltec. Non-blocking: if nobody's waiting the
+			// telemetry already got applied above.
+			if dm != nil && mp.From == d.localNodeNum {
+				d.deliverMetricsResponse(dm)
 			}
 		}
 

@@ -78,6 +78,17 @@ func buildDataMessage(portNum uint32, payload []byte) []byte {
 	return out
 }
 
+// buildDataMessageWithResponse is like buildDataMessage but also sets
+// Data.want_response (field 3) — the receiving module is expected to
+// allocate a reply. Used for on-demand telemetry queries.
+func buildDataMessageWithResponse(portNum uint32, payload []byte) []byte {
+	var out []byte
+	out = append(out, encodeVarintField(1, uint64(portNum))...)
+	out = append(out, encodeLengthDelimited(2, payload)...)
+	out = append(out, encodeVarintField(3, 1)...) // want_response = true
+	return out
+}
+
 // randomPacketID generates a random 32-bit packet ID.
 // The Meshtastic firmware requires a non-zero ID to transmit packets.
 func randomPacketID() uint32 {
@@ -276,6 +287,23 @@ func BuildAdminSetFixedPosition(nodeNum uint32, latI, lonI int32, altitude int32
 func BuildAdminReboot(nodeNum uint32, seconds uint32) []byte {
 	admin := encodeVarintField(97, uint64(seconds))
 	data := buildDataMessage(PortNumAdmin, admin)
+	mp := buildMeshPacket(nodeNum, data)
+	return buildToRadio(mp)
+}
+
+// BuildTelemetryRequest builds a ToRadio requesting fresh DeviceMetrics from
+// the target node. Meshtastic's TelemetryModule replies to any TELEMETRY_APP
+// packet with want_response=true by sending its current Telemetry (including
+// battery_level + voltage). The reply arrives as a regular incoming
+// TELEMETRY_APP packet on the connected serial link.
+//
+// diginode-cc's status broadcaster uses this before each STATUS broadcast
+// so the Batt:XX% field reflects the current reading rather than the
+// firmware-floored 30-min mesh telemetry cadence.
+//
+//	Data: portnum=TELEMETRY_APP, payload=empty, want_response=true
+func BuildTelemetryRequest(nodeNum uint32) []byte {
+	data := buildDataMessageWithResponse(PortNumTelemetry, nil)
 	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }

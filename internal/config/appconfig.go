@@ -127,6 +127,13 @@ func (ac *AppConfig) EnsureDefaults(ctx context.Context) error {
 		"maxZoom":                  18,
 		"invitationExpiryHours":    48,
 		"passwordResetExpiryHours": 4,
+		// Mesh broadcast (periodic STATUS text frames + GPS visibility).
+		// gpsBroadcastEnabled mirrors into Heltec gps_mode via a config
+		// side-effect hook (see handlers_config.go); gotailme's old
+		// position-broadcast toggle reads this value to stay in sync.
+		"gpsBroadcastEnabled":         true,
+		"statusBroadcastEnabled":      true,
+		"statusBroadcastIntervalSecs": 600, // 10 min; UI-clamped 60..3600
 	}
 
 	for key, val := range defaults {
