@@ -67,6 +67,7 @@ export function targetStatusColor(status: string): string {
 export function nodeColor(nodeType?: string, isOnline = true): string {
   if (!isOnline) return THREAT_COLORS.none
   if (nodeType === 'antihunter') return '#F97316' // orange for AH sensor nodes
+  if (nodeType === 'gatesensor') return '#10B981' // emerald for gate sensors
   return THREAT_COLORS.info // blue for GTM gateway nodes
 }
 
