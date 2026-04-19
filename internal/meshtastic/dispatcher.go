@@ -108,6 +108,17 @@ func isSensorData(text string) bool {
 		(strings.Contains(upper, "TEMP:") && strings.Contains(upper, "GPS:"))
 }
 
+// isGateSensorData returns true if the text matches the gotailme-gatesensor
+// firmware's TEXTMSG output — boot heartbeat "GATE NODE: Online" and RF
+// trigger frames "<SENSOR_NAME>: TRIGGERED" / "<SENSOR_NAME>: CLOSED".
+// Checked before isSensorData() so a gatesensor locks in with its own type
+// even if a future message shape happens to share a substring with AntiHunter.
+func isGateSensorData(text string) bool {
+	upper := strings.ToUpper(text)
+	return strings.HasPrefix(upper, "GATE NODE:") ||
+		strings.HasPrefix(upper, "GATE:")
+}
+
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
 type Dispatcher struct {
 	hub           *ws.Hub
@@ -376,9 +387,12 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		// Other C2 gateways (gotailme) send plain text messages or relay commands.
 		if portNum == PortNumTextMessage && len(mp.Payload) > 0 {
 			text := string(mp.Payload)
-			if isSensorData(text) {
+			switch {
+			case isGateSensorData(text):
+				d.nodeHandler.ClassifyNode(mp.From, "gatesensor")
+			case isSensorData(text):
 				d.nodeHandler.ClassifyNode(mp.From, "antihunter")
-			} else {
+			default:
 				d.nodeHandler.ClassifyNode(mp.From, "gotailme")
 			}
 		} else if portNum == PortNumDetectionSensor {

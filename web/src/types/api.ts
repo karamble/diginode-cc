@@ -69,7 +69,7 @@ export interface MeshNode {
   lastMessage?: string
   temperatureUpdatedAt?: string
   ahShortId?: string
-  nodeType?: string
+  nodeType?: string // "gotailme" | "antihunter" | "gatesensor" | ""
 }
 
 // Alert types
