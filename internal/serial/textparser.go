@@ -188,14 +188,23 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):?\s*Time:(?P<time>[^ ]+)\s+Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleNodeHB,
 		},
+		// Gate sensor CODES response: "nodeId: CODES:150910,999888" or "CODES:NONE".
+		// Must precede the generic ACK pattern so "CODES:" never gets mis-parsed
+		// as an ACK kind. Emits a node-telemetry event with the decoded list plus
+		// a synthetic CODE_LIST_ACK so the CODE_LIST command lifecycle closes.
+		{
+			name: "codes",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*CODES:(?P<codes>.*)$`),
+			handler: p.handleCodes,
+		},
 		// ACK lines: "nodeId: SCAN_ACK:OK" / "nodeId: DRONE_ACK:" etc.
-		// VIBRATION_(ON|OFF)_ACK is included so the new firmware vibration toggle
-		// (commit 1d9477d in karamble/AntiHunter feature/vibration-toggle) closes
-		// the command lifecycle in DigiNode CC.
+		// VIBRATION_(ON|OFF)_ACK was added for the vibration toggle; HB/HITS_RESET/
+		// DEBOUNCE/CODE for the meshtastic-gate-sensor CMD handler.
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF))_ACK):?(?P<status>[A-Z_]*)`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE)_ACK):?(?P<status>[A-Z_]*)`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"
@@ -920,6 +929,53 @@ func (p *TextParser) handleACK(match []string, names []string, raw string) []*Pa
 		},
 		Raw: raw,
 	}}
+}
+
+// handleCodes parses the gate-sensor CODE_LIST response frame:
+//   "nodeId: CODES:150910,999888"   → codes list
+//   "nodeId: CODES:NONE"            → empty list
+// Emits a node-telemetry event carrying the decoded list plus a synthetic
+// CODE_LIST_ACK so the CODE_LIST command lifecycle closes (same pattern as
+// STATUS: frames synthesizing a STATUS_ACK).
+func (p *TextParser) handleCodes(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	csv := strings.TrimSpace(g["codes"])
+
+	codes := []uint32{}
+	if csv != "" && !strings.EqualFold(csv, "NONE") {
+		for _, part := range strings.Split(csv, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			if n, err := strconv.ParseUint(part, 10, 32); err == nil {
+				codes = append(codes, uint32(n))
+			}
+		}
+	}
+
+	ackEvent := &ParsedEvent{
+		Kind:   "command-ack",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"ackType":     "CODE_LIST_ACK",
+			"status":      "OK",
+			"synthesized": true,
+		},
+		Raw: raw,
+	}
+
+	telemetryEvent := &ParsedEvent{
+		Kind:   "gate-codes",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"codes": codes,
+		},
+		Raw: raw,
+	}
+
+	return []*ParsedEvent{telemetryEvent, ackEvent}
 }
 
 func (p *TextParser) handleAnomaly(match []string, names []string, raw string) []*ParsedEvent {

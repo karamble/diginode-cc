@@ -21,6 +21,10 @@ interface CommandDef {
   params: ParamDef[]
   allowForever?: boolean
   singleNode?: boolean
+  // SupportedTypes lists nodeType values that accept the command. "*" means
+  // universal (any node type, safe for broadcast). Missing/empty historically
+  // meant antihunter-only and is treated that way for back-compat.
+  supportedTypes?: string[]
 }
 
 interface CommandRecord {
@@ -77,7 +81,19 @@ function formatAge(dateStr?: string): string {
   return `${Math.floor(min / 60)}h ago`
 }
 
-const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System']
+const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System', 'Gate']
+
+// Returns true if a command is supported by the given targetType.
+// targetType may be null/undefined for @ALL broadcasts — in that case only
+// universal ("*") commands are offered so operators don't accidentally blast
+// AH-specific commands at gatesensor nodes or vice versa.
+function commandFits(cmd: CommandDef, targetType: string | null | undefined): boolean {
+  const types = cmd.supportedTypes || ['antihunter'] // legacy default
+  if (targetType === null || targetType === undefined || targetType === '') {
+    return types.includes('*')
+  }
+  return types.includes('*') || types.includes(targetType)
+}
 
 // ValidationAlert renders backend validation errors as a compact alert box.
 // The Go builder's error messages already include a concrete example
@@ -162,15 +178,44 @@ export default function CommandsPage() {
     },
   })
 
-  // Group commands by category
+  // Resolve the target's sensor type so the command dropdown can be filtered.
+  // For @ALL we pass null, which commandFits() treats as "universal-only".
+  // For a specific node we look it up by matching the target value back to the
+  // entry in the nodes list (mirrors the target-building logic in the dropdown
+  // above: @<ahShortId> for antihunter, @NODE_<shortName|nodeNum> otherwise).
+  const targetNodeType = useMemo<string | null>(() => {
+    if (!target || target === '@ALL') return null
+    for (const n of nodes) {
+      const tv = n.nodeType === 'antihunter' && n.ahShortId
+        ? `@${n.ahShortId}`
+        : `@NODE_${n.shortName || n.nodeNum}`
+      if (tv === target) return n.nodeType || null
+    }
+    return null
+  }, [target, nodes])
+
+  // Filter the command catalog by the target's sensor type, then group.
   const grouped = useMemo(() => {
     const groups: Record<string, CommandDef[]> = {}
     cmdTypes.forEach(c => {
+      if (!commandFits(c, targetNodeType)) return
       if (!groups[c.group]) groups[c.group] = []
       groups[c.group].push(c)
     })
     return groups
-  }, [cmdTypes])
+  }, [cmdTypes, targetNodeType])
+
+  // Clear the selected command when it's no longer in the filtered catalog
+  // (e.g. operator switches target from an antihunter node to a gate sensor).
+  useEffect(() => {
+    if (!selectedCmd) return
+    const def = cmdTypes.find(c => c.name === selectedCmd)
+    if (def && !commandFits(def, targetNodeType)) {
+      setSelectedCmd('')
+      setParamValues({})
+      setForever(false)
+    }
+  }, [targetNodeType, selectedCmd, cmdTypes])
 
   const activeDef = cmdTypes.find(c => c.name === selectedCmd)
 

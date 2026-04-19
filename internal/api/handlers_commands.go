@@ -205,12 +205,13 @@ func (s *Server) handleListCommandTypes(w http.ResponseWriter, r *http.Request) 
 		Placeholder string   `json:"placeholder,omitempty"`
 	}
 	type cmdOut struct {
-		Name         string     `json:"name"`
-		Group        string     `json:"group"`
-		Description  string     `json:"description"`
-		Params       []paramOut `json:"params"`
-		AllowForever bool       `json:"allowForever,omitempty"`
-		SingleNode   bool       `json:"singleNode,omitempty"`
+		Name           string     `json:"name"`
+		Group          string     `json:"group"`
+		Description    string     `json:"description"`
+		Params         []paramOut `json:"params"`
+		AllowForever   bool       `json:"allowForever,omitempty"`
+		SingleNode     bool       `json:"singleNode,omitempty"`
+		SupportedTypes []string   `json:"supportedTypes,omitempty"`
 	}
 
 	var result []cmdOut
@@ -220,11 +221,12 @@ func (s *Server) handleListCommandTypes(w http.ResponseWriter, r *http.Request) 
 				continue
 			}
 			c := cmdOut{
-				Name:         def.Name,
-				Group:        def.Group,
-				Description:  def.Description,
-				AllowForever: def.AllowForever,
-				SingleNode:   def.SingleNode,
+				Name:           def.Name,
+				Group:          def.Group,
+				Description:    def.Description,
+				AllowForever:   def.AllowForever,
+				SingleNode:     def.SingleNode,
+				SupportedTypes: def.SupportedTypes,
 			}
 			for _, p := range def.Params {
 				c.Params = append(c.Params, paramOut{
