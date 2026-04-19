@@ -25,6 +25,7 @@ const (
 	NodeTypeUnknown    NodeType = ""           // Not yet classified
 	NodeTypeGotailme   NodeType = "gotailme"   // C2 gateway (runs DigiNode CC / CC PRO)
 	NodeTypeAntihunter NodeType = "antihunter" // AntiHunter detection sensor node
+	NodeTypeGatesensor NodeType = "gatesensor" // Gate sensor (Arduino Nano → Heltec TEXTMSG bridge)
 )
 
 // Node represents a tracked mesh node in memory.
@@ -296,10 +297,11 @@ func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
 	if !exists {
 		return
 	}
-	// Only upgrade classification, never downgrade
-	// antihunter is more specific than gotailme
-	if node.NodeType == NodeTypeAntihunter {
-		return // already classified as sensor, don't overwrite
+	// Only upgrade classification, never downgrade.
+	// antihunter and gatesensor are more specific than gotailme; once set,
+	// don't let a later generic text-message reclassify them as gotailme.
+	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor {
+		return
 	}
 	if nodeType != "" {
 		node.NodeType = NodeType(nodeType)

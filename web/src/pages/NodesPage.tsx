@@ -6,7 +6,7 @@ import api from '../api/client'
 interface NodeRow {
   id: string
   nodeNum: number
-  nodeType?: string  // "gotailme" | "antihunter" | ""
+  nodeType?: string  // "gotailme" | "antihunter" | "gatesensor" | ""
   name: string
   shortName?: string
   ahShortId?: string
@@ -56,6 +56,7 @@ function timeAgo(iso?: string): string {
 function nodeTypeBadge(nodeType?: string): { label: string; color: string } | null {
   if (nodeType === 'gotailme') return { label: 'GTM', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' }
   if (nodeType === 'antihunter') return { label: 'AH', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
+  if (nodeType === 'gatesensor') return { label: 'GATE', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' }
   return null
 }
 
@@ -347,7 +348,7 @@ export default function NodesPage() {
                                 <div>
                                   <span className="text-dark-500 block">Node Type</span>
                                   <span className="text-dark-300">
-                                    {n.nodeType === 'antihunter' ? 'AntiHunter sensor' : n.nodeType === 'gotailme' ? 'gotailme C2 gateway' : 'unclassified'}
+                                    {n.nodeType === 'antihunter' ? 'AntiHunter sensor' : n.nodeType === 'gatesensor' ? 'Gate sensor' : n.nodeType === 'gotailme' ? 'gotailme C2 gateway' : 'unclassified'}
                                     {n.isLocal && <span className="ml-1 text-dark-500">(local)</span>}
                                   </span>
                                 </div>
