@@ -24,6 +24,13 @@ import (
 // "DRONE: ..." without a node-id prefix doesn't get misread as node "DRONE".
 var ahShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
 
+// sensorTypeFieldRe extracts the "Type:<CATEGORY>" field from a STATUS frame.
+// The field is emitted by gotailme-gatesensor firmware (and will be by future
+// sensor builds) as the extensibility hook — classification is driven purely
+// by this field, not by the frame's instance-name prefix, so a sensor named
+// "GateFront" or "WindowKitchen" classifies as long as it declares its Type.
+var sensorTypeFieldRe = regexp.MustCompile(`(?i)\bType:([A-Za-z][A-Za-z0-9_]+)\b`)
+
 // ahShortIDReservedKeywords are AntiHunter message-type words that could
 // syntactically match the prefix regex but aren't node ids.
 var ahShortIDReservedKeywords = map[string]bool{
@@ -108,15 +115,37 @@ func isSensorData(text string) bool {
 		(strings.Contains(upper, "TEMP:") && strings.Contains(upper, "GPS:"))
 }
 
-// isGateSensorData returns true if the text matches the gotailme-gatesensor
-// firmware's TEXTMSG output — boot heartbeat "GATE NODE: Online" and RF
-// trigger frames "<SENSOR_NAME>: TRIGGERED" / "<SENSOR_NAME>: CLOSED".
-// Checked before isSensorData() so a gatesensor locks in with its own type
-// even if a future message shape happens to share a substring with AntiHunter.
+// knownSensorTypes enumerates Type: values that the gotailme-gatesensor firmware
+// (and future sensor variants on the same PCB family) can self-declare. Only
+// STATUS frames carrying one of these is what DigiNode CC classifies as a
+// gatesensor node — the prefix is deliberately NOT used, so a sensor named
+// anything ("Gate", "GateFront", "MotionHall") still classifies correctly as
+// long as it declares its Type. Event frames (e.g. "Gate: TRIGGERED") without
+// a STATUS envelope do not classify on their own; they rely on the node
+// having already been classified by a prior STATUS broadcast, which the
+// "don't downgrade" guard in nodes.ClassifyNode preserves.
+var knownSensorTypes = map[string]bool{
+	"GATESENSOR": true,
+	"GATE":       true,
+	"DOOR":       true,
+	"WINDOW":     true,
+	"MOTION":     true,
+}
+
+// isGateSensorData returns true if the text is a STATUS frame whose Type: field
+// names a recognised sensor class. Runs before isSensorData() in the classifier
+// switch so a gatesensor-authored STATUS frame locks in as gatesensor rather
+// than antihunter (both share the "STATUS:" keyword, but only ours carries a
+// Type: declaration the AH parser ignores).
 func isGateSensorData(text string) bool {
-	upper := strings.ToUpper(text)
-	return strings.HasPrefix(upper, "GATE NODE:") ||
-		strings.HasPrefix(upper, "GATE:")
+	if !strings.Contains(strings.ToUpper(text), "STATUS:") {
+		return false
+	}
+	m := sensorTypeFieldRe.FindStringSubmatch(text)
+	if m == nil {
+		return false
+	}
+	return knownSensorTypes[strings.ToUpper(m[1])]
 }
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
