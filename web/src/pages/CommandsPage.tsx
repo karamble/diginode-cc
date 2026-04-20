@@ -84,14 +84,14 @@ function formatAge(dateStr?: string): string {
 const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System', 'Gate']
 
 // Returns true if a command is supported by the given targetType.
-// targetType may be null/undefined for @ALL broadcasts — in that case only
-// universal ("*") commands are offered so operators don't accidentally blast
-// AH-specific commands at gatesensor nodes or vice versa.
+// targetType may be null/undefined for @ALL broadcasts — in that case every
+// command is available so operators can broadcast any verb; individual nodes
+// silently drop commands they don't implement.
 function commandFits(cmd: CommandDef, targetType: string | null | undefined): boolean {
-  const types = cmd.supportedTypes || ['antihunter'] // legacy default
   if (targetType === null || targetType === undefined || targetType === '') {
-    return types.includes('*')
+    return true
   }
+  const types = cmd.supportedTypes || ['antihunter'] // legacy default
   return types.includes('*') || types.includes(targetType)
 }
 
