@@ -4,8 +4,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/karamble/diginode-cc/internal/chat"
+	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/serial"
 )
 
@@ -80,6 +82,22 @@ func (s *Server) handleSendChatMessage(w http.ResponseWriter, r *http.Request) {
 	if body.To != "" {
 		toAddr = serial.ParseNodeNum(body.To)
 	}
+
+	// Gatesensor (and any sensor whose Heltec runs Meshtastic SerialModule in
+	// TEXTMSG mode) cannot receive DMs: since fw 2.5 the SerialModule never
+	// emits PKI-encrypted DM payloads to UART, so the bridged Arduino sees
+	// nothing. Reroute as a broadcast addressed by the gatesensor's @<name>
+	// prefix — same pattern AntiHunter uses for @AH<id>.
+	if toAddr != serial.BroadcastAddr {
+		if n := s.svc.Nodes.GetByNodeNum(toAddr); n != nil && n.NodeType == nodes.NodeTypeGatesensor {
+			prefix := "@" + n.ShortName + " "
+			if !strings.HasPrefix(body.Message, "@") {
+				body.Message = prefix + body.Message
+			}
+			toAddr = serial.BroadcastAddr
+		}
+	}
+
 	data := serial.BuildTextMessage(toAddr, body.Message)
 	if err := s.serialMgr.SendToRadio(data); err != nil {
 		slog.Warn("failed to send chat message via serial", "error", err)
