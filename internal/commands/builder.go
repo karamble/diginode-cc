@@ -44,6 +44,7 @@ type BuildOutput struct {
 
 var targetRegex = regexp.MustCompile(`^@(ALL|NODE_[A-Za-z0-9]+|[A-Za-z0-9]{2,6})$`)
 var macRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
+var gateNameRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,15}$`)
 
 // typeUniversal / typeAH / typeGate are SupportedTypes shorthands.
 var (
@@ -163,8 +164,9 @@ var Registry = map[string]*CommandDef{
 	"DEBOUNCE_SET": {Name: "DEBOUNCE_SET", Group: "Gate", Description: "Set RF debounce window (seconds)", SupportedTypes: typeGate, Params: []ParamDef{
 		{Key: "seconds", Label: "Seconds", Type: "number", Required: true, Min: 1, Max: 60},
 	}},
-	"CODE_ADD": {Name: "CODE_ADD", Group: "Gate", Description: "Register a 433 MHz sensor code", SupportedTypes: typeGate, Params: []ParamDef{
+	"CODE_ADD": {Name: "CODE_ADD", Group: "Gate", Description: "Register (or rename) a 433 MHz sensor code", SupportedTypes: typeGate, Params: []ParamDef{
 		{Key: "code", Label: "Code (decimal)", Type: "number", Required: true, Min: 1, Max: 16777215},
+		{Key: "name", Label: "Gate name (optional)", Type: "text", Placeholder: "factorydoor"},
 	}},
 	"CODE_REMOVE": {Name: "CODE_REMOVE", Group: "Gate", Description: "Unregister a 433 MHz sensor code", SupportedTypes: typeGate, Params: []ParamDef{
 		{Key: "code", Label: "Code (decimal)", Type: "number", Required: true, Min: 1, Max: 16777215},
@@ -333,6 +335,14 @@ func validateParam(pd ParamDef, val string) error {
 			matched, _ := regexp.MatchString(`^AH\d{1,3}$`, upper)
 			if !matched {
 				return fmt.Errorf(`node ID must match "AH" + 1–3 digits (e.g. AH07, AH123)`)
+			}
+		}
+		if pd.Key == "name" {
+			// Mirror the gate-sensor firmware's nameValid() in firmware/src/main.cpp:
+			// 1–15 chars of [A-Za-z0-9_-]. The CMD wire format uses ':' and space
+			// as delimiters, so anything else would desync the parser.
+			if !gateNameRegex.MatchString(val) {
+				return fmt.Errorf("gate name must be 1-15 chars of letters, digits, '_' or '-'")
 			}
 		}
 	}

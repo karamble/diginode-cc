@@ -931,26 +931,41 @@ func (p *TextParser) handleACK(match []string, names []string, raw string) []*Pa
 	}}
 }
 
-// handleCodes parses the gate-sensor CODE_LIST response frame:
-//   "nodeId: CODES:150910,999888"   → codes list
-//   "nodeId: CODES:NONE"            → empty list
-// Emits a node-telemetry event carrying the decoded list plus a synthetic
-// CODE_LIST_ACK so the CODE_LIST command lifecycle closes (same pattern as
-// STATUS: frames synthesizing a STATUS_ACK).
+// handleCodes parses the gate-sensor CODE_LIST response frame. Two formats
+// are accepted — the named v2 form (current firmware) and the legacy numeric
+// form (pre-name firmware) — so upgrades are drop-in:
+//   "nodeId: CODES:150910=factorydoor,999888=unnamed"   → named
+//   "nodeId: CODES:150910,999888"                       → legacy (no names)
+//   "nodeId: CODES:NONE"                                → empty list
+// Emits a node-telemetry event carrying both the decoded list and a
+// name-lookup map, plus a synthetic CODE_LIST_ACK so the CODE_LIST command
+// lifecycle closes (same pattern as STATUS: frames synthesizing STATUS_ACK).
 func (p *TextParser) handleCodes(match []string, names []string, raw string) []*ParsedEvent {
 	g := extractGroups(match, names)
 	nodeID := g["id"]
 	csv := strings.TrimSpace(g["codes"])
 
 	codes := []uint32{}
+	nameMap := map[string]string{} // keyed by decimal code string for JSON-friendliness
 	if csv != "" && !strings.EqualFold(csv, "NONE") {
 		for _, part := range strings.Split(csv, ",") {
 			part = strings.TrimSpace(part)
 			if part == "" {
 				continue
 			}
-			if n, err := strconv.ParseUint(part, 10, 32); err == nil {
-				codes = append(codes, uint32(n))
+			codeStr := part
+			name := ""
+			if eq := strings.IndexByte(part, '='); eq >= 0 {
+				codeStr = strings.TrimSpace(part[:eq])
+				name = strings.TrimSpace(part[eq+1:])
+			}
+			n, err := strconv.ParseUint(codeStr, 10, 32)
+			if err != nil {
+				continue
+			}
+			codes = append(codes, uint32(n))
+			if name != "" {
+				nameMap[codeStr] = name
 			}
 		}
 	}
@@ -971,6 +986,7 @@ func (p *TextParser) handleCodes(match []string, names []string, raw string) []*
 		NodeID: nodeID,
 		Data: map[string]interface{}{
 			"codes": codes,
+			"names": nameMap,
 		},
 		Raw: raw,
 	}
