@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -267,6 +268,36 @@ func main() {
 	// to the commands service, which matches by ACK type and flips the
 	// lifecycle to OK / ERROR.
 	serialMgr.SetCommandAckCallback(commandsSvc.HandleStructuredACK)
+
+	// Route every Kind="alert" event (tamper, vibration, setup-mode,
+	// identity, erase, battery-saver state, scan/baseline/drone/deauth
+	// *_DONE summaries) through the alerts service. TriggerDirect persists
+	// to alert_events and broadcasts on the WS hub so the terminal page,
+	// dashboard feed, and email/webhook pipelines all see them.
+	serialMgr.SetAlertCallback(func(category, level, nodeID, raw string, data map[string]interface{}) {
+		sev := alerts.SeverityInfo
+		switch strings.ToUpper(level) {
+		case "CRITICAL":
+			sev = alerts.SeverityCritical
+		case "ALERT":
+			sev = alerts.SeverityAlert
+		case "NOTICE":
+			sev = alerts.SeverityNotice
+		}
+		title := category
+		if nodeID != "" {
+			title = nodeID + ": " + category
+		}
+		enriched := make(map[string]interface{}, len(data)+2)
+		for k, v := range data {
+			enriched[k] = v
+		}
+		if nodeID != "" {
+			enriched["nodeId"] = nodeID
+		}
+		enriched["category"] = category
+		alertsSvc.TriggerDirect(context.Background(), sev, title, raw, enriched)
+	})
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
 	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {

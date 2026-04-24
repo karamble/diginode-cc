@@ -44,6 +44,23 @@ interface CommandRecord {
   ackNode?: string
   resultText?: string
   errorText?: string
+  result?: Record<string, unknown>
+}
+
+function formatResult(r: Record<string, unknown> | undefined): string {
+  if (!r) return ''
+  // Summarize the *_DONE scan-summary blobs into a single readable row —
+  // e.g. result={W:6,B:0,U:6,TX:6,PEND:0,ackType:'SCAN_DONE_ACK',...}
+  // → "W=6 B=0 U=6 TX=6 PEND=0". Skip envelope keys that the textparser
+  // adds when it synthesizes command-acks.
+  const skip = new Set(['ackType', 'status', 'synthesized', 'category', 'nodeId'])
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(r)) {
+    if (skip.has(k)) continue
+    if (v === null || v === undefined) continue
+    parts.push(`${k}=${typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
+  }
+  return parts.join(' ')
 }
 
 interface NodeRow {
@@ -63,6 +80,7 @@ interface NodeRow {
 function statusBadge(status: string) {
   switch (status) {
     case 'OK': case 'ACKED': return 'bg-green-500/20 text-green-400 border-green-500/40'
+    case 'RUNNING': return 'bg-cyan-500/20 text-cyan-400 border-cyan-500/40 animate-pulse'
     case 'SENT': return 'bg-blue-500/20 text-blue-400 border-blue-500/40'
     case 'PENDING': return 'bg-yellow-500/20 text-yellow-400 border-yellow-500/40'
     case 'ERROR': case 'FAILED': return 'bg-red-500/20 text-red-400 border-red-500/40'
@@ -450,14 +468,18 @@ export default function CommandsPage() {
                 <th className="text-left px-4 py-2.5">Line</th>
                 <th className="text-left px-4 py-2.5">Status</th>
                 <th className="text-left px-4 py-2.5">ACK</th>
+                <th className="text-left px-4 py-2.5">Result</th>
                 <th className="text-left px-4 py-2.5">Sent</th>
                 <th className="text-right px-4 py-2.5">Actions</th>
               </tr>
             </thead>
             <tbody>
               {commands.length === 0 ? (
-                <tr><td colSpan={7} className="px-4 py-8 text-center text-dark-500">No commands sent yet</td></tr>
-              ) : commands.map((cmd) => (
+                <tr><td colSpan={8} className="px-4 py-8 text-center text-dark-500">No commands sent yet</td></tr>
+              ) : commands.map((cmd) => {
+                const resultStr = formatResult(cmd.result)
+                const displayResult = cmd.errorText || resultStr || cmd.resultText || ''
+                return (
                 <tr key={cmd.id} className="border-b border-dark-700/30 hover:bg-dark-800/30">
                   <td className="px-4 py-2 text-dark-300 font-mono">{cmd.target || '-'}</td>
                   <td className="px-4 py-2 text-dark-200 font-medium">{cmd.name || cmd.commandType}</td>
@@ -477,6 +499,9 @@ export default function CommandsPage() {
                       </span>
                     ) : '-'}
                   </td>
+                  <td className="px-4 py-2 text-dark-300 font-mono text-[10px] max-w-[260px] truncate" title={displayResult}>
+                    {displayResult || '-'}
+                  </td>
                   <td className="px-4 py-2 text-dark-500">{formatAge(cmd.sentAt || cmd.createdAt)}</td>
                   <td className="px-4 py-2 text-right">
                     <button
@@ -490,7 +515,8 @@ export default function CommandsPage() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                )
+              })}
             </tbody>
           </table>
         </div>

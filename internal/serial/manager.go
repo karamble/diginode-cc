@@ -49,6 +49,13 @@ type Manager struct {
 	onTriComplete    func(mac string, nodes int)
 	onMeshTelemetry  func(from uint32, lat, lon float64, data map[string]interface{})
 	onCommandAck     func(ackKind, ackStatus, ackNode string, data map[string]interface{})
+	// onAlert receives every parsed event whose Kind is "alert" — tamper,
+	// vibration, setup-mode, identity, erase-executing, battery-saver state
+	// changes, and the scan/deauth/drone/baseline/randomization DONE
+	// summaries (which also fan out a synthesized command-ack). main.go
+	// wires this to the alerts service so everything lands in alert_events
+	// + broadcasts to the WS hub.
+	onAlert func(category, level, nodeID, raw string, data map[string]interface{})
 	// Stored radio config sections (populated during wantConfig dump)
 	radioConfig   map[string]*ConfigPayload
 	radioConfigMu sync.RWMutex
@@ -85,6 +92,14 @@ func (m *Manager) SetMeshTelemetryCallback(fn func(from uint32, lat, lon float64
 // matching the ACK against a pending command and updating its lifecycle.
 func (m *Manager) SetCommandAckCallback(fn func(ackKind, ackStatus, ackNode string, data map[string]interface{})) {
 	m.onCommandAck = fn
+}
+
+// SetAlertCallback registers the handler for every Kind="alert" event the
+// textparser emits (tamper, vibration, setup-mode, identity, erase events,
+// battery-saver state, and the *_DONE scan summaries). Downstream typically
+// persists to alert_events and broadcasts on the WS hub.
+func (m *Manager) SetAlertCallback(fn func(category, level, nodeID, raw string, data map[string]interface{})) {
+	m.onAlert = fn
 }
 
 // SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
@@ -572,9 +587,18 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 			m.onCommandAck(ackKind, ackStatus, evt.NodeID, evt.Data)
 		}
 
+	case "alert":
+		// Covers tamper, vibration, setup-mode, identity, erase events,
+		// battery-saver state, *_DONE scan summaries — anything the
+		// textparser tagged as an alert. main.go wires this to the
+		// alerts service which persists + broadcasts.
+		if m.onAlert != nil {
+			m.onAlert(evt.Category, evt.Level, evt.NodeID, evt.Raw, evt.Data)
+		}
+
 	default:
-		// Other event types (alert, command-ack, raw) are logged for debug;
-		// downstream consumers can be added later.
+		// Remaining kinds (gate-codes, raw, etc.) are debug-logged. Add
+		// explicit dispatch cases here as downstream consumers appear.
 		if evt.Kind != "raw" {
 			slog.Debug("text event", "kind", evt.Kind, "nodeId", evt.NodeID,
 				"category", evt.Category, "level", evt.Level)

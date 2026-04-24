@@ -20,6 +20,13 @@ const (
 	StatusPending CommandStatus = "PENDING"
 	StatusSent    CommandStatus = "SENT"
 	StatusAcked   CommandStatus = "ACKED"
+	// StatusRunning is the mid-state for long-running commands (scans,
+	// detections) after the firmware acknowledges with "<CMD>_ACK:STARTED"
+	// but before the corresponding "<CMD>_DONE:" summary arrives. Keeping
+	// such commands in s.pending lets the DONE-ACK synthesis close them out
+	// with the summary in Result — otherwise the DONE frame has no pending
+	// row to update and the scan summary is lost.
+	StatusRunning CommandStatus = "RUNNING"
 	StatusOK      CommandStatus = "OK" // CC PRO compat
 	StatusFailed  CommandStatus = "FAILED"
 	StatusError   CommandStatus = "ERROR" // CC PRO compat
@@ -172,7 +179,7 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		if !nameMatches {
 			continue
 		}
-		if cmd.Status != StatusPending && cmd.Status != StatusSent {
+		if cmd.Status != StatusPending && cmd.Status != StatusSent && cmd.Status != StatusRunning {
 			continue
 		}
 		if match == nil || cmd.CreatedAt.After(match.CreatedAt) {
@@ -191,21 +198,51 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	match.AckStatus = ackStatus
 	match.AckNode = ackNode
 
-	// Derive final status from ACK status
-	switch strings.ToUpper(ackStatus) {
-	case "COMPLETE", "STOPPED", "OK", "FINISHED", "SUCCESS":
-		match.Status = StatusOK
-	case "ERROR", "FAILED", "TIMEOUT":
+	// Derive final status from ACK status. The firmware uses a wider set of
+	// tokens than CC PRO's original switch assumed:
+	//   - "STARTED"   (SCAN/DEVICE_SCAN/DRONE/DEAUTH/RANDOMIZATION/BASELINE/
+	//                  BATTERY_SAVER_ACK) — long-runner entering its scan
+	//                  loop. Mid-state: keep in pending so the matching
+	//                  *_DONE frame can close it with the scan summary.
+	//   - "ENABLED"/"DISABLED"/"INTERVAL Nmin" (HB_ACK, AUTOERASE_ACK)
+	//                  "CANCELLED" (ERASE_ACK), "" (TRI_START_ACK) —
+	//                  single-shot toggle/config commands; treat as
+	//                  terminal OK.
+	//   - "INVALID_*" (CONFIG_ACK:NODE_ID/RSSI on bad params) — terminal
+	//                  error; token stays in ErrorText for display.
+	upper := strings.ToUpper(ackStatus)
+	isRunning := upper == "STARTED"
+	isTerminalOK := !isRunning && (upper == "" ||
+		upper == "OK" || upper == "COMPLETE" || upper == "COMPLETED" ||
+		upper == "FINISHED" || upper == "SUCCESS" ||
+		upper == "STOPPED" ||
+		upper == "ENABLED" || upper == "DISABLED" ||
+		upper == "CANCELLED" || upper == "CANCELED" ||
+		strings.HasPrefix(upper, "INTERVAL"))
+	isTerminalErr := upper == "ERROR" || upper == "FAILED" || upper == "TIMEOUT" ||
+		strings.HasPrefix(upper, "INVALID")
+
+	switch {
+	case isRunning:
+		match.Status = StatusRunning
+	case isTerminalErr:
 		match.Status = StatusError
 		match.ErrorText = ackStatus
+	case isTerminalOK:
+		match.Status = StatusOK
 	default:
-		match.Status = StatusSent // keep as sent
+		match.Status = StatusSent // unrecognized token — keep as sent
 	}
 
 	match.AckedAt = &now
-	match.FinishedAt = &now
 	match.Result = result
-	delete(s.pending, matchKey)
+	// Only mark the command as finished and drop it from the pending map
+	// when we've reached a terminal state. Running long-runners stay in
+	// pending so their *_DONE frame can find them later.
+	if match.Status != StatusRunning {
+		match.FinishedAt = &now
+		delete(s.pending, matchKey)
+	}
 
 	slog.Info("structured ACK matched", "ackKind", ackKind, "cmdName", cmdName, "status", match.Status)
 

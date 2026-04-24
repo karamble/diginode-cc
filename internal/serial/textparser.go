@@ -261,42 +261,58 @@ func (p *TextParser) initPatterns() {
 			name: "scan-done",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*SCAN_DONE:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("scan"),
+			handler: p.handleDoneSummaryWithAck("scan", "SCAN_DONE_ACK"),
 		},
 		// DEAUTH_DONE: "nodeId: DEAUTH_DONE: Total=8 Deauth=5 Disassoc=3 TX=7 Remaining=1"
 		{
 			name: "deauth-done",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DEAUTH_DONE:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("deauth"),
+			handler: p.handleDoneSummaryWithAck("deauth", "DEAUTH_DONE_ACK"),
 		},
 		// LIST_SCAN_DONE: "nodeId: LIST_SCAN_DONE: Hits=15 Unique=10 Targets=8 TX=8 Remaining=0"
 		{
 			name: "list-scan-done",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*LIST_SCAN_DONE:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("list-scan"),
+			handler: p.handleDoneSummaryWithAck("list-scan", "LIST_SCAN_DONE_ACK"),
 		},
 		// DRONE_DONE: "nodeId: DRONE_DONE: Detected=3 Unique=3 TX=3 Remaining=0"
 		{
 			name: "drone-done",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DRONE_DONE:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("drone"),
+			handler: p.handleDoneSummaryWithAck("drone", "DRONE_DONE_ACK"),
 		},
 		// RANDOMIZATION_DONE: "nodeId: RANDOMIZATION_DONE: Identities=5 Sessions=2 TX=5 Remaining=0"
 		{
 			name: "randomization-done",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*RANDOMIZATION_DONE:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("randomization"),
+			handler: p.handleDoneSummaryWithAck("randomization", "RANDOMIZATION_DONE_ACK"),
+		},
+		// BASELINE_DONE: "nodeId: BASELINE_DONE: Devices=39 Anomalies=0 WiFi=23 BLE=16 TX=19 PEND=20"
+		// Emitted by firmware at end of a BASELINE_START window (see
+		// AntiHunter baseline.cpp:812).
+		{
+			name: "baseline-done",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BASELINE_DONE:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummaryWithAck("baseline", "BASELINE_DONE_ACK"),
 		},
 		// BASELINE_STATUS: "nodeId: BASELINE_STATUS: Scanning:YES Established:NO Devices:42 Anomalies:2 Phase1:PENDING"
 		{
 			name: "baseline-status",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BASELINE_STATUS:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("baseline-status"),
+			handler: p.handleDoneSummaryWithAck("baseline-status", "BASELINE_STATUS_ACK"),
+		},
+		// VIBRATION_STATUS: "nodeId: VIBRATION_STATUS: ENABLED Last:never" (reply to VIBRATION_STATUS read command)
+		{
+			name: "vibration-status",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*VIBRATION_STATUS:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummaryWithAck("vibration-status", "VIBRATION_STATUS_ACK"),
 		},
 		// IDENTITY: "nodeId: IDENTITY:ID123 W -68 Hits:4 MACs:3"
 		{
@@ -304,6 +320,17 @@ func (p *TextParser) initPatterns() {
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*IDENTITY:(?P<identityId>\S+)\s+(?P<band>[A-Za-z])\s+(?P<rssi>-?\d+)(?:\s+Hits:(?P<hits>\d+))?(?:\s+MACs:(?P<macs>\d+))?`),
 			handler: p.handleIdentity,
+		},
+		// ATTACK: "nodeId: ATTACK: DEAUTH AA:BB:CC:DD:EE:FF->11:22:33:44:55:66 R-65 C6 [GPS:lat,lon]"
+		// Real-time deauth/disassoc frame emitted by AntiHunter scanner
+		// (see AntiHunter/src/scanner.cpp:1327, 1350). Neither CC PRO nor
+		// DigiNode CC parsed this before — ported here as an alert so
+		// security-sensitive events hit the alerts pipeline.
+		{
+			name: "attack",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*ATTACK:\s*(?P<attackType>DEAUTH|DISASSOC)\s+(?P<src>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})->(?P<dst>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+R(?P<rssi>-?\d+)(?:\s+C(?P<channel>\d+))?(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+			handler: p.handleAttack,
 		},
 		// SETUP_MODE: "nodeId: SETUP_MODE: Auto-erase activates in 30s"
 		{
@@ -324,7 +351,7 @@ func (p *TextParser) initPatterns() {
 			name: "battery-saver-status",
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BATTERY_SAVER_STATUS:\s*(?P<body>.+)$`),
-			handler: p.handleDoneSummary("battery-saver-status"),
+			handler: p.handleDoneSummaryWithAck("battery-saver-status", "BATTERY_SAVER_STATUS_ACK"),
 		},
 		// ERASE_EXECUTING: "nodeId: ERASE_EXECUTING: reason GPS:12.34,56.78"
 		{
@@ -1344,10 +1371,21 @@ func parseKVBody(body string) map[string]interface{} {
 // (e.g. "W=42 B=15 U=30 Targets=5") and emits a single alert event tagged with
 // the given category. Used for every *_DONE / *_STATUS line AntiHunter emits.
 func (p *TextParser) handleDoneSummary(category string) func([]string, []string, string) []*ParsedEvent {
+	return p.handleDoneSummaryWithAck(category, "")
+}
+
+// handleDoneSummaryWithAck behaves like handleDoneSummary but additionally
+// synthesizes a command-ack event using the given ackType so the matching
+// pending command row in the commands service closes out with the KV body as
+// its Result. Used for read-mode STATUS replies (VIBRATION_STATUS,
+// BASELINE_STATUS, BATTERY_SAVER_STATUS) where the firmware answers with a
+// content frame rather than a real *_ACK. Mirrors the STATUS_ACK /
+// CODE_LIST_ACK synthesis already in place for handleStatus and handleCodes.
+func (p *TextParser) handleDoneSummaryWithAck(category, ackType string) func([]string, []string, string) []*ParsedEvent {
 	return func(match []string, names []string, raw string) []*ParsedEvent {
 		g := extractGroups(match, names)
 		data := parseKVBody(g["body"])
-		return []*ParsedEvent{{
+		events := []*ParsedEvent{{
 			Kind:     "alert",
 			Level:    "INFO",
 			Category: category,
@@ -1355,6 +1393,23 @@ func (p *TextParser) handleDoneSummary(category string) func([]string, []string,
 			Data:     data,
 			Raw:      raw,
 		}}
+		if ackType != "" {
+			ackData := map[string]interface{}{
+				"ackType":     ackType,
+				"status":      "OK",
+				"synthesized": true,
+			}
+			for k, v := range data {
+				ackData[k] = v
+			}
+			events = append(events, &ParsedEvent{
+				Kind:   "command-ack",
+				NodeID: g["id"],
+				Data:   ackData,
+				Raw:    raw,
+			})
+		}
+		return events
 	}
 }
 
@@ -1375,6 +1430,31 @@ func (p *TextParser) handleIdentity(match []string, names []string, raw string) 
 		Kind:     "alert",
 		Level:    "NOTICE",
 		Category: "identity",
+		NodeID:   g["id"],
+		Data:     data,
+		Raw:      raw,
+	}}
+}
+
+func (p *TextParser) handleAttack(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"attackType": strings.ToUpper(g["attackType"]),
+		"src":        strings.ToUpper(g["src"]),
+		"dst":        strings.ToUpper(g["dst"]),
+		"rssi":       parseOptInt(g["rssi"]),
+	}
+	if v := g["channel"]; v != "" {
+		data["channel"] = parseOptInt(v)
+	}
+	if g["lat"] != "" && g["lon"] != "" {
+		data["lat"] = parseOptFloat(g["lat"])
+		data["lon"] = parseOptFloat(g["lon"])
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "ALERT",
+		Category: "attack",
 		NodeID:   g["id"],
 		Data:     data,
 		Raw:      raw,

@@ -214,6 +214,26 @@ var ACKMap = map[string]string{
 	"DEBOUNCE_ACK":   "DEBOUNCE_SET",
 	"CODE_ACK":       "CODE_ADD",
 	"CODE_LIST_ACK":  "CODE_LIST",
+	// STATUS-reply variants: the firmware answers these read-mode commands with
+	// a plain content frame ("VIBRATION_STATUS: ENABLED Last:never") rather
+	// than a real *_ACK. The textparser synthesizes these ACKs from the reply
+	// handlers so the commands close instead of hanging at SENT. Same trick
+	// used above for STATUS_ACK / CODE_LIST_ACK.
+	"VIBRATION_STATUS_ACK":     "VIBRATION_STATUS",
+	"BASELINE_STATUS_ACK":      "BASELINE_STATUS",
+	"BATTERY_SAVER_STATUS_ACK": "BATTERY_SAVER_STATUS",
+	// *_DONE synthesized ACKs: long-running scans/detections reach RUNNING on
+	// the initial *_ACK:STARTED reply, then the firmware broadcasts a
+	// *_DONE: W=... B=... summary when the scan window ends. textparser
+	// synthesizes *_DONE_ACK events from those lines so the pending RUNNING
+	// row closes out as OK with the KV summary as its Result.
+	"SCAN_DONE_ACK":           "SCAN_START",
+	"DEVICE_SCAN_DONE_ACK":    "DEVICE_SCAN_START",
+	"LIST_SCAN_DONE_ACK":      "SCAN_START", // firmware emits LIST_SCAN_DONE after list-targets SCAN_START
+	"DEAUTH_DONE_ACK":         "DEAUTH_START",
+	"DRONE_DONE_ACK":          "DRONE_START",
+	"RANDOMIZATION_DONE_ACK":  "RANDOMIZATION_START",
+	"BASELINE_DONE_ACK":       "BASELINE_START",
 }
 
 // Build validates inputs and produces a formatted mesh text line.
