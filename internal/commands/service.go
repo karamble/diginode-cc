@@ -156,15 +156,29 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// CONFIG_ACK is generic — firmware emits it for every CONFIG_* command with
-	// the specific kind embedded in the status field. Match any pending
-	// CONFIG_* row; for all other ACK types the name must equal exactly.
+	// Some ACK frames cover multiple commands:
+	//   - CONFIG_ACK is generic — firmware emits it for every CONFIG_*
+	//     command with the specific kind embedded in the status field.
+	//   - HB_ACK fires for both HB_ON and HB_OFF (and HB_INTERVAL).
+	//   - SCAN_DONE_ACK is emitted by the firmware for both SCAN_START
+	//     and DEVICE_SCAN_START completions (the firmware has no
+	//     dedicated DEVICE_SCAN_DONE frame).
+	//   - CODE_ACK covers CODE_ADD / CODE_REMOVE / CODE_CLEAR.
+	// For all other ACK types the name must equal exactly.
 	wantPrefix := ""
-	if ackKind == "CONFIG_ACK" {
+	wantSuffix := ""
+	switch ackKind {
+	case "CONFIG_ACK":
 		wantPrefix = "CONFIG_"
+	case "HB_ACK":
+		wantPrefix = "HB_"
+	case "CODE_ACK":
+		wantPrefix = "CODE_"
+	case "SCAN_DONE_ACK":
+		wantSuffix = "SCAN_START" // matches SCAN_START + DEVICE_SCAN_START
 	}
 
-	// Find the latest PENDING/SENT command matching this name + target
+	// Find the latest PENDING/SENT/RUNNING command matching name + target
 	var match *Command
 	var matchKey string
 	for id, cmd := range s.pending {
@@ -174,6 +188,9 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		}
 		nameMatches := name == cmdName
 		if wantPrefix != "" && strings.HasPrefix(name, wantPrefix) {
+			nameMatches = true
+		}
+		if wantSuffix != "" && strings.HasSuffix(name, wantSuffix) {
 			nameMatches = true
 		}
 		if !nameMatches {

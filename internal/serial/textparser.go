@@ -314,6 +314,17 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*VIBRATION_STATUS:\s*(?P<body>.+)$`),
 			handler: p.handleDoneSummaryWithAck("vibration-status", "VIBRATION_STATUS_ACK"),
 		},
+		// AUTOERASE_STATUS: "nodeId: AUTOERASE_STATUS: Enabled:NO" (or "...Enabled:YES SetupMode:ACTIVE ...")
+		// Reply frame to AUTOERASE_STATUS read command. Firmware answers
+		// with a content frame rather than a real *_ACK, so we synthesize
+		// one here to close the pending command row (same pattern as
+		// VIBRATION_STATUS / BASELINE_STATUS / BATTERY_SAVER_STATUS).
+		{
+			name: "autoerase-status",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*AUTOERASE_STATUS:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummaryWithAck("autoerase-status", "AUTOERASE_STATUS_ACK"),
+		},
 		// IDENTITY: "nodeId: IDENTITY:ID123 W -68 Hits:4 MACs:3"
 		{
 			name: "identity",
