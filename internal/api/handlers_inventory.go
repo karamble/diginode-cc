@@ -3,6 +3,7 @@ package api
 import (
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/karamble/diginode-cc/internal/inventory"
@@ -10,7 +11,36 @@ import (
 )
 
 func (s *Server) handleListInventory(w http.ResponseWriter, r *http.Request) {
-	list := s.svc.Inventory.GetAll()
+	q := r.URL.Query()
+	nodeID := q.Get("nodeId")
+	afterStr := q.Get("seenAfter")
+	beforeStr := q.Get("seenBefore")
+
+	// With no filters, return the full cache (preserves existing behavior).
+	var list []*inventory.Device
+	if nodeID == "" && afterStr == "" && beforeStr == "" {
+		list = s.svc.Inventory.GetAll()
+	} else {
+		var after, before time.Time
+		if afterStr != "" {
+			t, err := time.Parse(time.RFC3339Nano, afterStr)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "seenAfter must be RFC3339: "+err.Error())
+				return
+			}
+			after = t
+		}
+		if beforeStr != "" {
+			t, err := time.Parse(time.RFC3339Nano, beforeStr)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "seenBefore must be RFC3339: "+err.Error())
+				return
+			}
+			before = t
+		}
+		list = s.svc.Inventory.GetFiltered(nodeID, after, before)
+	}
+
 	if list == nil {
 		list = []*inventory.Device{}
 	}

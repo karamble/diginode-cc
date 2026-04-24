@@ -47,6 +47,23 @@ interface CommandRecord {
   result?: Record<string, unknown>
 }
 
+interface InventoryDevice {
+  mac: string
+  deviceType?: string
+  rssi?: number
+  channel?: number
+  lastSsid?: string
+  manufacturer?: string
+  deviceName?: string
+  firstSeen: string
+  lastSeen: string
+  lastNodeId?: string
+  lastLat?: number
+  lastLon?: number
+  isKnown?: boolean
+  hits?: number
+}
+
 function formatResult(r: Record<string, unknown> | undefined): string {
   if (!r) return ''
   // Summarize the *_DONE scan-summary blobs into a single readable row —
@@ -139,6 +156,7 @@ export default function CommandsPage() {
   const [rawLine, setRawLine] = useState('')
   const [previewLine, setPreviewLine] = useState('')
   const [previewError, setPreviewError] = useState('')
+  const [detailsCmd, setDetailsCmd] = useState<CommandRecord | null>(null)
 
   // Pick up ?target=@AH34 when the user jumps here from the Nodes page.
   // Consume the query param after applying it so a page refresh doesn't keep
@@ -480,7 +498,12 @@ export default function CommandsPage() {
                 const resultStr = formatResult(cmd.result)
                 const displayResult = cmd.errorText || resultStr || cmd.resultText || ''
                 return (
-                <tr key={cmd.id} className="border-b border-dark-700/30 hover:bg-dark-800/30">
+                <tr
+                  key={cmd.id}
+                  className="border-b border-dark-700/30 hover:bg-dark-800/30 cursor-pointer"
+                  onClick={() => setDetailsCmd(cmd)}
+                  title="Click for full details"
+                >
                   <td className="px-4 py-2 text-dark-300 font-mono">{cmd.target || '-'}</td>
                   <td className="px-4 py-2 text-dark-200 font-medium">{cmd.name || cmd.commandType}</td>
                   <td className="px-4 py-2 text-dark-400 font-mono text-[10px] max-w-[200px] truncate" title={cmd.line}>
@@ -505,7 +528,7 @@ export default function CommandsPage() {
                   <td className="px-4 py-2 text-dark-500">{formatAge(cmd.sentAt || cmd.createdAt)}</td>
                   <td className="px-4 py-2 text-right">
                     <button
-                      onClick={() => deleteMutation.mutate(cmd.id)}
+                      onClick={(e) => { e.stopPropagation(); deleteMutation.mutate(cmd.id) }}
                       className="text-dark-600 hover:text-red-400 transition-colors"
                       title="Delete"
                     >
@@ -519,6 +542,189 @@ export default function CommandsPage() {
               })}
             </tbody>
           </table>
+        </div>
+      </div>
+
+      {detailsCmd && (
+        <CommandDetailsModal cmd={detailsCmd} onClose={() => setDetailsCmd(null)} />
+      )}
+    </div>
+  )
+}
+
+function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: () => void }) {
+  // Strip the @ prefix on targets to match the nodeId field on inventory rows.
+  // Also accept common aliases: @ALL / null target → no nodeId filter.
+  const nodeFilter = useMemo(() => {
+    if (!cmd.target) return ''
+    const t = cmd.target.startsWith('@') ? cmd.target.slice(1) : cmd.target
+    return (t === 'ALL' || t === 'BROADCAST') ? '' : t
+  }, [cmd.target])
+
+  // Scan window = sent → acked. Fall back to sent → now for commands that
+  // never finished, so a RUNNING scan still shows the devices it has seen
+  // so far. Firmware may broadcast a few detections slightly after its
+  // *_DONE frame, so widen ackedAt by a few seconds.
+  const { seenAfter, seenBefore } = useMemo(() => {
+    const sent = cmd.sentAt || cmd.createdAt
+    const acked = cmd.ackedAt
+    const before = acked
+      ? new Date(new Date(acked).getTime() + 3000).toISOString()
+      : new Date().toISOString()
+    return { seenAfter: sent, seenBefore: before }
+  }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt])
+
+  // Only fetch inventory for scan-type commands — STATUS/HB/CONFIG won't
+  // produce device detections and the time window would give bogus hits.
+  const isScanCommand = useMemo(() => {
+    const n = cmd.commandType || cmd.name || ''
+    return /SCAN_START|BASELINE_START|DEAUTH_START|DRONE_START|RANDOMIZATION_START/i.test(n)
+  }, [cmd.commandType, cmd.name])
+
+  const { data: devices = [], isLoading: devicesLoading } = useQuery({
+    queryKey: ['cmd-inventory', cmd.id, nodeFilter, seenAfter, seenBefore],
+    queryFn: () => {
+      const q = new URLSearchParams()
+      if (nodeFilter) q.set('nodeId', nodeFilter)
+      if (seenAfter) q.set('seenAfter', seenAfter)
+      if (seenBefore) q.set('seenBefore', seenBefore)
+      return api.get<InventoryDevice[]>(`/inventory?${q.toString()}`)
+    },
+    enabled: isScanCommand,
+  })
+
+  const resultStr = formatResult(cmd.result)
+
+  return (
+    <div
+      className="fixed inset-0 bg-black/70 flex items-center justify-center z-50 p-4"
+      onClick={onClose}
+    >
+      <div
+        className="bg-surface rounded-xl border border-dark-700 w-full max-w-3xl max-h-[85vh] overflow-hidden flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="px-5 py-3 border-b border-dark-700/50 flex items-center justify-between">
+          <div>
+            <h2 className="text-sm font-semibold text-dark-100">
+              {cmd.name || cmd.commandType}
+              <span className="ml-2 text-dark-400 font-normal">{cmd.target}</span>
+            </h2>
+            <div className="text-[10px] text-dark-500 mt-0.5 font-mono">{cmd.id}</div>
+          </div>
+          <button onClick={onClose} className="text-dark-400 hover:text-dark-100">
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" strokeWidth={1.5} viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="px-5 py-3 overflow-y-auto">
+          <dl className="grid grid-cols-[120px_1fr] gap-x-3 gap-y-1.5 text-xs">
+            <dt className="text-dark-500">Line</dt>
+            <dd className="text-dark-200 font-mono break-all">{cmd.line || '-'}</dd>
+
+            <dt className="text-dark-500">Status</dt>
+            <dd>
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium border ${statusBadge(cmd.status)}`}>
+                {cmd.status}
+              </span>
+            </dd>
+
+            <dt className="text-dark-500">Created</dt>
+            <dd className="text-dark-300 font-mono">{cmd.createdAt}</dd>
+
+            <dt className="text-dark-500">Sent</dt>
+            <dd className="text-dark-300 font-mono">{cmd.sentAt || '-'}</dd>
+
+            <dt className="text-dark-500">Acked</dt>
+            <dd className="text-dark-300 font-mono">{cmd.ackedAt || '-'}</dd>
+
+            {cmd.ackKind && (
+              <>
+                <dt className="text-dark-500">ACK</dt>
+                <dd className="text-dark-300 font-mono">
+                  {cmd.ackKind}
+                  {cmd.ackStatus ? `:${cmd.ackStatus}` : ''}
+                  {cmd.ackNode && <span className="text-dark-500 ml-2">({cmd.ackNode})</span>}
+                </dd>
+              </>
+            )}
+
+            {resultStr && (
+              <>
+                <dt className="text-dark-500">Result</dt>
+                <dd className="text-dark-200 font-mono break-all">{resultStr}</dd>
+              </>
+            )}
+
+            {cmd.errorText && (
+              <>
+                <dt className="text-red-400">Error</dt>
+                <dd className="text-red-300 font-mono break-all">{cmd.errorText}</dd>
+              </>
+            )}
+          </dl>
+
+          {cmd.result && Object.keys(cmd.result).length > 0 && (
+            <details className="mt-4">
+              <summary className="text-[10px] text-dark-500 cursor-pointer hover:text-dark-300">Raw result JSON</summary>
+              <pre className="mt-1 p-2 bg-dark-900 rounded text-[10px] text-dark-300 font-mono overflow-x-auto">
+                {JSON.stringify(cmd.result, null, 2)}
+              </pre>
+            </details>
+          )}
+
+          {isScanCommand && (
+            <div className="mt-5">
+              <h3 className="text-xs font-semibold text-dark-200 mb-2">
+                Devices seen during scan
+                <span className="ml-2 text-dark-500 font-normal">
+                  ({devicesLoading ? '…' : devices.length}
+                  {nodeFilter ? ` on ${nodeFilter}` : ''})
+                </span>
+              </h3>
+              {devicesLoading ? (
+                <div className="text-[11px] text-dark-500 py-3 text-center">Loading…</div>
+              ) : devices.length === 0 ? (
+                <div className="text-[11px] text-dark-500 py-3 text-center">
+                  No device detections in this window
+                  {cmd.status === 'RUNNING' && ' (scan still running)'}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="border-b border-dark-700/50 text-dark-500 uppercase tracking-wider text-[9px]">
+                        <th className="text-left px-2 py-1.5">MAC</th>
+                        <th className="text-left px-2 py-1.5">Type</th>
+                        <th className="text-right px-2 py-1.5">RSSI</th>
+                        <th className="text-right px-2 py-1.5">Ch</th>
+                        <th className="text-left px-2 py-1.5">Name / SSID</th>
+                        <th className="text-left px-2 py-1.5">Manufacturer</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {devices.map((d) => (
+                        <tr key={d.mac} className="border-b border-dark-700/20 hover:bg-dark-800/30">
+                          <td className="px-2 py-1 text-dark-300 font-mono">{d.mac}</td>
+                          <td className="px-2 py-1 text-dark-400">{d.deviceType || '-'}</td>
+                          <td className="px-2 py-1 text-dark-300 text-right font-mono">{d.rssi ?? '-'}</td>
+                          <td className="px-2 py-1 text-dark-400 text-right">{d.channel ?? '-'}</td>
+                          <td className="px-2 py-1 text-dark-300 truncate max-w-[140px]" title={d.deviceName || d.lastSsid}>
+                            {d.deviceName || d.lastSsid || '-'}
+                          </td>
+                          <td className="px-2 py-1 text-dark-400 truncate max-w-[120px]" title={d.manufacturer}>
+                            {d.manufacturer || '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

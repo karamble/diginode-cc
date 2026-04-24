@@ -239,6 +239,30 @@ func (s *Service) GetAll() []*Device {
 	return result
 }
 
+// GetFiltered returns devices whose LastSeen falls within [after, before]
+// and optionally whose LastNodeID matches nodeID. Zero-time values on the
+// time bounds mean "unbounded" and an empty nodeID means "any node". Used
+// by the CommandsPage details modal to show the devices a particular scan
+// saw during its sentAt..ackedAt window.
+func (s *Service) GetFiltered(nodeID string, after, before time.Time) []*Device {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make([]*Device, 0, len(s.devices))
+	for _, d := range s.devices {
+		if nodeID != "" && d.LastNodeID != nodeID {
+			continue
+		}
+		if !after.IsZero() && d.LastSeen.Before(after) {
+			continue
+		}
+		if !before.IsZero() && d.LastSeen.After(before) {
+			continue
+		}
+		result = append(result, d)
+	}
+	return result
+}
+
 // GetByMAC returns a device by its MAC address.
 func (s *Service) GetByMAC(mac string) *Device {
 	s.mu.RLock()
