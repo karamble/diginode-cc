@@ -16,6 +16,10 @@ web/node_modules/
 # Environment
 .env
 
+# Claude Code (local-only assistant context)
+.claude/
+CLAUDE.md
+
 # OS
 .DS_Store
 Thumbs.db

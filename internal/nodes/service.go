@@ -659,8 +659,11 @@ func (s *Service) persistNode(node *Node) {
 	_, err := s.db.Pool.Exec(ctx, `
 		INSERT INTO nodes (node_num, node_id, long_name, short_name, hw_model, role,
 			latitude, longitude, altitude, battery_level, voltage,
-			channel_utilization, air_util_tx, snr, last_heard, is_online, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW())
+			channel_utilization, air_util_tx, snr, last_heard, is_online,
+			temperature_c, temperature_f, temperature_updated_at, last_message,
+			updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+			$17, $18, $19, $20, NOW())
 		ON CONFLICT (node_num) DO UPDATE SET
 			node_id = COALESCE(EXCLUDED.node_id, nodes.node_id),
 			long_name = COALESCE(EXCLUDED.long_name, nodes.long_name),
@@ -677,6 +680,10 @@ func (s *Service) persistNode(node *Node) {
 			snr = COALESCE(EXCLUDED.snr, nodes.snr),
 			last_heard = COALESCE(EXCLUDED.last_heard, nodes.last_heard),
 			is_online = EXCLUDED.is_online,
+			temperature_c = COALESCE(EXCLUDED.temperature_c, nodes.temperature_c),
+			temperature_f = COALESCE(EXCLUDED.temperature_f, nodes.temperature_f),
+			temperature_updated_at = COALESCE(EXCLUDED.temperature_updated_at, nodes.temperature_updated_at),
+			last_message = COALESCE(EXCLUDED.last_message, nodes.last_message),
 			updated_at = NOW()`,
 		node.NodeNum, nullStr(node.NodeID), nullStr(node.LongName), nullStr(node.ShortName),
 		nullStr(node.HWModel), nullStr(node.Role),
@@ -685,6 +692,8 @@ func (s *Service) persistNode(node *Node) {
 		nullFloat(float64(node.ChannelUtilization)), nullFloat(float64(node.AirUtilTx)),
 		nullFloat(float64(node.SNR)),
 		nullTime(node.LastHeard), node.IsOnline,
+		nullFloat(node.TemperatureC), nullFloat(node.TemperatureF),
+		nullTimePtr(node.TemperatureUpdatedAt), nullStr(node.LastMessage),
 	)
 	if err != nil {
 		slog.Error("failed to persist node", "nodeNum", node.NodeNum, "error", err)
@@ -736,4 +745,11 @@ func nullTime(t time.Time) interface{} {
 		return nil
 	}
 	return t
+}
+
+func nullTimePtr(t *time.Time) interface{} {
+	if t == nil || t.IsZero() {
+		return nil
+	}
+	return *t
 }

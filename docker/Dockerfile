@@ -31,6 +31,12 @@ WORKDIR /app
 COPY --from=backend-builder /diginode-cc /app/diginode-cc
 COPY --from=frontend-builder /build/dist /app/web/dist
 
+# Map tile token baked at image build time so prebuilt images render the map
+# out of the box. Operator-supplied JAWG_ACCESS_TOKEN env still overrides
+# this at container-start time.
+ARG JAWG_ACCESS_TOKEN=""
+ENV JAWG_ACCESS_TOKEN=${JAWG_ACCESS_TOKEN}
+
 EXPOSE 3000
 
 ENTRYPOINT ["/app/diginode-cc"]
