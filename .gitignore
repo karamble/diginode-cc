@@ -1,5 +1,7 @@
-# Binary
-diginode-cc
+# Binary (anchor to repo root — bare "diginode-cc" also matched the
+# cmd/diginode-cc/ source dir, which made new files there invisible
+# to "git add" unless forced).
+/diginode-cc
 
 # Frontend build output
 web/dist/
