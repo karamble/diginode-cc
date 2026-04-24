@@ -724,6 +724,12 @@ All variables have sensible defaults. See `.env.example` for the complete list. 
 |----------|---------|-------------|
 | `JAWG_ACCESS_TOKEN` | (empty) | Jawg Maps API token (server-side only) |
 
+`JAWG_ACCESS_TOKEN` can arrive via three paths, in precedence order:
+
+1. **Runtime env** — whatever `.env` (or the container-start environment) supplies wins. This is the operator override.
+2. **Image build-arg** — prebuilt images can bake a default token in at build time. `docker/Dockerfile` declares `ARG JAWG_ACCESS_TOKEN=""` followed by `ENV JAWG_ACCESS_TOKEN=${JAWG_ACCESS_TOKEN}`, so any `docker build --build-arg JAWG_ACCESS_TOKEN=<token> ...` value is persisted as an image-level env var and picked up at container start unless overridden. The karamble `gotailme` Makefile's `cc-build` / `cc-push` targets source the local `.env` and pass the token through as `--build-arg` so shipped images render the map out of the box.
+3. **Source default** — `internal/config/config.go` falls back to an empty string. Nothing is hardcoded.
+
 **Integrations:**
 
 | Variable | Default | Description |
@@ -800,6 +806,19 @@ docker compose up -d    # Starts PostgreSQL + DigiNode CC, reads .env
 ```
 
 Tile cache persisted via `tiles` Docker volume.
+
+### Self-built image with token baked in
+
+To produce an image that renders the map without relying on runtime env:
+
+```bash
+docker build \
+  --build-arg JAWG_ACCESS_TOKEN=<your-token> \
+  -f docker/Dockerfile \
+  -t diginode-cc .
+```
+
+The Dockerfile declares `ARG JAWG_ACCESS_TOKEN` in the runtime stage followed by `ENV JAWG_ACCESS_TOKEN=${JAWG_ACCESS_TOKEN}`, so the value is persisted into the image as an env var. Operators can still override it at container start via `-e JAWG_ACCESS_TOKEN=...` or a fresh `.env`.
 
 ### Via GoTailMe (Production / Raspberry Pi)
 

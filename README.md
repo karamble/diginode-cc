@@ -36,7 +36,7 @@ Command center for Meshtastic mesh networks. Manages nodes, drone detection, WiF
                       +-------------+
 ```
 
-**Stack:** Go 1.23 | PostgreSQL 16 | React 18 + TypeScript + Tailwind | Vite | Docker (2 containers)
+**Stack:** Go 1.25 | PostgreSQL 16 | React 18 + TypeScript + Tailwind | Vite | Docker (2 containers)
 
 ## Features
 
@@ -61,6 +61,7 @@ Command center for Meshtastic mesh networks. Manages nodes, drone detection, WiF
 ### Docker Compose
 
 ```bash
+cp .env.example .env    # then edit .env to set JAWG_ACCESS_TOKEN (see below)
 docker compose up -d
 ```
 
@@ -70,9 +71,11 @@ Open `http://localhost:3000` and log in with:
 
 > Change the default credentials immediately after first login.
 
+> Map tiles will render blank without a JAWG token. Grab a free one at [jawg.io](https://www.jawg.io/) and set `JAWG_ACCESS_TOKEN` in `.env`. Operator-supplied env always overrides whatever may be baked into a prebuilt image.
+
 ### Without Docker
 
-Prerequisites: Go 1.23+, Node.js 20+, PostgreSQL 16
+Prerequisites: Go 1.25+, Node.js 20+, PostgreSQL 16
 
 ```bash
 # 1. Start PostgreSQL (or use an existing instance)
@@ -118,6 +121,7 @@ Open `http://localhost:5173` for hot-reloading frontend development. API calls a
 | `ADSB_ENABLED` | `false` | Enable ADS-B aircraft polling |
 | `ACARS_ENABLED` | `false` | Enable ACARS UDP listener |
 | `TAK_ENABLED` | `false` | Enable TAK/ATAK integration |
+| `JAWG_ACCESS_TOKEN` | *(empty)* | Map tile auth token from [jawg.io](https://www.jawg.io/). Optional, but maps render blank without it. |
 
 See the [Technical Handbook](docs/TECHNICAL_HANDBOOK.md) for the full configuration reference including SMTP, GeoIP, and runtime AppConfig keys.
 
@@ -137,17 +141,16 @@ make clean              # Remove binary + dist/
 ### Docker
 
 ```bash
-# Build ARM64 production image and push to Docker Hub
-make docker-prod-push
-
-# Build image locally
-make docker-prod-build
+# Build the image locally
+make docker-build
 
 # Container management
 make docker-up
 make docker-down
 make docker-logs
 ```
+
+> The `docker-prod-build` / `docker-prod-push` targets push ARM64 images to `karamble/diginode-cc` on Docker Hub and are maintainer-only. Contributors building their own images should use `make docker-build` (or `docker build --build-arg JAWG_ACCESS_TOKEN=<token> -f docker/Dockerfile .` if they want the token baked in at image build time).
 
 ## Project Structure
 
