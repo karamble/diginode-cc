@@ -25,3 +25,12 @@ func (s *Server) handleClearTileCache(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "message": "Map tile cache cleared"})
 }
+
+// handleTilesInfo reports environment-derived tile availability so the UI can
+// decide whether to enable the JAWG ("matrix") option. The token itself never
+// crosses the wire — the UI only sees the boolean.
+func (s *Server) handleTilesInfo(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{
+		"jawgAvailable": s.cfg.JawgAccessToken != "",
+	})
+}

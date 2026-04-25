@@ -1,5 +1,6 @@
 import { useQuery } from '@tanstack/react-query'
-import { MapContainer, TileLayer, Marker, Popup, useMap, LayersControl, Polygon, Circle, LayerGroup } from 'react-leaflet'
+import { MapContainer, Marker, Popup, useMap, LayersControl, Polygon, Circle, LayerGroup } from 'react-leaflet'
+import TileLayerControl from '../components/TileLayerControl'
 import L from 'leaflet'
 import { useEffect, useMemo } from 'react'
 import api from '../api/client'
@@ -261,18 +262,7 @@ export default function MapPage() {
           zoomControl={true}
           attributionControl={false}
         >
-          <LayersControl position="topright">
-            {/* Base layers */}
-            <LayersControl.BaseLayer checked name="Jawg Matrix">
-              <TileLayer url="/api/tiles/jawg/{z}/{x}/{y}" maxZoom={22} />
-            </LayersControl.BaseLayer>
-            <LayersControl.BaseLayer name="OpenStreetMap">
-              <TileLayer url="/api/tiles/osm/{z}/{x}/{y}" maxZoom={19} />
-            </LayersControl.BaseLayer>
-            <LayersControl.BaseLayer name="Esri Satellite">
-              <TileLayer url="/api/tiles/esri/{z}/{x}/{y}" maxZoom={18} />
-            </LayersControl.BaseLayer>
-
+          <TileLayerControl position="topright">
             {/* Overlay layers */}
             <LayersControl.Overlay checked name="Drones">
               <LayerGroup>
@@ -494,7 +484,7 @@ export default function MapPage() {
                 </LayerGroup>
               </LayersControl.Overlay>
             )}
-          </LayersControl>
+          </TileLayerControl>
 
           <FitBounds positions={allPositions} />
         </MapContainer>

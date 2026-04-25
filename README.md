@@ -61,7 +61,7 @@ Command center for Meshtastic mesh networks. Manages nodes, drone detection, WiF
 ### Docker Compose
 
 ```bash
-cp .env.example .env    # then edit .env to set JAWG_ACCESS_TOKEN (see below)
+cp .env.example .env    # then start — no token required for the default map
 docker compose up -d
 ```
 
@@ -71,7 +71,7 @@ Open `http://localhost:3000` and log in with:
 
 > Change the default credentials immediately after first login.
 
-> Map tiles will render blank without a JAWG token. Grab a free one at [jawg.io](https://www.jawg.io/) and set `JAWG_ACCESS_TOKEN` in `.env`. Operator-supplied env always overrides whatever may be baked into a prebuilt image.
+> Maps render with free OpenStreetMap tiles out of the box — no token needed. If you want the dark "Matrix (JAWG)" style, grab a free token at [jawg.io](https://www.jawg.io/), set `JAWG_ACCESS_TOKEN` in `.env`, and switch via the layer control on any map page. Your selection persists across browser reloads and reboots. Operator-supplied env always overrides whatever may be baked into a prebuilt image.
 
 ### Without Docker
 
@@ -121,7 +121,7 @@ Open `http://localhost:5173` for hot-reloading frontend development. API calls a
 | `ADSB_ENABLED` | `false` | Enable ADS-B aircraft polling |
 | `ACARS_ENABLED` | `false` | Enable ACARS UDP listener |
 | `TAK_ENABLED` | `false` | Enable TAK/ATAK integration |
-| `JAWG_ACCESS_TOKEN` | *(empty)* | Map tile auth token from [jawg.io](https://www.jawg.io/). Optional, but maps render blank without it. |
+| `JAWG_ACCESS_TOKEN` | *(empty)* | Optional map tile auth token from [jawg.io](https://www.jawg.io/). When set, the "Matrix (JAWG)" base layer becomes selectable from the in-map layer control; otherwise maps fall back to free OpenStreetMap tiles. |
 
 See the [Technical Handbook](docs/TECHNICAL_HANDBOOK.md) for the full configuration reference including SMTP, GeoIP, and runtime AppConfig keys.
 
@@ -150,7 +150,7 @@ make docker-down
 make docker-logs
 ```
 
-> The `docker-prod-build` / `docker-prod-push` targets push ARM64 images to `karamble/diginode-cc` on Docker Hub and are maintainer-only. Contributors building their own images should use `make docker-build` (or `docker build --build-arg JAWG_ACCESS_TOKEN=<token> -f docker/Dockerfile .` if they want the token baked in at image build time).
+> The `docker-prod-build` / `docker-prod-push` targets push ARM64 images to `karamble/diginode-cc` on Docker Hub and are maintainer-only. Contributors building their own images should use `make docker-build`.
 
 ## Project Structure
 
@@ -246,6 +246,11 @@ Connect to `GET /ws` with JWT token (query param `?token=` or `Authorization` he
 ## Documentation
 
 - **[Technical Handbook](docs/TECHNICAL_HANDBOOK.md)** — Full architecture, protocol details, API reference, database schema, deployment guide
+
+## Upstream / Related Projects
+
+- **[AntiHunter](https://github.com/lukeswitz/AntiHunter)** by lukeswitz — the AntiHunter sensor firmware (ESP32-S3 + Heltec V3) that DigiNode CC commands and ingests data from
+- **[AntiHunter-Command-Control-PRO](https://github.com/TheRealSirHaXalot/AntiHunter-Command-Control-PRO)** by TheRealSirHaXalot — the original NestJS Command & Control server that DigiNode CC reimplements in Go
 
 ## License
 

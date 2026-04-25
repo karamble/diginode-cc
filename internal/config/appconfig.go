@@ -123,6 +123,7 @@ func (ac *AppConfig) EnsureDefaults(ctx context.Context) error {
 		"healthEnabled":            true,
 		"mapTileUrl":               "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
 		"mapAttribution":           "OpenStreetMap",
+		"mapTileProvider":          "default",
 		"minZoom":                  2,
 		"maxZoom":                  18,
 		"invitationExpiryHours":    48,

@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useCallback } from 'react'
-import { MapContainer, TileLayer, Polygon, Polyline, CircleMarker, Tooltip, useMapEvents, useMap } from 'react-leaflet'
+import { MapContainer, Polygon, Polyline, CircleMarker, Tooltip, useMapEvents, useMap } from 'react-leaflet'
+import TileLayerControl from '../components/TileLayerControl'
 import 'leaflet/dist/leaflet.css'
 import api from '../api/client'
 import { useNodesStore } from '../stores/nodesStore'
@@ -509,7 +510,7 @@ export default function GeofencesPage() {
           className="w-full h-full"
           style={{ background: '#0f172a', cursor: showForm ? 'crosshair' : '' }}
         >
-          <TileLayer url="/api/tiles/jawg/{z}/{x}/{y}" maxZoom={22} />
+          <TileLayerControl />
 
           <DrawingHandler
             enabled={showForm}

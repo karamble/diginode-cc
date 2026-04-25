@@ -1,6 +1,7 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { useState, useMemo, useCallback, useEffect, useRef } from 'react'
-import { MapContainer, TileLayer, Marker, Polyline, Popup, useMap, Polygon } from 'react-leaflet'
+import { MapContainer, Marker, Polyline, Popup, useMap, Polygon } from 'react-leaflet'
+import TileLayerControl from '../components/TileLayerControl'
 import L from 'leaflet'
 import api from '../api/client'
 import { useDronesStore, type DroneStatus } from '../stores/dronesStore'
@@ -272,7 +273,7 @@ export default function DronesPage() {
           zoomControl={true}
           attributionControl={false}
         >
-          <TileLayer url="/api/tiles/jawg/{z}/{x}/{y}" maxZoom={22} />
+          <TileLayerControl />
 
           {/* Drone markers */}
           {droneMarkers.map((d) => (

@@ -317,8 +317,9 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/upload", s.handleFAAUpload)
 			})
 
-			// Tiles (preload management)
+			// Tiles (preload management + provider availability)
 			r.Route("/tiles", func(r chi.Router) {
+				r.Get("/info", s.handleTilesInfo)
 				r.Post("/preload", s.handleTilePreload)
 				r.Get("/preload/status", s.handleTilePreloadStatus)
 				r.Post("/preload/cancel", s.handleTilePreloadCancel)
