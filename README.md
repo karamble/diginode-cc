@@ -251,6 +251,7 @@ Connect to `GET /ws` with JWT token (query param `?token=` or `Authorization` he
 
 - **[AntiHunter](https://github.com/lukeswitz/AntiHunter)** by lukeswitz — the AntiHunter sensor firmware (ESP32-S3 + Heltec V3) that DigiNode CC commands and ingests data from
 - **[AntiHunter-Command-Control-PRO](https://github.com/TheRealSirHaXalot/AntiHunter-Command-Control-PRO)** by TheRealSirHaXalot — the original NestJS Command & Control server that DigiNode CC reimplements in Go
+- **[meshtastic-gate-sensor](https://github.com/karamble/meshtastic-gate-sensor)** — Meshtastic-based gate/perimeter sensor that reports state changes over the same LoRa mesh DigiNode CC operates on
 
 ## License
 
