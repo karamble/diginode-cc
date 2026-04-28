@@ -274,6 +274,7 @@ Fields mapped to `DroneDetection` JSON tags: `uasId`, `mac`, `rssi`, `latitude`,
 - Emits `target-detected` (inventory upsert with SSID) plus `alert` (Category=`probe`, Level=`INFO`, elevated to `NOTICE` on `GHOST` or `DST`). Vendor + flags ride in alert payload; manufacturer column is filled by server-side OUI lookup.
 - Probe-category alerts also feed `probes.Service.Track()` which upserts a row in `probe_ssids` keyed on `(ssid, node_id)`. The SSID is the stable identity since modern devices randomize MAC on every probe — `(ssid, node_id)` reveals which networks are probed at which sensors, and an SSID that's `GHOST` at site A but responded at site B proves a device traveled between them. Distinct-MAC counts within 24h are tracked in `probe_ssid_mac_samples` and exposed as `distinctMacs24h` on each row.
 - Driven by the `PROBE_START`/`PROBE_STOP` commands or by the `+PROBE` flag on `DEVICE_SCAN_START`.
+- **Mesh broadcast gating:** the firmware only emits `PROBE_HIT` over mesh when the captured probe matches `CONFIG_TARGETS` (MAC, OUI prefix, SSID, or `T-####` Identity token). Probes with no match are stored locally on the sensor's SD database (`probe_db.csv`) but never leave the node. To bypass the watchlist and broadcast every probe, send `PROBE_START` with the `broadcastAll` toggle (`+ALL` wire flag); the existing 60s per-MAC+SSID dedup still applies in both modes so the mesh isn't saturated.
 
 **Probe SSID query endpoints:**
 - `GET /api/probes/ssids?limit=N` — full table ordered by `last_seen DESC`

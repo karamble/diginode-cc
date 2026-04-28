@@ -7,7 +7,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -305,16 +307,35 @@ func main() {
 		// MAC on every probe — the SSID is the stable identity that reveals
 		// location overlap across the sensor mesh.
 		if category == "probe" {
+			// Skip duplicates: the same physical PROBE_HIT lands here twice
+			// — once via ProcessMeshText (which overrides NodeID to the
+			// Meshtastic hex form like "!02ed5f04") and once via the local
+			// UART debug echo (which keeps the firmware-emitted "AH64"
+			// prefix). Without dedup probe_ssids gets two rows per real
+			// hit and probeHits double-counts. Keying on the raw line is
+			// reliable since both paths receive byte-identical text.
+			if isDuplicateAlert(raw) {
+				return
+			}
+
 			ssid, _ := data["ssid"].(string)
 			mac, _ := data["mac"].(string)
 			rssi, _ := data["rssi"].(int)
 			channel, _ := data["channel"].(int)
 			ghost, _ := data["ghostSsid"].(bool)
 			dst, _ := data["dstMatch"].(bool)
-			probesSvc.Track(ssid, nodeID, mac, rssi, channel, ghost, dst)
+
+			// Canonicalize the source-node identifier to the AH short ID
+			// (e.g. "AH64") so probe_ssids primary-keys merge across the
+			// dual-path arrivals — even though the dedup above should
+			// already prevent the second arrival from reaching here, this
+			// guarantees consistency for any future single-path event too.
+			canonicalNode := canonicalProbeNode(nodeID, nodesSvc)
+
+			probesSvc.Track(ssid, canonicalNode, mac, rssi, channel, ghost, dst)
 			// Bump the live probeHits counter on the running PROBE_START
 			// command so the operator sees progress in the details modal.
-			commandsSvc.RecordProbeHit(nodeID)
+			commandsSvc.RecordProbeHit(canonicalNode)
 		}
 	})
 
@@ -549,4 +570,63 @@ func main() {
 	}
 
 	fmt.Println("DigiNode CC stopped.")
+}
+
+// alertDedupCache holds recent raw alert lines + their first-seen timestamp
+// so the probe-event handler can drop the second arrival of a dual-routed
+// PROBE_HIT (LoRa-routed mesh text + local UART debug echo). Sized small
+// and pruned in-place — no goroutine needed.
+var (
+	alertDedupCache   = make(map[string]time.Time, 256)
+	alertDedupMu      sync.Mutex
+	alertDedupWindow  = 5 * time.Second
+	alertDedupMaxKeys = 256
+)
+
+func isDuplicateAlert(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	alertDedupMu.Lock()
+	defer alertDedupMu.Unlock()
+	now := time.Now()
+	if last, ok := alertDedupCache[raw]; ok && now.Sub(last) < alertDedupWindow {
+		// refresh the timestamp so a stream of identical retries keeps
+		// extending the dedup window
+		alertDedupCache[raw] = now
+		return true
+	}
+	alertDedupCache[raw] = now
+	if len(alertDedupCache) > alertDedupMaxKeys {
+		cutoff := now.Add(-alertDedupWindow * 2)
+		for k, t := range alertDedupCache {
+			if t.Before(cutoff) {
+				delete(alertDedupCache, k)
+			}
+		}
+	}
+	return false
+}
+
+// canonicalProbeNode normalizes a NodeID to the AH short ID ("AH64") form
+// when possible, falling back to the input on parse failure or unknown
+// node. Probe events arrive with two NodeID flavors: "!02ed5f04" (mesh hex,
+// from ProcessMeshText) and "AH64" (firmware prefix, from local UART). The
+// short ID is the operator-facing identity and what `@AH64` commands target.
+func canonicalProbeNode(nodeID string, nodesSvc *nodes.Service) string {
+	if nodeID == "" || nodesSvc == nil {
+		return nodeID
+	}
+	if !strings.HasPrefix(nodeID, "!") {
+		return nodeID
+	}
+	num, err := strconv.ParseUint(nodeID[1:], 16, 32)
+	if err != nil {
+		return nodeID
+	}
+	node := nodesSvc.GetByNodeNum(uint32(num))
+	if node == nil || node.AHShortID == "" {
+		return nodeID
+	}
+	return node.AHShortID
 }

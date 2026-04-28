@@ -47,6 +47,21 @@ interface CommandRecord {
   result?: Record<string, unknown>
 }
 
+interface ProbeSSID {
+  ssid: string
+  nodeId: string
+  firstSeen: string
+  lastSeen: string
+  hitCount: number
+  ghostCount: number
+  respondedCount: number
+  dstCount: number
+  lastRssi?: number
+  lastChannel?: number
+  lastMac?: string
+  distinctMacs24h?: number
+}
+
 interface InventoryDevice {
   mac: string
   deviceType?: string
@@ -391,6 +406,16 @@ export default function CommandsPage() {
                       </option>
                     ))}
                   </select>
+                ) : p.type === 'bool' ? (
+                  <label className="flex items-center gap-2 px-2 py-1.5 bg-dark-800 border border-dark-600 rounded text-xs text-dark-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={paramValues[p.key] === 'true'}
+                      onChange={e => setParam(p.key, e.target.checked ? 'true' : '')}
+                      className="rounded border-dark-600 bg-dark-900"
+                    />
+                    <span className="text-dark-400 text-[10px]">{p.placeholder || 'Enable'}</span>
+                  </label>
                 ) : (
                   <input
                     type={p.type === 'number' || p.type === 'duration' ? 'number' : 'text'}
@@ -571,18 +596,20 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
     return (t === 'ALL' || t === 'BROADCAST') ? '' : t
   }, [cmd.target])
 
-  // Scan window = sent → acked. Fall back to sent → now for commands that
-  // never finished, so a RUNNING scan still shows the devices it has seen
-  // so far. Firmware may broadcast a few detections slightly after its
-  // *_DONE frame, so widen ackedAt by a few seconds.
+  // Scan window = sent → finished (or now if still RUNNING). Falls back
+  // to ackedAt+3s for legacy short-runner scans where finishedAt isn't
+  // distinct from ackedAt. Long-running scans like PROBE_START set
+  // ackedAt when STARTED arrives but emit detections for the rest of the
+  // scan window; finishedAt is the right upper bound there. +3s slack
+  // accounts for late-arriving frames after the close signal.
   const { seenAfter, seenBefore } = useMemo(() => {
     const sent = cmd.sentAt || cmd.createdAt
-    const acked = cmd.ackedAt
-    const before = acked
-      ? new Date(new Date(acked).getTime() + 3000).toISOString()
-      : new Date().toISOString()
+    const endRef = cmd.finishedAt || cmd.ackedAt
+    const before = cmd.status === 'RUNNING' || !endRef
+      ? new Date().toISOString()
+      : new Date(new Date(endRef).getTime() + 3000).toISOString()
     return { seenAfter: sent, seenBefore: before }
-  }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt])
+  }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt, cmd.finishedAt, cmd.status])
 
   // Only fetch inventory for scan-type commands — STATUS/HB/CONFIG won't
   // produce device detections and the time window would give bogus hits.
@@ -601,6 +628,26 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
       return api.get<InventoryDevice[]>(`/inventory?${q.toString()}`)
     },
     enabled: isScanCommand,
+  })
+
+  // Probe-scanner specific: for PROBE_START commands, also fetch the SSIDs
+  // captured during the scan window. Modern devices randomize MAC every
+  // probe so the SSID list is what reveals what networks were probed for.
+  const isProbeCommand = useMemo(() => {
+    const n = cmd.commandType || cmd.name || ''
+    return /^PROBE_START$/i.test(n)
+  }, [cmd.commandType, cmd.name])
+
+  const { data: probeSsids = [], isLoading: probeSsidsLoading } = useQuery({
+    queryKey: ['cmd-probe-ssids', cmd.id, nodeFilter, seenAfter, seenBefore],
+    queryFn: () => {
+      const q = new URLSearchParams()
+      if (nodeFilter) q.set('nodeId', nodeFilter)
+      if (seenAfter) q.set('seenAfter', seenAfter)
+      if (seenBefore) q.set('seenBefore', seenBefore)
+      return api.get<ProbeSSID[]>(`/probes/ssids/window?${q.toString()}`)
+    },
+    enabled: isProbeCommand,
   })
 
   const resultStr = formatResult(cmd.result)
@@ -683,6 +730,67 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
                 {JSON.stringify(cmd.result, null, 2)}
               </pre>
             </details>
+          )}
+
+          {isProbeCommand && (
+            <div className="mt-5">
+              <h3 className="text-xs font-semibold text-dark-200 mb-2">
+                SSIDs probed for during scan
+                <span className="ml-2 text-dark-500 font-normal">
+                  ({probeSsidsLoading ? '…' : probeSsids.length})
+                </span>
+              </h3>
+              {probeSsidsLoading ? (
+                <div className="text-[11px] text-dark-500 py-3 text-center">Loading…</div>
+              ) : probeSsids.length === 0 ? (
+                <div className="text-[11px] text-dark-500 py-3 text-center">
+                  No SSIDs captured in this window
+                  {cmd.status === 'RUNNING' && ' (scan still running — broadcastAll required for non-target SSIDs)'}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-[11px]">
+                    <thead>
+                      <tr className="border-b border-dark-700/50 text-dark-500 uppercase tracking-wider text-[9px]">
+                        <th className="text-left px-2 py-1.5">SSID</th>
+                        <th className="text-left px-2 py-1.5">Node</th>
+                        <th className="text-right px-2 py-1.5">Hits</th>
+                        <th className="text-right px-2 py-1.5">Ghost</th>
+                        <th className="text-right px-2 py-1.5">Resp.</th>
+                        <th className="text-right px-2 py-1.5">Dst</th>
+                        <th className="text-right px-2 py-1.5">MACs/24h</th>
+                        <th className="text-right px-2 py-1.5">RSSI</th>
+                        <th className="text-right px-2 py-1.5">Ch</th>
+                        <th className="text-left px-2 py-1.5">Last MAC</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {probeSsids.map((p) => (
+                        <tr key={`${p.nodeId}|${p.ssid}`} className="border-b border-dark-700/20 hover:bg-dark-800/30">
+                          <td className="px-2 py-1 text-dark-200 truncate max-w-[140px]" title={p.ssid}>
+                            {p.ssid}
+                            {p.ghostCount > 0 && p.respondedCount === 0 && (
+                              <span className="ml-1 text-amber-400" title="Ghost SSID — no AP responded at this sensor">~</span>
+                            )}
+                          </td>
+                          <td className="px-2 py-1 text-dark-400 font-mono">{p.nodeId}</td>
+                          <td className="px-2 py-1 text-dark-300 text-right font-mono">{p.hitCount}</td>
+                          <td className="px-2 py-1 text-amber-400 text-right font-mono">{p.ghostCount || '-'}</td>
+                          <td className="px-2 py-1 text-emerald-400 text-right font-mono">{p.respondedCount || '-'}</td>
+                          <td className="px-2 py-1 text-dark-400 text-right font-mono">{p.dstCount || '-'}</td>
+                          <td className="px-2 py-1 text-dark-300 text-right font-mono">{p.distinctMacs24h ?? '-'}</td>
+                          <td className="px-2 py-1 text-dark-300 text-right font-mono">{p.lastRssi ?? '-'}</td>
+                          <td className="px-2 py-1 text-dark-400 text-right">{p.lastChannel ?? '-'}</td>
+                          <td className="px-2 py-1 text-dark-400 font-mono truncate max-w-[140px]" title={p.lastMac}>
+                            {p.lastMac || '-'}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           )}
 
           {isScanCommand && (

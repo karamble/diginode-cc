@@ -277,6 +277,8 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/", s.handleListProbeSSIDs)
 				r.Get("/by-ssid", s.handleProbeSSIDsByName)
 				r.Get("/by-node", s.handleProbeSSIDsByNode)
+				// time-windowed view used by the command-details modal
+				r.Get("/window", s.handleProbeSSIDsForCommand)
 			})
 
 			// Webhooks

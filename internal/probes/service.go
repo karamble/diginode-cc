@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -164,6 +165,38 @@ func (s *Service) GetForSSID(ctx context.Context, ssid string) ([]SSIDStat, erro
 		WHERE p.ssid = $1
 		ORDER BY p.node_id ASC`
 	return s.scanRows(ctx, q, ssid)
+}
+
+// GetForCommandWindow returns probe_ssids rows last_seen within the given
+// [after, before] window, optionally filtered to a single detecting node.
+// Used by the command-details modal so each PROBE_START shows the SSIDs
+// captured during its specific scan window. nodeID="" means any node;
+// zero-value times mean "unbounded" on that side.
+func (s *Service) GetForCommandWindow(ctx context.Context, nodeID string, after, before time.Time) ([]SSIDStat, error) {
+	q := `
+		SELECT p.ssid, p.node_id, p.first_seen, p.last_seen,
+			p.hit_count, p.ghost_count, p.responded_count, p.dst_count,
+			p.last_rssi, p.last_channel, p.last_mac,
+			(SELECT COUNT(*) FROM probe_ssid_mac_samples m
+			   WHERE m.ssid = p.ssid AND m.node_id = p.node_id
+			     AND m.last_seen > NOW() - INTERVAL '24 hours') AS distinct_macs_24h
+		FROM probe_ssids p
+		WHERE TRUE`
+	args := []interface{}{}
+	if nodeID != "" {
+		args = append(args, nodeID)
+		q += " AND p.node_id = $" + strconv.Itoa(len(args))
+	}
+	if !after.IsZero() {
+		args = append(args, after)
+		q += " AND p.last_seen >= $" + strconv.Itoa(len(args))
+	}
+	if !before.IsZero() {
+		args = append(args, before)
+		q += " AND p.last_seen <= $" + strconv.Itoa(len(args))
+	}
+	q += " ORDER BY p.hit_count DESC, p.last_seen DESC"
+	return s.scanRows(ctx, q, args...)
 }
 
 // GetForNode returns all rows for a given detecting node — "what SSIDs has
