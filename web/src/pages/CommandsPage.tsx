@@ -596,18 +596,20 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
     return (t === 'ALL' || t === 'BROADCAST') ? '' : t
   }, [cmd.target])
 
-  // Scan window = sent → acked. Fall back to sent → now for commands that
-  // never finished, so a RUNNING scan still shows the devices it has seen
-  // so far. Firmware may broadcast a few detections slightly after its
-  // *_DONE frame, so widen ackedAt by a few seconds.
+  // Scan window = sent → finished (or now if still RUNNING). Falls back
+  // to ackedAt+3s for legacy short-runner scans where finishedAt isn't
+  // distinct from ackedAt. Long-running scans like PROBE_START set
+  // ackedAt when STARTED arrives but emit detections for the rest of the
+  // scan window; finishedAt is the right upper bound there. +3s slack
+  // accounts for late-arriving frames after the close signal.
   const { seenAfter, seenBefore } = useMemo(() => {
     const sent = cmd.sentAt || cmd.createdAt
-    const acked = cmd.ackedAt
-    const before = acked
-      ? new Date(new Date(acked).getTime() + 3000).toISOString()
-      : new Date().toISOString()
+    const endRef = cmd.finishedAt || cmd.ackedAt
+    const before = cmd.status === 'RUNNING' || !endRef
+      ? new Date().toISOString()
+      : new Date(new Date(endRef).getTime() + 3000).toISOString()
     return { seenAfter: sent, seenBefore: before }
-  }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt])
+  }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt, cmd.finishedAt, cmd.status])
 
   // Only fetch inventory for scan-type commands — STATUS/HB/CONFIG won't
   // produce device detections and the time window would give bogus hits.
