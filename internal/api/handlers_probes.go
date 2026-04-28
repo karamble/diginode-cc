@@ -3,6 +3,7 @@ package api
 import (
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/karamble/diginode-cc/internal/probes"
 )
@@ -34,6 +35,39 @@ func (s *Server) handleProbeSSIDsByName(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	rows, err := s.svc.Probes.GetForSSID(r.Context(), ssid)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to query probe ssids: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, ensureProbeRows(rows))
+}
+
+// handleProbeSSIDsForCommand returns probe_ssids rows last_seen within an
+// optional time window, optionally filtered to a single sensor. Used by the
+// command-details modal to show the SSIDs captured during a specific
+// PROBE_START scan window. Query params: nodeId, seenAfter (RFC3339Nano),
+// seenBefore (RFC3339Nano). Any can be omitted.
+func (s *Server) handleProbeSSIDsForCommand(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	nodeID := q.Get("nodeId")
+	var after, before time.Time
+	if v := q.Get("seenAfter"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "seenAfter must be RFC3339: "+err.Error())
+			return
+		}
+		after = t
+	}
+	if v := q.Get("seenBefore"); v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "seenBefore must be RFC3339: "+err.Error())
+			return
+		}
+		before = t
+	}
+	rows, err := s.svc.Probes.GetForCommandWindow(r.Context(), nodeID, after, before)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to query probe ssids: "+err.Error())
 		return
