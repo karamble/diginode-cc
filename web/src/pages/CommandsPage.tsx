@@ -265,6 +265,16 @@ export default function CommandsPage() {
       setPreviewError('')
       return
     }
+    // Skip preview while the operator hasn't filled every required param
+    // yet — the backend would otherwise surface a "missing required parameter"
+    // 400 in the preview alert box, and that alert is visually identical to
+    // a send error. This also catches the post-send case where onSuccess
+    // clears paramValues to {} while selectedCmd stays set.
+    if (activeDef?.params.some(p => p.required && !paramValues[p.key])) {
+      setPreviewLine('')
+      setPreviewError('')
+      return
+    }
     const params = (activeDef?.params || []).map(p => paramValues[p.key] || '')
     const handle = setTimeout(() => {
       api.post<{ line: string }>('/commands/preview', {
