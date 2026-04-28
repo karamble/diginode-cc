@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -487,6 +488,75 @@ func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
 		cmds = append(cmds, &cmd)
 	}
 	return cmds, nil
+}
+
+// EnforceScanTimeouts walks the pending map and closes any RUNNING
+// PROBE_START whose explicit duration window plus grace period has
+// elapsed. The firmware emits no mesh signal on natural duration end of
+// a probe scan — only PROBE_ACK:STOPPED in response to PROBE_STOP — so
+// without this watchdog the row stays RUNNING forever after a limited
+// scan completes. Skipped when params contain "FOREVER" (intentionally
+// unbounded). Other long-running scans (SCAN_START, BASELINE_START etc.)
+// have *_DONE frames that close them through the regular ACK path, so
+// they don't need this safety net — keeping the scope narrow avoids
+// closing rows that genuinely got stuck due to ack loss elsewhere.
+func (s *Service) EnforceScanTimeouts(grace time.Duration) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	now := time.Now()
+	closed := 0
+	for id, cmd := range s.pending {
+		name := cmd.Name
+		if name == "" {
+			name = cmd.CommandType
+		}
+		if name != "PROBE_START" || cmd.Status != StatusRunning {
+			continue
+		}
+		if cmd.SentAt == nil {
+			continue
+		}
+		// FOREVER scans intentionally never time out
+		forever := false
+		for _, p := range cmd.Params {
+			if strings.EqualFold(strings.TrimSpace(p), "FOREVER") {
+				forever = true
+				break
+			}
+		}
+		if forever {
+			continue
+		}
+		// Duration is the second positional param: mode:duration[:FOREVER][:+ALL]
+		if len(cmd.Params) < 2 {
+			continue
+		}
+		durationSec, err := strconv.Atoi(strings.TrimSpace(cmd.Params[1]))
+		if err != nil || durationSec <= 0 {
+			continue
+		}
+		if now.Sub(*cmd.SentAt) < time.Duration(durationSec)*time.Second+grace {
+			continue
+		}
+
+		cmd.Status = StatusOK
+		finished := now
+		cmd.FinishedAt = &finished
+		if cmd.Result == nil {
+			cmd.Result = map[string]interface{}{}
+		}
+		cmd.Result["closeReason"] = "scan-window-elapsed"
+		delete(s.pending, id)
+		s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: cmd})
+		go s.persistCommand(cmd)
+		closed++
+	}
+
+	if closed > 0 {
+		slog.Info("commands: closed scan(s) on duration timeout", "count", closed)
+	}
+	return closed
 }
 
 // PruneOldCommands removes commands older than the retention period.

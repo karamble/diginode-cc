@@ -516,6 +516,23 @@ func main() {
 		}
 	}()
 
+	// Probe-scan watchdog: closes RUNNING PROBE_START rows whose explicit
+	// duration window has elapsed, since the firmware emits no mesh signal
+	// on natural duration end (only PROBE_ACK:STOPPED in response to
+	// PROBE_STOP). Skips FOREVER scans intentionally.
+	go func() {
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				commandsSvc.EnforceScanTimeouts(5 * time.Second)
+			case <-sigCtx.Done():
+				return
+			}
+		}
+	}()
+
 	// Start daily pruning goroutine
 	go func() {
 		ticker := time.NewTicker(24 * time.Hour)
