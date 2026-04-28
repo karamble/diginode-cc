@@ -29,6 +29,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/mqtt"
 	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/permissions"
+	"github.com/karamble/diginode-cc/internal/probes"
 	"github.com/karamble/diginode-cc/internal/ratelimit"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
@@ -54,6 +55,7 @@ type Services struct {
 	Geofences *geofences.Service
 	Targets   *targets.Service
 	Inventory *inventory.Service
+	Probes    *probes.Service
 	Webhooks  *webhooks.Service
 	Alarms    *alarms.Service
 	Firewall  *firewall.Service
@@ -267,6 +269,14 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/clear", s.handleClearInventory)
 				r.Post("/{mac}/promote", s.handlePromoteToTarget)
 				r.Put("/{id}", s.handleUpdateInventoryDevice)
+			})
+
+			// Probe-request scanner SSID history (per-(ssid, node_id) pivots,
+			// plus rolling distinct-MAC counts from probe_ssid_mac_samples).
+			r.Route("/probes/ssids", func(r chi.Router) {
+				r.Get("/", s.handleListProbeSSIDs)
+				r.Get("/by-ssid", s.handleProbeSSIDsByName)
+				r.Get("/by-node", s.handleProbeSSIDsByNode)
 			})
 
 			// Webhooks

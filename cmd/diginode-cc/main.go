@@ -32,6 +32,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/mqtt"
 	"github.com/karamble/diginode-cc/internal/nodes"
 	"github.com/karamble/diginode-cc/internal/permissions"
+	"github.com/karamble/diginode-cc/internal/probes"
 	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/sites"
 	"github.com/karamble/diginode-cc/internal/statusbroadcast"
@@ -110,6 +111,7 @@ func main() {
 	dronesSvc.SetNodeLookup(nodesSvc.LookupNodeIDAndSite)
 	inventorySvc := inventory.NewService(db, hub)
 	dronesSvc.SetInventoryCallback(inventorySvc.Track)
+	probesSvc := probes.NewService(db)
 	faaSvc := faa.NewService(db, cfg.FAAOnlineLookupEnabled, cfg.FAACacheTTLMinutes)
 	dronesSvc.SetFAALookup(func(ctx context.Context, droneID, mac, serial string) (map[string]interface{}, error) {
 		entry, err := faaSvc.LookupMultiKey(ctx, droneID, mac, serial)
@@ -297,6 +299,20 @@ func main() {
 		}
 		enriched["category"] = category
 		alertsSvc.TriggerDirect(context.Background(), sev, title, raw, enriched)
+
+		// Probe-request scanner hits also feed the SSID-keyed history table,
+		// which is the actually-useful pivot since modern devices randomize
+		// MAC on every probe — the SSID is the stable identity that reveals
+		// location overlap across the sensor mesh.
+		if category == "probe" {
+			ssid, _ := data["ssid"].(string)
+			mac, _ := data["mac"].(string)
+			rssi, _ := data["rssi"].(int)
+			channel, _ := data["channel"].(int)
+			ghost, _ := data["ghostSsid"].(bool)
+			dst, _ := data["dstMatch"].(bool)
+			probesSvc.Track(ssid, nodeID, mac, rssi, channel, ghost, dst)
+		}
 	})
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
@@ -437,6 +453,7 @@ func main() {
 		Geofences:   geofencesSvc,
 		Targets:     targetsSvc,
 		Inventory:   inventorySvc,
+		Probes:      probesSvc,
 		Webhooks:    webhooksSvc,
 		Alarms:      alarmsSvc,
 		Firewall:    firewallSvc,
@@ -497,6 +514,11 @@ func main() {
 					slog.Warn("failed to prune old commands", "error", err)
 				} else if n > 0 {
 					slog.Info("pruned old commands", "deleted", n)
+				}
+				if n, err := probesSvc.PruneMacSamples(pruneCtx, 24*time.Hour); err != nil {
+					slog.Warn("failed to prune probe mac samples", "error", err)
+				} else if n > 0 {
+					slog.Info("pruned old probe mac samples", "deleted", n)
 				}
 			case <-sigCtx.Done():
 				return

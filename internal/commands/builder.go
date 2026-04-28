@@ -26,12 +26,17 @@ type CommandDef struct {
 type ParamDef struct {
 	Key         string
 	Label       string
-	Type        string // "text", "number", "select", "duration", "channels", "pipeList", "mac"
+	Type        string // "text", "number", "select", "duration", "channels", "pipeList", "mac", "bool"
 	Required    bool
 	Min         float64
 	Max         float64
 	Options     []string // for select type
 	Placeholder string
+	// LiteralTrue is used by Type=="bool" params: when the user submits true
+	// the wire token emitted is this literal (e.g. "+PROBE"), and when false
+	// the param is omitted entirely. The boolean value itself is never
+	// transmitted — only its translated literal.
+	LiteralTrue string
 }
 
 // BuildOutput is the result of building a command.
@@ -72,9 +77,15 @@ var Registry = map[string]*CommandDef{
 	"DEVICE_SCAN_START": {Name: "DEVICE_SCAN_START", Group: "Scanning", Description: "Start device scan", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
+		{Key: "captureProbes", Label: "Capture probes", Type: "bool", LiteralTrue: "+PROBE", Placeholder: "Also record 802.11 probe requests during the scan"},
 	}},
 	"DEVICE_SCAN_STOP": {Name: "DEVICE_SCAN_STOP", Group: "Scanning", Description: "Stop device scan", SupportedTypes: typeAH},
 	"STOP":             {Name: "STOP", Group: "Scanning", Description: "Stop all scanning activities", SupportedTypes: typeAH},
+	"PROBE_START": {Name: "PROBE_START", Group: "Scanning", Description: "Start passive probe-request sniffer (logs probe MAC + SSID + GHOST/DST flags)", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
+		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}, Placeholder: "0=WiFi 1=BLE 2=Both"},
+		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
+	}},
+	"PROBE_STOP": {Name: "PROBE_STOP", Group: "Scanning", Description: "Stop probe-request sniffer", SupportedTypes: typeAH},
 
 	// Detection (AntiHunter-only)
 	"DRONE_START": {Name: "DRONE_START", Group: "Detection", Description: "Start drone detection", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
@@ -204,6 +215,9 @@ var ACKMap = map[string]string{
 	"STATUS_ACK":        "STATUS",
 	"VIBRATION_OFF_ACK": "VIBRATION_OFF",
 	"VIBRATION_ON_ACK":  "VIBRATION_ON",
+	// PROBE_ACK covers STARTED/STOPPED/BUSY. Falls back to most-recent-pending
+	// PROBE_* like CONFIG_ACK / STOP_ACK do, so PROBE_STOP also closes via this.
+	"PROBE_ACK": "PROBE_START",
 	// Gate-sensor ACKs. CODE_* all share CODE_ACK — latest pending CODE_* wins
 	// via the same most-recent-pending pattern used by CONFIG_ACK.
 	// CODE_LIST is a special case: the firmware replies with a plain CODES:
@@ -288,13 +302,40 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 			if err := validateParam(pd, val); err != nil {
 				return nil, fmt.Errorf("param %q: %w", pd.Key, err)
 			}
+			// bool params translate to a fixed literal (e.g. "+PROBE") when true
+			// and are dropped when false. The raw "true"/"false" is never sent.
+			if pd.Type == "bool" {
+				if parseBool(val) && pd.LiteralTrue != "" {
+					cleanParams = append(cleanParams, pd.LiteralTrue)
+				}
+				continue
+			}
 		}
 		cleanParams = append(cleanParams, val)
 	}
 
-	// Append FOREVER if requested and allowed
+	// Append FOREVER if requested and allowed.
+	// FOREVER goes BEFORE bool literals like "+PROBE" so the on-wire order is
+	// e.g. "DEVICE_SCAN_START:2:60:FOREVER:+PROBE" — but our loop above already
+	// appended +PROBE, so we splice FOREVER in just before any trailing bool
+	// literals. AntiHunter firmware tolerates either order, but the more
+	// idiomatic form is mode:duration:FOREVER:+PROBE.
 	if forever && def.AllowForever {
-		cleanParams = append(cleanParams, "FOREVER")
+		// Find the index of the first translated bool literal (these are appended
+		// in original-position order, so they trail any non-bool params).
+		insertAt := len(cleanParams)
+		for i := len(def.Params) - 1; i >= 0; i-- {
+			if def.Params[i].Type == "bool" && def.Params[i].LiteralTrue != "" {
+				// scan cleanParams for that literal
+				for j := len(cleanParams) - 1; j >= 0; j-- {
+					if cleanParams[j] == def.Params[i].LiteralTrue {
+						insertAt = j
+						break
+					}
+				}
+			}
+		}
+		cleanParams = append(cleanParams[:insertAt], append([]string{"FOREVER"}, cleanParams[insertAt:]...)...)
 	}
 
 	// Build line: {target} {name}:{p1}:{p2}:...
@@ -311,8 +352,24 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 	}, nil
 }
 
+// parseBool accepts "true"/"false"/"1"/"0"/"yes"/"no" (case-insensitive).
+// Returns false for empty or unrecognized strings.
+func parseBool(val string) bool {
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
 func validateParam(pd ParamDef, val string) error {
 	switch pd.Type {
+	case "bool":
+		switch strings.ToLower(strings.TrimSpace(val)) {
+		case "true", "false", "1", "0", "yes", "no", "on", "off", "":
+			return nil
+		}
+		return fmt.Errorf("must be true or false")
 	case "number", "duration":
 		f, err := strconv.ParseFloat(val, 64)
 		if err != nil {

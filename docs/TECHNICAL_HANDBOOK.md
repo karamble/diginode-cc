@@ -264,6 +264,22 @@ Exponential backoff with jitter (all configurable via env vars):
 ```
 Fields mapped to `DroneDetection` JSON tags: `uasId`, `mac`, `rssi`, `latitude`, `longitude`, `altitude`, `speed`, `pilotLatitude`, `pilotLongitude`
 
+**Text parser `PROBE_HIT` format** (probe-request scanner, AntiHunter ≥ Apr 2026):
+```
+<nodeId>: PROBE_HIT <MAC> <vendor> RSSI=<int> CH=<int> [SSID="<text>"] [GHOST] [DST]
+```
+- `<vendor>` is firmware-side OUI lookup, the literal `Randomized` for locally-administered MACs, or `Unknown`
+- `GHOST` flags an SSID with no AP response in the current scan window — likely off-network reconnaissance
+- `DST` flags a probe addressed TO a configured target MAC — silent-device detection
+- Emits `target-detected` (inventory upsert with SSID) plus `alert` (Category=`probe`, Level=`INFO`, elevated to `NOTICE` on `GHOST` or `DST`). Vendor + flags ride in alert payload; manufacturer column is filled by server-side OUI lookup.
+- Probe-category alerts also feed `probes.Service.Track()` which upserts a row in `probe_ssids` keyed on `(ssid, node_id)`. The SSID is the stable identity since modern devices randomize MAC on every probe — `(ssid, node_id)` reveals which networks are probed at which sensors, and an SSID that's `GHOST` at site A but responded at site B proves a device traveled between them. Distinct-MAC counts within 24h are tracked in `probe_ssid_mac_samples` and exposed as `distinctMacs24h` on each row.
+- Driven by the `PROBE_START`/`PROBE_STOP` commands or by the `+PROBE` flag on `DEVICE_SCAN_START`.
+
+**Probe SSID query endpoints:**
+- `GET /api/probes/ssids?limit=N` — full table ordered by `last_seen DESC`
+- `GET /api/probes/ssids/by-ssid?ssid=<name>` — all sensors that saw this SSID probed for
+- `GET /api/probes/ssids/by-node?nodeId=<id>` — all SSIDs seen at this sensor, ordered by hit count
+
 **Drone simulation** (`scripts/simulate-drone.sh`):
 - Bash script using `curl` to POST simulated DRONE lines to `/api/serial/simulate`
 - Configurable coordinates (`--lat`, `--lon`), distance, speed, altitude, drone count
@@ -373,6 +389,15 @@ WebSocket alert events include `notifyVisual` and `notifyAudible` flags so the f
 - Retry: configurable max retries (default 3)
 - ACK handling via `HandleACK(cmdID, result)`
 - Persistence: immediate on state change
+
+**Command registry** (`internal/commands/builder.go`) is the source of truth for the
+on-wire format and is served to the frontend via `/api/commands/types`. Commands
+are filtered per node by `SupportedTypes` (antihunter, gatesensor, or `*` universal).
+The probe-request scanner (`PROBE_START`, `PROBE_STOP`) maps to firmware emitting
+`PROBE_ACK:STARTED|STOPPED|BUSY` and streams `PROBE_HIT` telemetry while running.
+`DEVICE_SCAN_START` accepts an optional `captureProbes` boolean param that
+translates to the `:+PROBE` wire token, capturing probes during a regular device
+scan in addition to the `DEVICE:` lines.
 
 ### 6.7 Webhooks
 

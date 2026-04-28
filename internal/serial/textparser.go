@@ -198,13 +198,30 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*CODES:(?P<codes>.*)$`),
 			handler: p.handleCodes,
 		},
+		// PROBE_HIT: probe-request scanner telemetry (added 2026-04 upstream).
+		// Format (verbatim from AntiHunter scanner.cpp:2514 sendProbeHitMesh):
+		//   "nodeId: PROBE_HIT MAC VENDOR RSSI=-42 CH=6 [SSID=\"name\"] [GHOST] [DST]"
+		// Vendor is OUI-table-derived, or literal "Randomized" when the source MAC
+		// is locally-administered, or "Unknown". GHOST flags an SSID with no AP
+		// response in the current scan window. DST flags a probe addressed TO one
+		// of the configured target MACs (silent-device detection).
+		// MUST precede the generic ACK pattern below — "PROBE_HIT" has no colon
+		// after the keyword, but a careless future ACK regex extension could
+		// otherwise capture "HIT" as a kind. Order is the safety net.
+		{
+			name: "probe-hit",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*PROBE_HIT\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<vendor>\S+)\s+RSSI=(?P<rssi>-?\d+)\s+CH=(?P<chan>\d+)(?:\s+SSID="(?P<ssid>[^"]*)")?(?P<ghost>\s+GHOST)?(?P<dst>\s+DST)?\s*$`),
+			handler: p.handleProbeHit,
+		},
 		// ACK lines: "nodeId: SCAN_ACK:OK" / "nodeId: DRONE_ACK:" etc.
 		// VIBRATION_(ON|OFF)_ACK was added for the vibration toggle; HB/HITS_RESET/
-		// DEBOUNCE/CODE for the meshtastic-gate-sensor CMD handler.
+		// DEBOUNCE/CODE for the meshtastic-gate-sensor CMD handler. PROBE_ACK
+		// was added with the probe-request scanner — emits STARTED/STOPPED/BUSY.
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE)_ACK):?(?P<status>[A-Z_]*)`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE)_ACK):?(?P<status>[A-Z_]*)`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"
@@ -1079,6 +1096,84 @@ func (p *TextParser) handleStartup(match []string, names []string, raw string) [
 		Data:     map[string]interface{}{"message": g["msg"]},
 		Raw:      raw,
 	}}
+}
+
+// handleProbeHit parses PROBE_HIT lines from the AntiHunter probe-request
+// scanner. Emits two events: a target-detected (so the inventory pipeline
+// upserts the source MAC + SSID) and an alert (so probe activity surfaces
+// in the alerts feed and webhook stream). The alert level is elevated to
+// NOTICE when ghost SSID or DST flag is set — both indicate something more
+// interesting than a routine probe burst.
+func (p *TextParser) handleProbeHit(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+
+	mac := strings.ToUpper(g["mac"])
+	vendor := g["vendor"]
+	rssi := parseOptInt(g["rssi"])
+	channel := parseOptInt(g["chan"])
+	ssid := g["ssid"]
+	ghost := strings.TrimSpace(g["ghost"]) == "GHOST"
+	dst := strings.TrimSpace(g["dst"]) == "DST"
+	randomized := strings.EqualFold(vendor, "Randomized")
+
+	// target-detected payload — the manager.go callback wires data["name"] →
+	// inventory.last_ssid and skips data["mac"] when empty. Manufacturer is
+	// resolved server-side from MAC OUI in main.go, so we only pass the SSID
+	// here; the firmware-side vendor string rides in the alert payload below
+	// so the "Randomized" sentinel is preserved without contaminating
+	// inventory's manufacturer column.
+	detectData := map[string]interface{}{
+		"mac":     mac,
+		"rssi":    rssi,
+		"type":    "WiFi",
+		"channel": channel,
+	}
+	if ssid != "" {
+		detectData["name"] = ssid
+	}
+
+	detected := &ParsedEvent{
+		Kind:   "target-detected",
+		NodeID: nodeID,
+		Data:   detectData,
+		Raw:    raw,
+	}
+
+	alertData := map[string]interface{}{
+		"mac":     mac,
+		"vendor":  vendor,
+		"rssi":    rssi,
+		"channel": channel,
+	}
+	if ssid != "" {
+		alertData["ssid"] = ssid
+	}
+	if ghost {
+		alertData["ghostSsid"] = true
+	}
+	if dst {
+		alertData["dstMatch"] = true
+	}
+	if randomized {
+		alertData["randomized"] = true
+	}
+
+	level := "INFO"
+	if ghost || dst {
+		level = "NOTICE"
+	}
+
+	alert := &ParsedEvent{
+		Kind:     "alert",
+		Level:    level,
+		Category: "probe",
+		NodeID:   nodeID,
+		Data:     alertData,
+		Raw:      raw,
+	}
+
+	return []*ParsedEvent{detected, alert}
 }
 
 func (p *TextParser) handleVibration(match []string, names []string, raw string) []*ParsedEvent {
