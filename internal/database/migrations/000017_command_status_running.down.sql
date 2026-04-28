@@ -1,0 +1,3 @@
+-- Postgres has no portable way to remove a single value from an enum type
+-- (it would orphan rows that already use it). Rolling back this migration
+-- intentionally does nothing — the enum value remains.

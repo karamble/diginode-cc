@@ -312,6 +312,9 @@ func main() {
 			ghost, _ := data["ghostSsid"].(bool)
 			dst, _ := data["dstMatch"].(bool)
 			probesSvc.Track(ssid, nodeID, mac, rssi, channel, ghost, dst)
+			// Bump the live probeHits counter on the running PROBE_START
+			// command so the operator sees progress in the details modal.
+			commandsSvc.RecordProbeHit(nodeID)
 		}
 	})
 

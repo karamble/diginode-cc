@@ -588,7 +588,7 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
   // produce device detections and the time window would give bogus hits.
   const isScanCommand = useMemo(() => {
     const n = cmd.commandType || cmd.name || ''
-    return /SCAN_START|BASELINE_START|DEAUTH_START|DRONE_START|RANDOMIZATION_START/i.test(n)
+    return /SCAN_START|BASELINE_START|DEAUTH_START|DRONE_START|RANDOMIZATION_START|PROBE_START/i.test(n)
   }, [cmd.commandType, cmd.name])
 
   const { data: devices = [], isLoading: devicesLoading } = useQuery({

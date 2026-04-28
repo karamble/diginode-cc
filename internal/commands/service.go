@@ -2,6 +2,7 @@ package commands
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -269,6 +270,75 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	})
 
 	go s.persistCommand(match)
+
+	// PROBE_ACK:STOPPED is also implicitly the close signal for the still-
+	// RUNNING PROBE_START it terminates. The matcher above only updates the
+	// latest matching pending command (which after a PROBE_STOP send is the
+	// PROBE_STOP itself), so fan the STOPPED out to close PROBE_START too.
+	if ackKind == "PROBE_ACK" && strings.ToUpper(ackStatus) == "STOPPED" {
+		for id, cmd := range s.pending {
+			name := cmd.Name
+			if name == "" {
+				name = cmd.CommandType
+			}
+			if name != "PROBE_START" || cmd.Status != StatusRunning {
+				continue
+			}
+			if cmd.AckNode != "" && ackNode != "" && cmd.AckNode != ackNode {
+				continue
+			}
+			cmd.Status = StatusOK
+			cmd.FinishedAt = &now
+			delete(s.pending, id)
+			s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: cmd})
+			go s.persistCommand(cmd)
+		}
+	}
+}
+
+// RecordProbeHit increments the probeHits counter on the latest RUNNING
+// PROBE_START command. Called from main.go's alert callback whenever a
+// PROBE_HIT alert is dispatched. ackNode is the source node of the hit;
+// when the running command has an AckNode set we require it to match so a
+// hit at AH64 doesn't get attributed to a parallel scan at AH99.
+func (s *Service) RecordProbeHit(ackNode string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var match *Command
+	for _, cmd := range s.pending {
+		name := cmd.Name
+		if name == "" {
+			name = cmd.CommandType
+		}
+		if name != "PROBE_START" || cmd.Status != StatusRunning {
+			continue
+		}
+		if cmd.AckNode != "" && ackNode != "" && cmd.AckNode != ackNode {
+			continue
+		}
+		if match == nil || cmd.CreatedAt.After(match.CreatedAt) {
+			match = cmd
+		}
+	}
+	if match == nil {
+		return
+	}
+	if match.Result == nil {
+		match.Result = map[string]interface{}{}
+	}
+	// JSON-decoded numbers come back as float64; freshly created counters
+	// are int. Handle both so the increment doesn't reset the counter when
+	// the command was reloaded from DB.
+	switch v := match.Result["probeHits"].(type) {
+	case float64:
+		match.Result["probeHits"] = v + 1
+	case int:
+		match.Result["probeHits"] = v + 1
+	default:
+		match.Result["probeHits"] = 1
+	}
+	s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: match})
+	go s.persistCommand(match)
 }
 
 func (s *Service) send(cmd *Command) {
@@ -366,7 +436,8 @@ func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
 	}
 	rows, err := s.db.Pool.Query(ctx, `
 		SELECT id, target_node, command_type, payload, status,
-			sent_at, acked_at, result, retry_count, max_retries, created_at
+			sent_at, acked_at, finished_at, result, retry_count, max_retries, created_at,
+			target, name, params, line, ack_kind, ack_status, ack_node, result_text, error_text
 		FROM commands ORDER BY created_at DESC LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
@@ -377,9 +448,13 @@ func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
 	for rows.Next() {
 		var cmd Command
 		var payloadJSON, resultJSON []byte
+		var target, name, line, ackKind, ackStatus, ackNode, resultText, errorText sql.NullString
+		var params []string
 		if err := rows.Scan(&cmd.ID, &cmd.TargetNode, &cmd.CommandType, &payloadJSON,
-			&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &resultJSON,
-			&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt); err != nil {
+			&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &cmd.FinishedAt, &resultJSON,
+			&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt,
+			&target, &name, &params, &line, &ackKind, &ackStatus, &ackNode,
+			&resultText, &errorText); err != nil {
 			continue
 		}
 		if payloadJSON != nil {
@@ -388,6 +463,15 @@ func (s *Service) List(ctx context.Context, limit int) ([]*Command, error) {
 		if resultJSON != nil {
 			json.Unmarshal(resultJSON, &cmd.Result)
 		}
+		cmd.Target = target.String
+		cmd.Name = name.String
+		cmd.Line = line.String
+		cmd.AckKind = ackKind.String
+		cmd.AckStatus = ackStatus.String
+		cmd.AckNode = ackNode.String
+		cmd.ResultText = resultText.String
+		cmd.ErrorText = errorText.String
+		cmd.Params = params
 		cmds = append(cmds, &cmd)
 	}
 	return cmds, nil
