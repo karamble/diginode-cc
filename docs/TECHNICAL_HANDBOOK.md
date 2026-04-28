@@ -833,6 +833,47 @@ docker compose up -d    # Starts PostgreSQL + DigiNode CC, reads .env
 
 Tile cache persisted via `tiles` Docker volume.
 
+### Platform notes: Linux vs macOS USB
+
+The `docker-compose.yml` ships with `privileged: true` and a `/dev:/dev` bind mount so the container can open the Heltec/ESP serial device named in `SERIAL_DEVICE` (typically `/dev/ttyUSB0` or `/dev/ttyACM0`). This is a **Linux-host convenience** and is the supported path for serial-attached deployments.
+
+**Linux (reference platform):**
+- `/dev` is the host's live devtmpfs; new devices appear inside the container without a restart.
+- `privileged: true` grants the container access to `/dev/tty*` character devices.
+- Hot-plug works because the bind mount tracks the host kernel's view.
+
+**macOS (Docker Desktop / Colima / Rancher Desktop):**
+- Containers run inside a LinuxKit (Docker Desktop) or VZ (Colima) Linux VM. The container's `/dev` is the *VM's* device tree, not the Mac's.
+- The Mac's `/dev/tty.usbserial-*` is not reachable from inside the VM, so `SERIAL_DEVICE=/dev/tty.usbserial-XXXX` will fail to open even with `--device=` or `privileged: true`.
+- This is a Docker-on-macOS architectural limitation, not a DigiNode CC bug.
+
+**Recommended macOS standalone setup** — keep Postgres containerized, run DigiNode CC natively against the host's serial device:
+
+```bash
+# 1. Postgres only (use the upstream image directly)
+docker run -d --name diginode-pg \
+  -e POSTGRES_USER=diginode -e POSTGRES_PASSWORD=diginode -e POSTGRES_DB=diginode \
+  -p 5433:5432 postgres:16-alpine
+
+# 2. Build and run the binary natively
+make all
+export JWT_SECRET="$(openssl rand -hex 32)"
+export DATABASE_URL="postgres://diginode:diginode@localhost:5433/diginode?sslmode=disable"
+export SERIAL_DEVICE="/dev/tty.usbserial-XXXX"   # ls /dev/tty.usbserial-* to find it
+export SERIAL_BAUD="115200"
+./diginode-cc
+```
+
+The native binary uses `go.bug.st/serial` and opens the macOS tty directly — no virtualization in the path.
+
+**Advanced workarounds (unsupported but viable):**
+
+- **`usbip` / `usbipd-win`** — share USB from the Mac/Windows host into the Docker VM. Brittle, requires daemons on both sides.
+- **Network serial bridge** (e.g. `ser2net` on a Pi or ESP) — exposes the LoRa device's serial stream over TCP. Requires `SERIAL_DEVICE` to accept a `tcp://host:port` form, which is **not currently supported** by the serial manager (it opens a tty path only).
+- **Colima with `--vm-type=vz`** plus a USB extension — newer macOS-native virtualization stack with limited USB pass-through. Not turn-key.
+
+The Linux-host compose flow remains unchanged and is the recommended path for production deployments — including the Pi / gotailme overlay described below.
+
 ### Self-built image with token baked in
 
 To produce an image that renders the map without relying on runtime env:

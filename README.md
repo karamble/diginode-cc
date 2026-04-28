@@ -73,6 +73,15 @@ Open `http://localhost:3000` and log in with:
 
 > Maps render with free OpenStreetMap tiles out of the box — no token needed. If you want the dark "Matrix (JAWG)" style, grab a free token at [jawg.io](https://www.jawg.io/), set `JAWG_ACCESS_TOKEN` in `.env`, and switch via the layer control on any map page. Your selection persists across browser reloads and reboots. Operator-supplied env always overrides whatever may be baked into a prebuilt image.
 
+#### macOS / Docker Desktop note
+
+The bundled `docker-compose.yml` is **Linux-first**. USB pass-through to a Heltec/ESP works out of the box on Linux hosts (via `privileged: true` + `/dev:/dev`) but **does not work** on macOS:
+
+- Docker Desktop runs containers inside a LinuxKit VM, so USB devices plugged into the Mac never appear at `/dev/tty.usbserial-*` inside the container — `SERIAL_DEVICE` will not connect to a serial device.
+- `privileged: true` and the `/dev:/dev` bind mount only elevate within the VM; neither makes host USB visible.
+
+**Recommended on macOS:** run the Go binary natively (see [Without Docker](#without-docker)) and keep only Postgres containerized. The native binary opens `/dev/tty.usbserial-*` directly via `go.bug.st/serial`. See the [Technical Handbook §12](docs/TECHNICAL_HANDBOOK.md#12-deployment) for the full recipe and notes on advanced workarounds (usbip, ser2net, Colima `vz`).
+
 ### Without Docker
 
 Prerequisites: Go 1.25+, Node.js 20+, PostgreSQL 16
