@@ -96,7 +96,7 @@ func (s *Service) Load(ctx context.Context) error {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			site_id, origin_site_id, temperature_c, temperature_f,
-			temperature_updated_at, last_message
+			temperature_updated_at, last_message, node_type, ah_short_id
 		FROM nodes`)
 	if err != nil {
 		return fmt.Errorf("query nodes: %w", err)
@@ -119,11 +119,12 @@ func (s *Service) Load(ctx context.Context) error {
 			lastHeard, tempUpdatedAt                *time.Time
 			isOnline                                *bool
 			tempC, tempF                            *float64
+			nodeType, ahShortID                     string
 		)
 		if err := rows.Scan(&nodeNum, &nodeID, &longName, &shortName, &hwModel, &role,
 			&lat, &lon, &alt, &battery, &voltage, &chanUtil, &airUtilTx, &snr,
 			&lastHeard, &isOnline, &siteID, &originSiteID, &tempC, &tempF,
-			&tempUpdatedAt, &lastMessage); err != nil {
+			&tempUpdatedAt, &lastMessage, &nodeType, &ahShortID); err != nil {
 			slog.Error("nodes.Load: scan failed", "error", err)
 			continue
 		}
@@ -191,6 +192,12 @@ func (s *Service) Load(ctx context.Context) error {
 		}
 		if lastMessage != nil {
 			n.LastMessage = *lastMessage
+		}
+		if nodeType != "" {
+			n.NodeType = NodeType(nodeType)
+		}
+		if ahShortID != "" {
+			n.AHShortID = ahShortID
 		}
 		n.IsOnline = isNodeOnline(n)
 		s.nodes[nodeNum] = n
@@ -279,37 +286,47 @@ func (s *Service) TouchNode(nodeNum uint32, rxSNR float32, rxRSSI int32) {
 // MarkLocal flags a node as the local C2 gateway (ourselves).
 func (s *Service) MarkLocal(nodeNum uint32) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	node, exists := s.nodes[nodeNum]
 	if !exists {
+		s.mu.Unlock()
 		return
 	}
 	node.IsLocal = true
 	node.NodeType = NodeTypeGotailme
+	s.mu.Unlock()
+	go s.persistNode(node)
 }
 
 // ClassifyNode sets the node type based on observed behavior.
 // Called when we learn something about what a node does.
 func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	node, exists := s.nodes[nodeNum]
 	if !exists {
+		s.mu.Unlock()
 		return
 	}
 	// Only upgrade classification, never downgrade.
 	// antihunter and gatesensor are more specific than gotailme; once set,
 	// don't let a later generic text-message reclassify them as gotailme.
 	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor {
+		s.mu.Unlock()
 		return
 	}
-	if nodeType != "" {
-		node.NodeType = NodeType(nodeType)
-		s.hub.Broadcast(ws.Event{
-			Type:    ws.EventNodeUpdate,
-			Payload: node,
-		})
+	if nodeType == "" {
+		s.mu.Unlock()
+		return
 	}
+	node.NodeType = NodeType(nodeType)
+	s.mu.Unlock()
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
+	// Persist so the badge survives container restarts — without this the
+	// type reverts to gotailme on next NodeInfo packet after a reload,
+	// because Load() reads the column but classification was never written.
+	go s.persistNode(node)
 }
 
 // LookupNodeIDAndSite returns the hex node ID and site ID for a mesh node number.
@@ -661,9 +678,9 @@ func (s *Service) persistNode(node *Node) {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			temperature_c, temperature_f, temperature_updated_at, last_message,
-			updated_at)
+			node_type, ah_short_id, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-			$17, $18, $19, $20, NOW())
+			$17, $18, $19, $20, $21, $22, NOW())
 		ON CONFLICT (node_num) DO UPDATE SET
 			node_id = COALESCE(EXCLUDED.node_id, nodes.node_id),
 			long_name = COALESCE(EXCLUDED.long_name, nodes.long_name),
@@ -684,6 +701,14 @@ func (s *Service) persistNode(node *Node) {
 			temperature_f = COALESCE(EXCLUDED.temperature_f, nodes.temperature_f),
 			temperature_updated_at = COALESCE(EXCLUDED.temperature_updated_at, nodes.temperature_updated_at),
 			last_message = COALESCE(EXCLUDED.last_message, nodes.last_message),
+			node_type = CASE
+				WHEN EXCLUDED.node_type = '' THEN nodes.node_type
+				ELSE EXCLUDED.node_type
+			END,
+			ah_short_id = CASE
+				WHEN EXCLUDED.ah_short_id = '' THEN nodes.ah_short_id
+				ELSE EXCLUDED.ah_short_id
+			END,
 			updated_at = NOW()`,
 		node.NodeNum, nullStr(node.NodeID), nullStr(node.LongName), nullStr(node.ShortName),
 		nullStr(node.HWModel), nullStr(node.Role),
@@ -694,6 +719,7 @@ func (s *Service) persistNode(node *Node) {
 		nullTime(node.LastHeard), node.IsOnline,
 		nullFloat(node.TemperatureC), nullFloat(node.TemperatureF),
 		nullTimePtr(node.TemperatureUpdatedAt), nullStr(node.LastMessage),
+		string(node.NodeType), node.AHShortID,
 	)
 	if err != nil {
 		slog.Error("failed to persist node", "nodeNum", node.NodeNum, "error", err)
