@@ -391,6 +391,16 @@ export default function CommandsPage() {
                       </option>
                     ))}
                   </select>
+                ) : p.type === 'bool' ? (
+                  <label className="flex items-center gap-2 px-2 py-1.5 bg-dark-800 border border-dark-600 rounded text-xs text-dark-300 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={paramValues[p.key] === 'true'}
+                      onChange={e => setParam(p.key, e.target.checked ? 'true' : '')}
+                      className="rounded border-dark-600 bg-dark-900"
+                    />
+                    <span className="text-dark-400 text-[10px]">{p.placeholder || 'Enable'}</span>
+                  </label>
                 ) : (
                   <input
                     type={p.type === 'number' || p.type === 'duration' ? 'number' : 'text'}

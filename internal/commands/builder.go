@@ -81,9 +81,10 @@ var Registry = map[string]*CommandDef{
 	}},
 	"DEVICE_SCAN_STOP": {Name: "DEVICE_SCAN_STOP", Group: "Scanning", Description: "Stop device scan", SupportedTypes: typeAH},
 	"STOP":             {Name: "STOP", Group: "Scanning", Description: "Stop all scanning activities", SupportedTypes: typeAH},
-	"PROBE_START": {Name: "PROBE_START", Group: "Scanning", Description: "Start passive probe-request sniffer (logs probe MAC + SSID + GHOST/DST flags)", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
+	"PROBE_START": {Name: "PROBE_START", Group: "Scanning", Description: "Start passive probe-request sniffer. Default broadcasts only CONFIG_TARGETS matches; toggle 'broadcastAll' to push every probe (still 60s dedup per MAC+SSID).", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}, Placeholder: "0=WiFi 1=BLE 2=Both"},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
+		{Key: "broadcastAll", Label: "Broadcast all probes", Type: "bool", LiteralTrue: "+ALL", Placeholder: "Push every probe (not just CONFIG_TARGETS matches)"},
 	}},
 	"PROBE_STOP": {Name: "PROBE_STOP", Group: "Scanning", Description: "Stop probe-request sniffer", SupportedTypes: typeAH},
 
