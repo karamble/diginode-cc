@@ -175,6 +175,13 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		wantPrefix = "HB_"
 	case "CODE_ACK":
 		wantPrefix = "CODE_"
+	case "PROBE_ACK":
+		// PROBE_ACK covers PROBE_START (STARTED) and PROBE_STOP (STOPPED).
+		// The latest-pending tiebreak naturally directs STARTED to the just-
+		// sent PROBE_START and STOPPED to the just-sent PROBE_STOP. The
+		// follow-up fan-out below also closes any still-RUNNING PROBE_START
+		// when a STOPPED ack lands.
+		wantPrefix = "PROBE_"
 	case "SCAN_DONE_ACK":
 		wantSuffix = "SCAN_START" // matches SCAN_START + DEVICE_SCAN_START
 	}
