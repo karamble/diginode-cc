@@ -282,6 +282,12 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	// RUNNING PROBE_START it terminates. The matcher above only updates the
 	// latest matching pending command (which after a PROBE_STOP send is the
 	// PROBE_STOP itself), so fan the STOPPED out to close PROBE_START too.
+	// We don't filter on ackNode here — cmd.AckNode is whatever raw string
+	// the dispatcher passed when STARTED arrived (often Meshtastic hex like
+	// "!02ed5f04") while incoming ackNode may be the canonical AH short ID
+	// from main.go's normalization, so the formats wouldn't match. Across a
+	// single mesh there's normally just one running PROBE_START at a time,
+	// and the explicit name/status filters above are sufficient.
 	if ackKind == "PROBE_ACK" && strings.ToUpper(ackStatus) == "STOPPED" {
 		for id, cmd := range s.pending {
 			name := cmd.Name
@@ -289,9 +295,6 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 				name = cmd.CommandType
 			}
 			if name != "PROBE_START" || cmd.Status != StatusRunning {
-				continue
-			}
-			if cmd.AckNode != "" && ackNode != "" && cmd.AckNode != ackNode {
 				continue
 			}
 			cmd.Status = StatusOK
@@ -305,10 +308,15 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 
 // RecordProbeHit increments the probeHits counter on the latest RUNNING
 // PROBE_START command. Called from main.go's alert callback whenever a
-// PROBE_HIT alert is dispatched. ackNode is the source node of the hit;
-// when the running command has an AckNode set we require it to match so a
-// hit at AH64 doesn't get attributed to a parallel scan at AH99.
+// PROBE_HIT alert is dispatched. We don't filter on ackNode — cmd.AckNode
+// is whatever raw string the dispatcher passed when the STARTED ACK
+// landed (often Meshtastic hex like "!02ed5f04") while incoming ackNode
+// is the canonical AH short ID from main.go's normalization, so the
+// formats wouldn't reliably match. Across a single mesh there's normally
+// just one running PROBE_START at a time; the latest-CreatedAt tiebreak
+// is sufficient when there happen to be more.
 func (s *Service) RecordProbeHit(ackNode string) {
+	_ = ackNode // accepted for API symmetry with potential future filtering
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var match *Command
@@ -318,9 +326,6 @@ func (s *Service) RecordProbeHit(ackNode string) {
 			name = cmd.CommandType
 		}
 		if name != "PROBE_START" || cmd.Status != StatusRunning {
-			continue
-		}
-		if cmd.AckNode != "" && ackNode != "" && cmd.AckNode != ackNode {
 			continue
 		}
 		if match == nil || cmd.CreatedAt.After(match.CreatedAt) {
