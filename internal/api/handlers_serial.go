@@ -257,6 +257,35 @@ func (s *Server) handleSendSerialDisplayConfig(w http.ResponseWriter, r *http.Re
 	writeJSON(w, http.StatusOK, map[string]string{"status": "display config sent"})
 }
 
+// handleSendSerialRequestNodeInfo asks a remote node (or all nodes via
+// broadcast) to re-emit its NodeInfo packet. Useful when the local radio's
+// nodedb cache is empty after a reboot or nodedb-reset and you don't want to
+// wait for the default ~3h NodeInfo broadcast cadence. The reply lands via
+// the normal dispatcher path and updates the node row in-place.
+//
+//	POST /api/serial/request-node-info  {"nodeNum": 48990972}  // specific node
+//	POST /api/serial/request-node-info  {"nodeNum": 0}         // broadcast (all)
+func (s *Server) handleSendSerialRequestNodeInfo(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeNum uint32 `json:"nodeNum"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+
+	data := serial.BuildNodeInfoRequest(req.NodeNum)
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":  "requested",
+		"nodeNum": req.NodeNum,
+	})
+}
+
 func (s *Server) handleSendSerialNodedbReset(w http.ResponseWriter, r *http.Request) {
 	nodeNum := s.localNodeNum(w)
 	if nodeNum == 0 {
