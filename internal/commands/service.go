@@ -234,8 +234,16 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	//                  "CANCELLED" (ERASE_ACK), "" (TRI_START_ACK) —
 	//                  single-shot toggle/config commands; treat as
 	//                  terminal OK.
+	//   - "UPDATED"/"EXISTS" (gate-sensor CODE_ACK on CODE_ADD where the
+	//                  target code was already registered — UPDATED=name
+	//                  changed, EXISTS=no-op idempotent success). Both are
+	//                  terminal success: the requested end state is reached.
 	//   - "INVALID_*" (CONFIG_ACK:NODE_ID/RSSI on bad params) — terminal
 	//                  error; token stays in ErrorText for display.
+	//   - "FULL"      (gate-sensor CODE_ACK when all 16 slots are used) —
+	//                  capacity-exhausted terminal error.
+	//   - "NOT_FOUND" (gate-sensor CODE_ACK on CODE_REMOVE for an absent
+	//                  code) — operation can't proceed, terminal error.
 	upper := strings.ToUpper(ackStatus)
 	isRunning := upper == "STARTED"
 	isTerminalOK := !isRunning && (upper == "" ||
@@ -244,8 +252,10 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		upper == "STOPPED" ||
 		upper == "ENABLED" || upper == "DISABLED" ||
 		upper == "CANCELLED" || upper == "CANCELED" ||
+		upper == "UPDATED" || upper == "EXISTS" ||
 		strings.HasPrefix(upper, "INTERVAL"))
 	isTerminalErr := upper == "ERROR" || upper == "FAILED" || upper == "TIMEOUT" ||
+		upper == "FULL" || upper == "NOT_FOUND" ||
 		strings.HasPrefix(upper, "INVALID")
 
 	switch {
