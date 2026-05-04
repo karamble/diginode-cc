@@ -198,6 +198,19 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*CODES:(?P<codes>.*)$`),
 			handler: p.handleCodes,
 		},
+		// Gate sensor RF trigger event: "Gate: TRIGGERED:150910 doorsens1".
+		// One frame per physical trigger (firmware-side debounce collapses the
+		// KERUI retransmit burst). The trailing token is the registered code's
+		// friendly name, "unnamed" when added without one, or "unknown" when
+		// the code isn't registered (so operators can CODE_ADD it from the mesh).
+		// Emits an alert so the trigger lands in the alerts feed + webhooks;
+		// node classification is deliberately driven by STATUS frames, not this.
+		{
+			name: "gate-triggered",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*TRIGGERED:(?P<code>\d+)(?:\s+(?P<name>\S+))?\s*$`),
+			handler: p.handleGateTriggered,
+		},
 		// PROBE_HIT: probe-request scanner telemetry (added 2026-04 upstream).
 		// Format (verbatim from AntiHunter scanner.cpp:2514 sendProbeHitMesh):
 		//   "nodeId: PROBE_HIT MAC VENDOR RSSI=-42 CH=6 [SSID=\"name\"] [GHOST] [DST]"
@@ -1047,6 +1060,35 @@ func (p *TextParser) handleCodes(match []string, names []string, raw string) []*
 	}
 
 	return []*ParsedEvent{telemetryEvent, ackEvent}
+}
+
+// handleGateTriggered parses a gate-sensor RF trigger event. The frame format is:
+//
+//	"<id>: TRIGGERED:<decimal> [<name>]"
+//
+// where <name> is the friendly name registered for the code, "unnamed" when
+// the code was added without a name, or "unknown" when the code isn't in the
+// sensor's registry. Emits a single alert event with category "gate-triggered"
+// so it surfaces in the alerts feed / webhook stream alongside other security
+// events. Trigger frames are unsolicited — no synthetic ACK to close any
+// command, unlike CODES: which always pairs with CODE_LIST.
+func (p *TextParser) handleGateTriggered(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	data := map[string]interface{}{
+		"code": parseOptInt(g["code"]),
+	}
+	if name := strings.TrimSpace(g["name"]); name != "" {
+		data["name"] = name
+		data["registered"] = !strings.EqualFold(name, "unknown")
+	}
+	return []*ParsedEvent{{
+		Kind:     "alert",
+		Level:    "NOTICE",
+		Category: "gate-triggered",
+		NodeID:   g["id"],
+		Data:     data,
+		Raw:      raw,
+	}}
 }
 
 func (p *TextParser) handleAnomaly(match []string, names []string, raw string) []*ParsedEvent {
