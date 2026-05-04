@@ -110,6 +110,17 @@ export default function NodesPage() {
     },
   })
 
+  // requestNodeInfo asks a remote node to re-broadcast its NodeInfo over the
+  // air. Different from refreshNodes (which dumps the local Heltec's cache) —
+  // this fixes the case where the cache is empty after a reboot/nodedb-reset
+  // and we'd otherwise wait up to ~3h for the next spontaneous broadcast.
+  const requestNodeInfo = useMutation({
+    mutationFn: (nodeNum: number) => api.post('/serial/request-node-info', { nodeNum }),
+    onSuccess: () => {
+      setTimeout(() => queryClient.invalidateQueries({ queryKey: ['nodes'] }), 3000)
+    },
+  })
+
   const deleteNode = useMutation({
     mutationFn: (nodeNum: number) => api.delete(`/nodes/${nodeNum}`),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['nodes'] }),
@@ -516,9 +527,21 @@ export default function NodesPage() {
                                 refreshNodes.mutate()
                               }}
                               disabled={refreshNodes.isPending}
+                              title="Re-dump the local Heltec's nodedb cache (no over-the-air traffic)"
                               className="px-3 py-1 text-xs rounded bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-dark-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors border border-dark-600/50"
                             >
-                              {refreshNodes.isPending ? 'Refreshing...' : 'Update Telemetry'}
+                              {refreshNodes.isPending ? 'Reloading...' : 'Reload Local Cache'}
+                            </button>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                requestNodeInfo.mutate(n.nodeNum)
+                              }}
+                              disabled={requestNodeInfo.isPending}
+                              title="Ask this node over the air to re-broadcast its NodeInfo (User payload)"
+                              className="px-3 py-1 text-xs rounded bg-dark-700 text-dark-300 hover:bg-dark-600 hover:text-dark-200 disabled:opacity-40 disabled:cursor-not-allowed transition-colors border border-dark-600/50"
+                            >
+                              {requestNodeInfo.isPending ? 'Requesting...' : 'Request NodeInfo'}
                             </button>
                           </div>
                         </td>
