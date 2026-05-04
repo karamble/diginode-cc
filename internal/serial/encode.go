@@ -10,6 +10,7 @@ import (
 const (
 	PortNumTextMessage = 1
 	PortNumPosition    = 3
+	PortNumNodeInfo    = 4
 	PortNumAdmin       = 6
 	PortNumTelemetry   = 67
 )
@@ -304,6 +305,27 @@ func BuildAdminReboot(nodeNum uint32, seconds uint32) []byte {
 //	Data: portnum=TELEMETRY_APP, payload=empty, want_response=true
 func BuildTelemetryRequest(nodeNum uint32) []byte {
 	data := buildDataMessageWithResponse(PortNumTelemetry, nil)
+	mp := buildMeshPacket(nodeNum, data)
+	return buildToRadio(mp)
+}
+
+// BuildNodeInfoRequest asks a remote node to re-broadcast its NodeInfo (User
+// payload — LongName, ShortName, HwModel, MacAddr). Empty Data payload +
+// want_response=true on PortNumNodeInfo is the standard Meshtastic peer
+// query (mirrors `meshtastic --request-info`). The reply arrives as a
+// regular NODEINFO_APP packet and lands in Service.HandleNodeInfo via the
+// dispatcher's existing port routing.
+//
+// Pass 0 for nodeNum to broadcast (BroadcastAddr) and refresh every reachable
+// node at once — useful after a local nodedb reset, when the radio's cache
+// is empty and waiting for the default 3h NodeInfo cadence isn't acceptable.
+//
+//	Data: portnum=NODEINFO_APP, payload=empty, want_response=true
+func BuildNodeInfoRequest(nodeNum uint32) []byte {
+	if nodeNum == 0 {
+		nodeNum = BroadcastAddr
+	}
+	data := buildDataMessageWithResponse(PortNumNodeInfo, nil)
 	mp := buildMeshPacket(nodeNum, data)
 	return buildToRadio(mp)
 }
