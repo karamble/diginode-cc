@@ -286,6 +286,42 @@ func (s *Server) handleSendSerialRequestNodeInfo(w http.ResponseWriter, r *http.
 	})
 }
 
+// handleSendSerialRequestTelemetry asks a specific remote node to send its
+// current DeviceMetrics (battery, voltage, channel utilization). The reply
+// lands via the dispatcher's PortNumTelemetry path and updates the node row
+// in-place. Useful when a peer's Meshtastic firmware has device-metrics
+// broadcasting disabled or set to a long interval — pull on demand instead
+// of waiting.
+//
+// Per-node only: nodeNum must be > 0. Broadcasting a telemetry request to
+// every reachable peer would be wasteful airtime for limited UI value.
+//
+//	POST /api/serial/request-telemetry  {"nodeNum": 48990972}
+func (s *Server) handleSendSerialRequestTelemetry(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		NodeNum uint32 `json:"nodeNum"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if req.NodeNum == 0 {
+		writeError(w, http.StatusBadRequest, "nodeNum is required (broadcast not supported for telemetry)")
+		return
+	}
+
+	data := serial.BuildTelemetryRequest(req.NodeNum)
+	if err := s.serialMgr.SendToRadio(data); err != nil {
+		writeError(w, http.StatusInternalServerError, "send failed: "+err.Error())
+		return
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]interface{}{
+		"status":  "requested",
+		"nodeNum": req.NodeNum,
+	})
+}
+
 func (s *Server) handleSendSerialNodedbReset(w http.ResponseWriter, r *http.Request) {
 	nodeNum := s.localNodeNum(w)
 	if nodeNum == 0 {

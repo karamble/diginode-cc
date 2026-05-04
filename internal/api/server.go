@@ -382,6 +382,7 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/shutdown", s.handleSendSerialShutdown)
 				r.Post("/nodedb-reset", s.handleSendSerialNodedbReset)
 				r.Post("/request-node-info", s.handleSendSerialRequestNodeInfo)
+				r.Post("/request-telemetry", s.handleSendSerialRequestTelemetry)
 				// GPS broadcast toggle — writes gpsBroadcastEnabled app_config
 				// and pushes the matching gps_mode to the Heltec. Mirror point
 				// for gotailme's position-broadcast toggle.

@@ -293,14 +293,20 @@ func BuildAdminReboot(nodeNum uint32, seconds uint32) []byte {
 }
 
 // BuildTelemetryRequest builds a ToRadio requesting fresh DeviceMetrics from
-// the target node. Meshtastic's TelemetryModule replies to any TELEMETRY_APP
-// packet with want_response=true by sending its current Telemetry (including
+// the target node. Works for the local Heltec or any reachable mesh peer:
+// Meshtastic's TelemetryModule replies to any TELEMETRY_APP packet with
+// want_response=true by sending its current Telemetry (including
 // battery_level + voltage). The reply arrives as a regular incoming
-// TELEMETRY_APP packet on the connected serial link.
+// TELEMETRY_APP packet on the connected serial link and lands in
+// nodes.Service.HandleTelemetry via the dispatcher's existing port routing,
+// so the node row's battery updates in-place.
 //
-// diginode-cc's status broadcaster uses this before each STATUS broadcast
-// so the Batt:XX% field reflects the current reading rather than the
-// firmware-floored 30-min mesh telemetry cadence.
+// Two callers today:
+//   - statusbroadcast — before each STATUS broadcast, queries the local
+//     Heltec so the Batt:XX% field is current rather than firmware-floored
+//     to the 30-min mesh telemetry cadence.
+//   - NodesPage "Request Telemetry" button — pulls a remote peer's battery
+//     on demand without waiting for that peer's device_update_interval.
 //
 //	Data: portnum=TELEMETRY_APP, payload=empty, want_response=true
 func BuildTelemetryRequest(nodeNum uint32) []byte {
