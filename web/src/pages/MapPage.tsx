@@ -73,6 +73,8 @@ interface NodeRow {
 function nodeTypeLabel(t?: string): string {
   if (t === 'gotailme') return 'GTM'
   if (t === 'antihunter') return 'AH'
+  if (t === 'gatesensor') return 'GATE'
+  if (t === 'operator') return 'OP'
   return '?'
 }
 
@@ -234,11 +236,15 @@ export default function MapPage() {
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#3B82F6' }} />
-            <span className="text-dark-400">GTM ({nodeMarkers.filter((n: NodeRow) => n.nodeType !== 'antihunter').length})</span>
+            <span className="text-dark-400">GTM ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'gotailme' || !n.nodeType).length})</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#F97316' }} />
             <span className="text-dark-400">AH ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'antihunter').length})</span>
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#94A3B8' }} />
+            <span className="text-dark-400">OP ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'operator').length})</span>
           </div>
           <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 bg-orange-500" style={{ transform: 'rotate(45deg)', width: '10px', height: '10px' }} />

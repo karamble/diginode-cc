@@ -73,14 +73,22 @@ func extractAHShortID(payload string) string {
 	return m[1]
 }
 
-// isSensorData returns true if the text looks like AntiHunter DigiNode sensor output.
-// The keyword set mirrors every message shape the AntiHunter firmware can emit over
-// TEXTMSG — detections, heartbeats (normal + battery-saver), ACKs, triangulation,
-// startup, tamper, anomaly, camera events, and the boot self-test ping. Without
-// this breadth, a sensor that only emitted a heartbeat would get classified as a
-// generic gotailme node until it happened to fire a detection.
-func isSensorData(text string) bool {
+// isAHSensorOutput returns true if the text looks like AntiHunter sensor output.
+// This is a fallback signal — the strongest one is extractAHShortID's prefix
+// match. The keyword set covers AH frames that lost or stripped their leading
+// "[AHxx]:" id (e.g. wrap-around in long heartbeats), so a sensor still gets
+// classified even when the prefix is gone.
+//
+// Important: this function MUST NOT match operator-issued broadcast commands
+// like "@ALL SCAN_START" or "@AH64 STATUS". Those are commands TARGETING AH
+// nodes, not OUTPUT FROM them — a regular Meshtastic handheld sending one
+// would otherwise be misclassified as antihunter (this was the OP1/OP1.W bug).
+func isAHSensorOutput(text string) bool {
 	upper := strings.ToUpper(text)
+	// Operator broadcast commands always start with @TARGET — never AH output.
+	if strings.HasPrefix(strings.TrimLeft(upper, " \t"), "@") {
+		return false
+	}
 	return strings.Contains(upper, "STATUS:") ||
 		strings.Contains(upper, "DRONE:") ||
 		strings.Contains(upper, "TARGET:") ||
@@ -109,7 +117,6 @@ func isSensorData(text string) bool {
 		strings.Contains(upper, "SETUP_MODE:") ||
 		strings.Contains(upper, "BATTERY_SAVER") ||
 		strings.Contains(upper, "RTC_SYNC:") ||
-		strings.HasPrefix(upper, "@ALL ") ||
 		// Normal heartbeat: "nodeId: Time:X Temp:Y GPS:lat,lon" — no single unique
 		// keyword, but the Temp+GPS combo only appears on AntiHunter frames.
 		(strings.Contains(upper, "TEMP:") && strings.Contains(upper, "GPS:"))
@@ -133,7 +140,7 @@ var knownSensorTypes = map[string]bool{
 }
 
 // isGateSensorData returns true if the text is a STATUS frame whose Type: field
-// names a recognised sensor class. Runs before isSensorData() in the classifier
+// names a recognised sensor class. Runs before isAHSensorOutput() in the classifier
 // switch so a gatesensor-authored STATUS frame locks in as gatesensor rather
 // than antihunter (both share the "STATUS:" keyword, but only ours carries a
 // Type: declaration the AH parser ignores).
@@ -194,6 +201,11 @@ type NodeHandler interface {
 	// target this string (@AH01) — Meshtastic short-names are ignored by the
 	// sensor dispatcher.
 	SetAHShortID(nodeNum uint32, shortID string)
+	// GetLongName returns the node's NodeInfo-supplied long name, or "" if
+	// unknown. Used to distinguish gotailme-firmware nodes (LongName starts
+	// with "GoTailMe") from plain Meshtastic clients that look identical at
+	// the protobuf level.
+	GetLongName(nodeNum uint32) string
 }
 
 // DroneHandler processes drone detection events.
@@ -411,18 +423,22 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 	if d.nodeHandler != nil && mp.From != 0 {
 		d.nodeHandler.TouchNode(mp.From, mp.RxSNR, mp.RxRSSI)
 
-		// Classify node type based on message content.
-		// AntiHunter sensor nodes send STATUS:/DRONE:/TARGET:/DEVICE:/ATTACK: lines.
-		// Other C2 gateways (gotailme) send plain text messages or relay commands.
+		// Classify node type from observed wire behaviour. Most-specific first:
+		//   gatesensor → STATUS frame with a recognised Type: field
+		//   antihunter → leading [AHxx]: prefix or fingerprinted sensor output
+		//   gotailme   → NodeInfo LongName starts with "GoTailMe" (set at flash)
+		//   operator   → fallback for plain Meshtastic clients (handhelds, etc.)
 		if portNum == PortNumTextMessage && len(mp.Payload) > 0 {
 			text := string(mp.Payload)
 			switch {
 			case isGateSensorData(text):
 				d.nodeHandler.ClassifyNode(mp.From, "gatesensor")
-			case isSensorData(text):
+			case extractAHShortID(text) != "" || isAHSensorOutput(text):
 				d.nodeHandler.ClassifyNode(mp.From, "antihunter")
-			default:
+			case strings.HasPrefix(d.nodeHandler.GetLongName(mp.From), "GoTailMe"):
 				d.nodeHandler.ClassifyNode(mp.From, "gotailme")
+			default:
+				d.nodeHandler.ClassifyNode(mp.From, "operator")
 			}
 		} else if portNum == PortNumDetectionSensor {
 			d.nodeHandler.ClassifyNode(mp.From, "antihunter")
@@ -454,7 +470,7 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 			// what the node is currently doing. Only do this for recognizably
 			// AntiHunter output to avoid overwriting a node's row with arbitrary
 			// user chat.
-			if d.nodeHandler != nil && isSensorData(payload) {
+			if d.nodeHandler != nil && isAHSensorOutput(payload) {
 				d.nodeHandler.SetLastMessage(mp.From, payload)
 				// Extract the AntiHunter CONFIG_NODEID prefix ("AH01:" in
 				// "AH01: STATUS: ..."). This is what the remote dispatcher

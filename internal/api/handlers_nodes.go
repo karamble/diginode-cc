@@ -66,12 +66,26 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		lastHeard = &lh
 		lastSeen = &lh
 	}
+	// Display fallback for nodes that never sent a Meshtastic NodeInfo (the
+	// AntiHunter firmware doesn't), so the UI shows the AH CONFIG_NODEID
+	// instead of an empty row. Presentation-only — never written back to the
+	// stored Node so a real NodeInfo, if it ever arrives, wins.
+	id, name, shortName := n.NodeID, n.LongName, n.ShortName
+	if id == "" {
+		id = fmt.Sprintf("!%08x", n.NodeNum)
+	}
+	if name == "" && n.AHShortID != "" {
+		name = n.AHShortID
+	}
+	if shortName == "" && n.AHShortID != "" {
+		shortName = n.AHShortID
+	}
 	return nodeResponse{
-		ID:                   n.NodeID, // CC PRO uses the hex node ID string
+		ID:                   id, // CC PRO uses the hex node ID string
 		NodeNum:              n.NodeNum,
 		NodeType:             string(n.NodeType),
-		Name:                 n.LongName,
-		ShortName:            n.ShortName,
+		Name:                 name,
+		ShortName:            shortName,
 		HWModel:              n.HWModel,
 		MacAddr:              n.MacAddr,
 		Role:                 n.Role,

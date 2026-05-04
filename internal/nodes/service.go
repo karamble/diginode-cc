@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -23,6 +24,7 @@ type NodeType string
 
 const (
 	NodeTypeUnknown    NodeType = ""           // Not yet classified
+	NodeTypeOperator   NodeType = "operator"   // Plain Meshtastic client (operator handheld, 3rd-party hardware)
 	NodeTypeGotailme   NodeType = "gotailme"   // C2 gateway (runs DigiNode CC / CC PRO)
 	NodeTypeAntihunter NodeType = "antihunter" // AntiHunter detection sensor node
 	NodeTypeGatesensor NodeType = "gatesensor" // Gate sensor (Arduino Nano → Heltec TEXTMSG bridge)
@@ -256,6 +258,19 @@ func (s *Service) GetByNodeNum(nodeNum uint32) *Node {
 	return s.nodes[nodeNum]
 }
 
+// GetLongName returns the node's NodeInfo-supplied long name, or "" if the
+// node is unknown or hasn't sent NodeInfo yet. The dispatcher uses this to
+// distinguish gotailme-firmware nodes (LongName starts with "GoTailMe") from
+// plain Meshtastic operator devices that have the same protobuf footprint.
+func (s *Service) GetLongName(nodeNum uint32) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if n, ok := s.nodes[nodeNum]; ok {
+		return n.LongName
+	}
+	return ""
+}
+
 // TouchNode ensures a node entry exists for the given mesh node number.
 // Called by the dispatcher on every incoming mesh packet so remote nodes
 // appear in the node list even before we receive their full NodeInfo.
@@ -299,6 +314,13 @@ func (s *Service) MarkLocal(nodeNum uint32) {
 
 // ClassifyNode sets the node type based on observed behavior.
 // Called when we learn something about what a node does.
+//
+// Classification ladder, lowest → highest specificity:
+//
+//	operator (plain Meshtastic client) → gotailme (our C2 firmware) → antihunter / gatesensor (sensor firmware)
+//
+// Promotions go up the ladder; downgrades are blocked. operator is the lowest
+// rung so anything more specific replaces it.
 func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
 	s.mu.Lock()
 	node, exists := s.nodes[nodeNum]
@@ -306,18 +328,27 @@ func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
 		s.mu.Unlock()
 		return
 	}
-	// Only upgrade classification, never downgrade.
-	// antihunter and gatesensor are more specific than gotailme; once set,
-	// don't let a later generic text-message reclassify them as gotailme.
-	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor {
-		s.mu.Unlock()
-		return
-	}
 	if nodeType == "" {
 		s.mu.Unlock()
 		return
 	}
-	node.NodeType = NodeType(nodeType)
+	target := NodeType(nodeType)
+	if node.NodeType == target {
+		s.mu.Unlock()
+		return
+	}
+	// antihunter and gatesensor are leaf classifications — never downgrade.
+	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor {
+		s.mu.Unlock()
+		return
+	}
+	// gotailme can only be replaced by a more-specific sensor classification,
+	// not by a downgrade to operator.
+	if node.NodeType == NodeTypeGotailme && target == NodeTypeOperator {
+		s.mu.Unlock()
+		return
+	}
+	node.NodeType = target
 	s.mu.Unlock()
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventNodeUpdate,
@@ -402,10 +433,17 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 	}
 	node.IsOnline = isNodeOnline(node)
 
-	// Default unclassified nodes to gotailme — antihunter overrides
-	// when the dispatcher sees sensor data (STATUS:/DRONE:/TARGET: etc.)
-	if node.NodeType == NodeTypeUnknown {
-		node.NodeType = NodeTypeGotailme
+	// Classify based on the LongName the firmware self-reports. gotailme nodes
+	// are flashed with a "GoTailMe" prefix at manufacture; anything else is a
+	// plain Meshtastic client (operator handheld, 3rd-party hardware, etc.).
+	// Sensor types (antihunter / gatesensor) are set by the dispatcher when it
+	// sees their fingerprinted TEXTMSG output and are leaf — never overridden here.
+	if node.NodeType != NodeTypeAntihunter && node.NodeType != NodeTypeGatesensor {
+		if strings.HasPrefix(node.LongName, "GoTailMe") {
+			node.NodeType = NodeTypeGotailme
+		} else if node.NodeType == NodeTypeUnknown {
+			node.NodeType = NodeTypeOperator
+		}
 	}
 
 	slog.Info("node updated",
