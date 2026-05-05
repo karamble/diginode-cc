@@ -16,12 +16,15 @@ import (
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
-// ahShortIDRe pulls the 2–5 char AntiHunter CONFIG_NODEID prefix out of the
-// leading "AH01:" segment of a TEXTMSG body. The firmware emits this on every
-// frame it transmits (heartbeats, STATUS, detections, ACKs). Intentionally
-// strict: uppercase alphanumeric only, rejects names that collide with
-// AntiHunter reserved keywords (ALL, DRONE, SCAN, etc.) so a message like
-// "DRONE: ..." without a node-id prefix doesn't get misread as node "DRONE".
+// ahShortIDRe pulls the 2–5 char sensor CONFIG_NODEID prefix out of the
+// leading "HB64:" / "AH64:" segment of a TEXTMSG body. The Halberd firmware
+// (and legacy AntiHunter-named units) emits this on every frame it transmits
+// (heartbeats, STATUS, detections, ACKs). Intentionally strict: uppercase
+// alphanumeric only, rejects names that collide with reserved keywords (ALL,
+// DRONE, SCAN, etc.) so a message like "DRONE: ..." without a node-id prefix
+// doesn't get misread as node "DRONE". The regex itself is prefix-agnostic —
+// both AH<n> and HB<n> match — so dual-prefix support is automatic; the
+// per-prefix policy lives in extractAHShortID + reserved keywords below.
 var ahShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
 
 // sensorTypeFieldRe extracts the "Type:<CATEGORY>" field from a STATUS frame.
