@@ -14,13 +14,13 @@ const categories: Record<string, string[]> = {
   retention: ['nodePosRetentionDays', 'commandRetentionDays', 'auditRetentionDays'],
   auth: ['invitationExpiryHours', 'passwordResetExpiryHours'],
   rateLimit: ['perNodeCmdRate', 'globalCmdRate'],
-  meshBroadcast: ['gpsBroadcastEnabled', 'statusBroadcastEnabled', 'statusBroadcastIntervalSecs'],
+  meshBroadcast: ['gpsBroadcastEnabled', 'statusBroadcastEnabled', 'statusBroadcastIntervalSecs', 'statusReplyEnabled'],
 }
 
 // Keys that should render as an instant toggle switch instead of the generic
 // text input. Flipping the switch writes immediately (no Save button). The
 // backend fires a hardware side-effect when gpsBroadcastEnabled changes.
-const toggleKeys = new Set<string>(['gpsBroadcastEnabled', 'statusBroadcastEnabled'])
+const toggleKeys = new Set<string>(['gpsBroadcastEnabled', 'statusBroadcastEnabled', 'statusReplyEnabled'])
 
 // Keys that render as a clamped number input with Save/Cancel.
 const intervalKeys = new Set<string>(['statusBroadcastIntervalSecs'])
@@ -52,7 +52,7 @@ const categoryDescriptions: Record<string, string> = {
   retention: 'How long to keep node positions, commands, and audit logs',
   auth: 'Invitation and password reset token expiry periods',
   rateLimit: 'Per-node and global command rate limits',
-  meshBroadcast: 'Periodic STATUS heartbeat over LoRa mesh + GPS visibility (mirrored with gotailme position toggle)',
+  meshBroadcast: 'Periodic STATUS heartbeat + on-demand STATUS reply over LoRa mesh, plus GPS visibility',
   other: 'Additional configuration settings',
 }
 

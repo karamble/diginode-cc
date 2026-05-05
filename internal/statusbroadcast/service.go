@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -121,6 +122,88 @@ func (s *Service) gpsEnabledFromConfig() bool {
 		return true
 	}
 	return enabled
+}
+
+func (s *Service) replyEnabledFromConfig() bool {
+	var enabled bool
+	if err := s.cfg.GetTyped("statusReplyEnabled", &enabled); err != nil {
+		return true
+	}
+	return enabled
+}
+
+// statusRequestRe matches an operator-issued STATUS request line. The first
+// token is the @target (case-insensitive: ALL, NODE_<X>, or AHxx-style short
+// IDs); the second is the bare verb STATUS with no params. Anything past the
+// verb (whitespace + comment) is tolerated and ignored.
+var statusRequestRe = regexp.MustCompile(`(?i)^\s*@(ALL|NODE_[A-Za-z0-9]+|[A-Za-z0-9]{2,6})\s+STATUS\s*$`)
+
+// HandleStatusRequest is invoked for every inbound TEXTMSG payload. If the
+// payload matches "@<target> STATUS" and the target resolves to this node,
+// it queues a STATUS broadcast (same frame the periodic broadcaster emits).
+//
+// Gated by statusReplyEnabled in AppConfig so operators can mute on-demand
+// replies without disabling the periodic heartbeat. Replies are broadcast
+// (not DM'd back to the sender) to match AntiHunter sensor behaviour and so
+// every C2 listening on the mesh sees the response.
+//
+// from is the Meshtastic source node number. We skip our own broadcasts to
+// avoid feedback loops if a request ever happened to echo back at us.
+func (s *Service) HandleStatusRequest(from, _to, _channel uint32, text string) {
+	if text == "" {
+		return
+	}
+	m := statusRequestRe.FindStringSubmatch(strings.TrimSpace(text))
+	if m == nil {
+		return
+	}
+	if !s.replyEnabledFromConfig() {
+		return
+	}
+
+	localNum := s.nodes.GetLocalNodeNum()
+	if localNum == 0 {
+		return
+	}
+	if from == localNum {
+		// Our own STATUS frames don't start with "@", so this shouldn't fire,
+		// but guard anyway in case a future change reshapes the broadcast.
+		return
+	}
+
+	target := strings.ToUpper(m[1])
+	if !s.targetMatchesLocal(target, localNum) {
+		return
+	}
+
+	if !s.Trigger() {
+		// A reply is already queued — coalesce. Matches AntiHunter sensor
+		// behaviour where rapid-fire STATUS commands collapse into one frame.
+		slog.Debug("status request coalesced", "from", from, "target", target)
+		return
+	}
+	slog.Info("status request received", "from", from, "target", target)
+}
+
+// targetMatchesLocal returns true if the upper-cased target token (without
+// the leading "@") refers to this node.
+func (s *Service) targetMatchesLocal(target string, localNum uint32) bool {
+	if target == "ALL" {
+		return true
+	}
+	local := s.nodes.GetByNodeNum(localNum)
+	shortName := ""
+	if local != nil {
+		shortName = strings.ToUpper(local.ShortName)
+	}
+	numStr := strconv.FormatUint(uint64(localNum), 10)
+	if rest, ok := strings.CutPrefix(target, "NODE_"); ok {
+		return (shortName != "" && rest == shortName) || rest == numStr
+	}
+	// Bare short-id form (e.g. "@AH34") — only matches if it exactly equals
+	// our Meshtastic short name. Diginode-cc doesn't have an AntiHunter-style
+	// CONFIG_NODEID, so this is effectively the legacy/aliased form.
+	return shortName != "" && target == shortName
 }
 
 func (s *Service) intervalFromConfig() time.Duration {

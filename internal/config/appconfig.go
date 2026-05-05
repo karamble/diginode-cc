@@ -135,6 +135,11 @@ func (ac *AppConfig) EnsureDefaults(ctx context.Context) error {
 		"gpsBroadcastEnabled":         true,
 		"statusBroadcastEnabled":      true,
 		"statusBroadcastIntervalSecs": 600, // 10 min; UI-clamped 60..3600
+		// statusReplyEnabled gates the on-demand STATUS reply: when an
+		// operator sends "@NODE_<us> STATUS" or "@ALL STATUS" over the mesh,
+		// we reply with the same frame the periodic broadcaster emits. Mirror
+		// of AntiHunter sensor firmware behaviour.
+		"statusReplyEnabled": true,
 	}
 
 	for key, val := range defaults {

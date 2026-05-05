@@ -456,6 +456,10 @@ func main() {
 	// AppConfig on each tick so UI edits take effect without a restart.
 	statusSvc := statusbroadcast.NewService(appCfg, nodesSvc, serialMgr, dispatcher)
 	go statusSvc.Start(ctx)
+	// On-demand STATUS reply: when an operator broadcasts "@NODE_<us> STATUS"
+	// (or "@ALL STATUS") on the mesh, we answer with the same frame the
+	// periodic broadcaster emits. Gated by statusReplyEnabled.
+	dispatcher.SetStatusRequestHandler(statusSvc)
 
 	// Start MQTT service
 	if mqttSvc != nil {

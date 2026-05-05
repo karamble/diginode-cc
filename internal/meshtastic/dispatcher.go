@@ -157,14 +157,15 @@ func isGateSensorData(text string) bool {
 
 // Dispatcher routes decoded Meshtastic packets to domain handlers.
 type Dispatcher struct {
-	hub           *ws.Hub
-	nodeHandler   NodeHandler
-	droneHandler  DroneHandler
-	chatHandler   ChatHandler
-	posHandler    PositionHandler
-	onDeviceTime  func(t time.Time)
-	onAlertEval   func(ctx context.Context, evt alerts.DetectionEvent)
-	onWebhookFire func(eventType string, payload interface{})
+	hub                  *ws.Hub
+	nodeHandler          NodeHandler
+	droneHandler         DroneHandler
+	chatHandler          ChatHandler
+	posHandler           PositionHandler
+	statusRequestHandler StatusRequestHandler
+	onDeviceTime         func(t time.Time)
+	onAlertEval          func(ctx context.Context, evt alerts.DetectionEvent)
+	onWebhookFire        func(eventType string, payload interface{})
 	dedup         map[uint64]time.Time // packet hash → last seen
 	dedupMu       sync.Mutex
 	localNodeSeen bool   // true after first NodeInfo from wantConfig
@@ -216,6 +217,13 @@ type DroneHandler interface {
 // ChatHandler processes text messages.
 type ChatHandler interface {
 	HandleTextMessage(from, to uint32, channel uint32, text string)
+}
+
+// StatusRequestHandler is invoked for every inbound TEXTMSG so it can
+// recognise operator-issued "@<target> STATUS" requests and reply with a
+// node telemetry frame. Implemented by statusbroadcast.Service.
+type StatusRequestHandler interface {
+	HandleStatusRequest(from, to uint32, channel uint32, text string)
 }
 
 // PositionHandler processes position updates.
@@ -306,6 +314,11 @@ func (d *Dispatcher) SetDroneHandler(h DroneHandler) { d.droneHandler = h }
 
 // SetChatHandler sets the chat handler.
 func (d *Dispatcher) SetChatHandler(h ChatHandler) { d.chatHandler = h }
+
+// SetStatusRequestHandler sets the on-demand STATUS request handler. When
+// set, every inbound TEXTMSG is forwarded so the handler can decide whether
+// the payload is a "@<us> STATUS" request and reply accordingly.
+func (d *Dispatcher) SetStatusRequestHandler(h StatusRequestHandler) { d.statusRequestHandler = h }
 
 // SetDeviceTimeCallback sets a callback invoked when a device time is received.
 func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
@@ -449,6 +462,13 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 	case PortNumTextMessage:
 		if d.chatHandler != nil && len(mp.Payload) > 0 {
 			d.chatHandler.HandleTextMessage(mp.From, mp.To, mp.Channel, string(mp.Payload))
+		}
+		// On-demand STATUS reply: if the payload is "@<us> STATUS" or
+		// "@ALL STATUS" and replies are enabled in AppConfig, the handler
+		// queues a STATUS broadcast (same frame the periodic broadcaster
+		// emits). Mirror of AntiHunter sensor firmware's STATUS response.
+		if d.statusRequestHandler != nil && len(mp.Payload) > 0 {
+			d.statusRequestHandler.HandleStatusRequest(mp.From, mp.To, mp.Channel, string(mp.Payload))
 		}
 		if d.onWebhookFire != nil && len(mp.Payload) > 0 {
 			d.onWebhookFire("mesh.text_message", map[string]interface{}{
