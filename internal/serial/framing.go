@@ -643,7 +643,8 @@ func decodePosition(data []byte) *PositionData {
 				p.Altitude = int32(val)
 			case 4:
 				p.Time = uint32(val)
-			case 10:
+			case 21:
+				// sats_in_view; field 10 is timestamp_millis_adjust (deprecated).
 				p.Sats = uint32(val)
 			}
 		} else {

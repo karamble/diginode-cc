@@ -25,6 +25,7 @@ interface NodeRow {
   uptimeSeconds?: number
   humidity?: number
   pressure?: number
+  satsInView?: number
   temperature?: number
   temperatureC?: number
   temperatureF?: number
@@ -524,6 +525,12 @@ export default function NodesPage() {
                                   <span className="text-dark-500 block">Altitude</span>
                                   <span className="text-dark-300 font-mono">
                                     {n.altitude ? `${n.altitude.toFixed(0)} m` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Satellites</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.satsInView !== undefined && n.satsInView > 0 ? n.satsInView : '-'}
                                   </span>
                                 </div>
                                 {n.siteName && (

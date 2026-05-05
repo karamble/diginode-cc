@@ -34,6 +34,7 @@ type nodeResponse struct {
 	UptimeSeconds        uint32     `json:"uptimeSeconds,omitempty"`
 	Humidity             float32    `json:"humidity,omitempty"`
 	Pressure             float32    `json:"pressure,omitempty"`
+	SatsInView           uint32     `json:"satsInView,omitempty"`
 	Temperature          float64    `json:"temperature,omitempty"`
 	TemperatureC         float64    `json:"temperatureC,omitempty"`
 	TemperatureF         float64    `json:"temperatureF,omitempty"`
@@ -105,6 +106,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		UptimeSeconds:        n.UptimeSeconds,
 		Humidity:             n.Humidity,
 		Pressure:             n.Pressure,
+		SatsInView:           n.SatsInView,
 		Temperature:          n.Temperature,
 		TemperatureC:         n.TemperatureC,
 		TemperatureF:         n.TemperatureF,

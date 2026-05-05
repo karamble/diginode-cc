@@ -53,6 +53,7 @@ type Node struct {
 	UptimeSeconds      uint32    `json:"uptimeSeconds,omitempty"`
 	Humidity           float32   `json:"humidity,omitempty"`
 	Pressure           float32   `json:"pressure,omitempty"`
+	SatsInView         uint32    `json:"satsInView,omitempty"`
 	Temperature        float64   `json:"temperature,omitempty"`
 	SNR                float32   `json:"snr,omitempty"`
 	RSSI               int32     `json:"rssi"`
@@ -431,6 +432,9 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 		node.Latitude = info.Position.Latitude()
 		node.Longitude = info.Position.Longitude()
 		node.Altitude = float64(info.Position.Altitude)
+		if info.Position.Sats > 0 {
+			node.SatsInView = info.Position.Sats
+		}
 	}
 
 	if info.DeviceMetrics != nil {
@@ -691,6 +695,9 @@ func (s *Service) HandlePosition(from uint32, pos *serial.PositionData) {
 	node.Latitude = pos.Latitude()
 	node.Longitude = pos.Longitude()
 	node.Altitude = float64(pos.Altitude)
+	if pos.Sats > 0 {
+		node.SatsInView = pos.Sats
+	}
 	node.LastHeard = time.Now()
 	node.IsOnline = true
 

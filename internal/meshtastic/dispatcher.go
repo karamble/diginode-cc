@@ -628,7 +628,8 @@ func decodePositionPayload(data []byte) *serial.PositionData {
 				pos.Altitude = int32(val)
 			case 4:
 				pos.Time = uint32(val)
-			case 10:
+			case 21:
+				// sats_in_view; field 10 is timestamp_millis_adjust (deprecated).
 				pos.Sats = uint32(val)
 			}
 		} else {
