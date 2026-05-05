@@ -285,7 +285,14 @@ export default function CommandsPage() {
     // 400 in the preview alert box, and that alert is visually identical to
     // a send error. This also catches the post-send case where onSuccess
     // clears paramValues to {} while selectedCmd stays set.
-    if (activeDef?.params.some(p => p.required && !paramValues[p.key])) {
+    // FOREVER overrides duration: when the box is checked, the firmware
+    // ignores the numeric value, so we skip the required-fill gate for any
+    // "duration" param. The backend builder applies the same rule.
+    if (activeDef?.params.some(p => {
+      if (!p.required || paramValues[p.key]) return false
+      if (forever && activeDef.allowForever && p.type === 'duration') return false
+      return true
+    })) {
       setPreviewLine('')
       setPreviewError('')
       return
@@ -389,7 +396,12 @@ export default function CommandsPage() {
             {activeDef.params.map(p => (
               <div key={p.key}>
                 <label className="text-[10px] text-dark-500 block mb-1">
-                  {p.label} {p.required && <span className="text-red-400">*</span>}
+                  {p.label}{' '}
+                  {p.required && (forever && activeDef.allowForever && p.type === 'duration' ? (
+                    <span className="text-dark-500" title="Ignored when FOREVER is checked">(ignored)</span>
+                  ) : (
+                    <span className="text-red-400">*</span>
+                  ))}
                 </label>
                 {p.type === 'select' ? (
                   <select
@@ -596,18 +608,20 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
     return (t === 'ALL' || t === 'BROADCAST') ? '' : t
   }, [cmd.target])
 
-  // Scan window = sent → finished (or now if still RUNNING). Falls back
-  // to ackedAt+3s for legacy short-runner scans where finishedAt isn't
-  // distinct from ackedAt. Long-running scans like PROBE_START set
-  // ackedAt when STARTED arrives but emit detections for the rest of the
-  // scan window; finishedAt is the right upper bound there. +3s slack
-  // accounts for late-arriving frames after the close signal.
+  // Scan window = sent → finished. While the scan is still RUNNING we leave
+  // the upper bound open (undefined) so the periodic refetch below picks up
+  // detections that arrive between polls — pinning seenBefore to "now at
+  // mount" would silently exclude every late-arriving frame. After the scan
+  // closes we fall back to finishedAt (or ackedAt+3s for short-runner scans
+  // where the firmware doesn't emit a distinct *_DONE).
   const { seenAfter, seenBefore } = useMemo(() => {
     const sent = cmd.sentAt || cmd.createdAt
     const endRef = cmd.finishedAt || cmd.ackedAt
-    const before = cmd.status === 'RUNNING' || !endRef
-      ? new Date().toISOString()
-      : new Date(new Date(endRef).getTime() + 3000).toISOString()
+    const before = cmd.status === 'RUNNING'
+      ? undefined
+      : endRef
+        ? new Date(new Date(endRef).getTime() + 3000).toISOString()
+        : undefined
     return { seenAfter: sent, seenBefore: before }
   }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt, cmd.finishedAt, cmd.status])
 
@@ -628,6 +642,9 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
       return api.get<InventoryDevice[]>(`/inventory?${q.toString()}`)
     },
     enabled: isScanCommand,
+    // Poll while the scan is still RUNNING so the device tables fill in
+    // live as the sensor reports detections back.
+    refetchInterval: cmd.status === 'RUNNING' ? 5000 : false,
   })
 
   // Split scan results by radio band so the operator can see WiFi vs BLE
@@ -682,6 +699,7 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
       return api.get<ProbeSSID[]>(`/probes/ssids/window?${q.toString()}`)
     },
     enabled: isProbeCommand,
+    refetchInterval: cmd.status === 'RUNNING' ? 5000 : false,
   })
 
   const resultStr = formatResult(cmd.result)

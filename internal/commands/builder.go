@@ -276,6 +276,26 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 		return nil, fmt.Errorf("command %s cannot target @ALL", name)
 	}
 
+	// FOREVER scans run continuously, so the operator shouldn't have to fill
+	// a numeric duration just to satisfy a Required check that the firmware
+	// will ignore anyway. Substitute "0" into any blank duration slot so the
+	// positional wire format keeps its alignment ("SCAN_START:0:0:1,6,11:FOREVER")
+	// and the validators below pass uniformly. Firmware accepts duration <= 0
+	// as forever even without the FOREVER token, so 0 is a safe default.
+	if forever && def.AllowForever {
+		for i, pd := range def.Params {
+			if pd.Type != "duration" {
+				continue
+			}
+			for len(params) <= i {
+				params = append(params, "")
+			}
+			if strings.TrimSpace(params[i]) == "" {
+				params[i] = "0"
+			}
+		}
+	}
+
 	// Trim empty trailing params
 	for len(params) > 0 && strings.TrimSpace(params[len(params)-1]) == "" {
 		params = params[:len(params)-1]
@@ -300,6 +320,13 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 		}
 		if i < len(def.Params) {
 			pd := def.Params[i]
+			// FOREVER overrides duration: the "0" we substituted above is a
+			// positional placeholder, not a real value, so don't run it through
+			// the Min: 1 / Max: 86400 numeric range check.
+			if forever && def.AllowForever && pd.Type == "duration" {
+				cleanParams = append(cleanParams, val)
+				continue
+			}
 			if err := validateParam(pd, val); err != nil {
 				return nil, fmt.Errorf("param %q: %w", pd.Key, err)
 			}
