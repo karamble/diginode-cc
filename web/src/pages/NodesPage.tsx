@@ -13,6 +13,7 @@ interface NodeRow {
   hwModel?: string
   macAddr?: string
   role?: string
+  isLicensed?: boolean
   firmwareVersion?: string
   lat?: number
   lon?: number
@@ -21,6 +22,9 @@ interface NodeRow {
   voltage?: number
   channelUtilization?: number
   airUtilTx?: number
+  uptimeSeconds?: number
+  humidity?: number
+  pressure?: number
   temperature?: number
   temperatureC?: number
   temperatureF?: number
@@ -42,6 +46,18 @@ interface NodeRow {
 // Treat missing, unparseable, or pre-2001 timestamps as unknown — the backend
 // may emit Go's zero time ("0001-01-01T00:00:00Z") for nodes the radio knows
 // about but never heard in this session.
+// formatUptime renders DeviceMetrics.uptime_seconds as e.g. "3d 2h" or "47m".
+// Returns "-" for falsy / zero values so empty cells render consistently.
+function formatUptime(secs?: number): string {
+  if (!secs || secs <= 0) return '-'
+  const d = Math.floor(secs / 86400)
+  const h = Math.floor((secs % 86400) / 3600)
+  const m = Math.floor((secs % 3600) / 60)
+  if (d > 0) return `${d}d ${h}h`
+  if (h > 0) return `${h}h ${m}m`
+  return `${m}m`
+}
+
 function timeAgo(iso?: string): string {
   if (!iso) return '-'
   const t = new Date(iso).getTime()
@@ -414,6 +430,12 @@ export default function NodesPage() {
                                   <span className="text-dark-500 block">Firmware</span>
                                   <span className="text-dark-300 font-mono">{n.firmwareVersion || '-'}</span>
                                 </div>
+                                <div>
+                                  <span className="text-dark-500 block">Licensed</span>
+                                  <span className={n.isLicensed ? 'text-amber-400' : 'text-dark-500'}>
+                                    {n.isLicensed ? 'Ham operator' : 'no'}
+                                  </span>
+                                </div>
                               </div>
                             </div>
 
@@ -467,6 +489,22 @@ export default function NodesPage() {
                                   <span className="text-dark-500 block">Air TX</span>
                                   <span className="text-dark-300 font-mono">
                                     {n.airUtilTx !== undefined ? `${n.airUtilTx.toFixed(2)}%` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Uptime</span>
+                                  <span className="text-dark-300 font-mono">{formatUptime(n.uptimeSeconds)}</span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Humidity</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.humidity !== undefined && n.humidity > 0 ? `${n.humidity.toFixed(1)}%` : '-'}
+                                  </span>
+                                </div>
+                                <div>
+                                  <span className="text-dark-500 block">Pressure</span>
+                                  <span className="text-dark-300 font-mono">
+                                    {n.pressure !== undefined && n.pressure > 0 ? `${n.pressure.toFixed(1)} hPa` : '-'}
                                   </span>
                                 </div>
                               </div>

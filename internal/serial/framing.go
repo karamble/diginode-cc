@@ -180,12 +180,13 @@ type NodeInfoLite struct {
 }
 
 type UserInfo struct {
-	ID        string
-	LongName  string
-	ShortName string
-	MacAddr   string // BLE MAC address (formatted XX:XX:XX:XX:XX:XX)
-	HWModel   string
-	Role      string
+	ID         string
+	LongName   string
+	ShortName  string
+	MacAddr    string // BLE MAC address (formatted XX:XX:XX:XX:XX:XX)
+	HWModel    string
+	Role       string
+	IsLicensed bool // ham radio operator flag (User.is_licensed = field 6)
 }
 
 type PositionData struct {
@@ -590,6 +591,8 @@ func decodeUserInfo(data []byte) *UserInfo {
 			case 5:
 				user.HWModel = hwModelName(int(val))
 			case 6:
+				user.IsLicensed = val != 0
+			case 7:
 				user.Role = roleName(int(val))
 			}
 		} else {
@@ -625,8 +628,6 @@ func decodePosition(data []byte) *PositionData {
 				p.LatitudeI = val
 			case 2:
 				p.LongitudeI = val
-			case 3:
-				p.Altitude = val
 			}
 		} else if wireType == 0 {
 			val, n := decodeVarint(data[pos:])
@@ -635,6 +636,11 @@ func decodePosition(data []byte) *PositionData {
 			}
 			pos += n
 			switch fieldNum {
+			case 3:
+				// altitude is plain int32, not sfixed32 — varint with sign
+				// preserved by truncating to int32 (negative values arrive
+				// as 10-byte sign-extended varints).
+				p.Altitude = int32(val)
 			case 4:
 				p.Time = uint32(val)
 			case 10:

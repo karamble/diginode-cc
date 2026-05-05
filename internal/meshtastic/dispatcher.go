@@ -171,6 +171,11 @@ type Dispatcher struct {
 	localNodeSeen bool   // true after first NodeInfo from wantConfig
 	localNodeNum  uint32 // our local Heltec's mesh node number
 	serialMgr     *serial.Manager
+	// pendingFirmware holds the FirmwareVersion from FromRadio.metadata when
+	// it arrives BEFORE the local NodeInfo (the wantConfig dump emits
+	// my_info → metadata → ... → node_info, so localNodeNum is unknown
+	// when metadata lands). Applied as soon as MarkLocal fires.
+	pendingFirmware string
 
 	// On-demand DeviceMetrics request state. Only one outstanding query is
 	// supported at a time; callers that try to overlap will get ErrBusy.
@@ -207,6 +212,10 @@ type NodeHandler interface {
 	// with "GoTailMe") from plain Meshtastic clients that look identical at
 	// the protobuf level.
 	GetLongName(nodeNum uint32) string
+	// SetFirmwareVersion records the firmware version reported by the local
+	// Heltec via FromRadio.metadata. Only the locally-attached radio sends
+	// its own firmware version — remote nodes don't broadcast theirs.
+	SetFirmwareVersion(nodeNum uint32, firmware string)
 }
 
 // DroneHandler processes drone detection events.
@@ -361,6 +370,9 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 				d.localNodeSeen = true
 				d.localNodeNum = pkt.NodeInfo.Num
 				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
+				if d.pendingFirmware != "" {
+					d.nodeHandler.SetFirmwareVersion(pkt.NodeInfo.Num, d.pendingFirmware)
+				}
 			}
 		}
 
@@ -385,6 +397,12 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 			slog.Info("radio metadata",
 				"firmware", pkt.Metadata.FirmwareVersion,
 				"bluetooth", pkt.Metadata.HasBluetooth)
+			if pkt.Metadata.FirmwareVersion != "" {
+				d.pendingFirmware = pkt.Metadata.FirmwareVersion
+				if d.nodeHandler != nil && d.localNodeSeen && d.localNodeNum != 0 {
+					d.nodeHandler.SetFirmwareVersion(d.localNodeNum, pkt.Metadata.FirmwareVersion)
+				}
+			}
 		}
 	}
 }
@@ -596,8 +614,6 @@ func decodePositionPayload(data []byte) *serial.PositionData {
 				pos.LatitudeI = val
 			case 2:
 				pos.LongitudeI = val
-			case 3:
-				pos.Altitude = val
 			}
 		} else if wireType == 0 {
 			val, n := decodeVarint(data[p:])
@@ -606,6 +622,10 @@ func decodePositionPayload(data []byte) *serial.PositionData {
 			}
 			p += n
 			switch fieldNum {
+			case 3:
+				// altitude is plain int32, not sfixed32 — varint with sign
+				// preserved by truncating to int32.
+				pos.Altitude = int32(val)
 			case 4:
 				pos.Time = uint32(val)
 			case 10:

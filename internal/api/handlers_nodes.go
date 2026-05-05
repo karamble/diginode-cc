@@ -22,6 +22,7 @@ type nodeResponse struct {
 	HWModel              string     `json:"hwModel,omitempty"`
 	MacAddr              string     `json:"macAddr,omitempty"`
 	Role                 string     `json:"role,omitempty"`
+	IsLicensed           bool       `json:"isLicensed,omitempty"`
 	FirmwareVersion      string     `json:"firmwareVersion,omitempty"`
 	Lat                  float64    `json:"lat,omitempty"`
 	Lon                  float64    `json:"lon,omitempty"`
@@ -30,6 +31,9 @@ type nodeResponse struct {
 	Voltage              float32    `json:"voltage,omitempty"`
 	ChannelUtilization   float32    `json:"channelUtilization,omitempty"`
 	AirUtilTx            float32    `json:"airUtilTx,omitempty"`
+	UptimeSeconds        uint32     `json:"uptimeSeconds,omitempty"`
+	Humidity             float32    `json:"humidity,omitempty"`
+	Pressure             float32    `json:"pressure,omitempty"`
 	Temperature          float64    `json:"temperature,omitempty"`
 	TemperatureC         float64    `json:"temperatureC,omitempty"`
 	TemperatureF         float64    `json:"temperatureF,omitempty"`
@@ -89,6 +93,7 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		HWModel:              n.HWModel,
 		MacAddr:              n.MacAddr,
 		Role:                 n.Role,
+		IsLicensed:           n.IsLicensed,
 		FirmwareVersion:      n.FirmwareVersion,
 		Lat:                  n.Latitude,
 		Lon:                  n.Longitude,
@@ -97,6 +102,9 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		Voltage:              n.Voltage,
 		ChannelUtilization:   n.ChannelUtilization,
 		AirUtilTx:            n.AirUtilTx,
+		UptimeSeconds:        n.UptimeSeconds,
+		Humidity:             n.Humidity,
+		Pressure:             n.Pressure,
 		Temperature:          n.Temperature,
 		TemperatureC:         n.TemperatureC,
 		TemperatureF:         n.TemperatureF,

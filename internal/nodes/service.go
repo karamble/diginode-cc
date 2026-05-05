@@ -41,6 +41,7 @@ type Node struct {
 	HWModel            string    `json:"hwModel,omitempty"`
 	MacAddr            string    `json:"macAddr,omitempty"`
 	Role               string    `json:"role,omitempty"`
+	IsLicensed         bool      `json:"isLicensed,omitempty"`
 	FirmwareVersion    string    `json:"firmwareVersion,omitempty"`
 	Latitude           float64   `json:"latitude,omitempty"`
 	Longitude          float64   `json:"longitude,omitempty"`
@@ -49,6 +50,9 @@ type Node struct {
 	Voltage            float32   `json:"voltage,omitempty"`
 	ChannelUtilization float32   `json:"channelUtilization,omitempty"`
 	AirUtilTx          float32   `json:"airUtilTx,omitempty"`
+	UptimeSeconds      uint32    `json:"uptimeSeconds,omitempty"`
+	Humidity           float32   `json:"humidity,omitempty"`
+	Pressure           float32   `json:"pressure,omitempty"`
 	Temperature        float64   `json:"temperature,omitempty"`
 	SNR                float32   `json:"snr,omitempty"`
 	RSSI               int32     `json:"rssi"`
@@ -98,7 +102,8 @@ func (s *Service) Load(ctx context.Context) error {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			site_id, origin_site_id, temperature_c, temperature_f,
-			temperature_updated_at, last_message, node_type, ah_short_id
+			temperature_updated_at, last_message, node_type, ah_short_id,
+			firmware_version, is_licensed
 		FROM nodes`)
 	if err != nil {
 		return fmt.Errorf("query nodes: %w", err)
@@ -111,22 +116,25 @@ func (s *Service) Load(ctx context.Context) error {
 	loaded := 0
 	for rows.Next() {
 		var (
-			nodeNum                                 uint32
-			nodeID, longName, shortName, hwModel    *string
-			role, lastMessage                       *string
-			siteID, originSiteID                    *string
-			lat, lon, alt                           *float64
-			battery                                 *int32
-			voltage, chanUtil, airUtilTx, snr       *float64
-			lastHeard, tempUpdatedAt                *time.Time
-			isOnline                                *bool
-			tempC, tempF                            *float64
-			nodeType, ahShortID                     string
+			nodeNum                              uint32
+			nodeID, longName, shortName, hwModel *string
+			role, lastMessage                    *string
+			siteID, originSiteID                 *string
+			lat, lon, alt                        *float64
+			battery                              *int32
+			voltage, chanUtil, airUtilTx, snr    *float64
+			lastHeard, tempUpdatedAt             *time.Time
+			isOnline                             *bool
+			tempC, tempF                         *float64
+			nodeType, ahShortID                  string
+			firmwareVersion                      *string
+			isLicensed                           bool
 		)
 		if err := rows.Scan(&nodeNum, &nodeID, &longName, &shortName, &hwModel, &role,
 			&lat, &lon, &alt, &battery, &voltage, &chanUtil, &airUtilTx, &snr,
 			&lastHeard, &isOnline, &siteID, &originSiteID, &tempC, &tempF,
-			&tempUpdatedAt, &lastMessage, &nodeType, &ahShortID); err != nil {
+			&tempUpdatedAt, &lastMessage, &nodeType, &ahShortID,
+			&firmwareVersion, &isLicensed); err != nil {
 			slog.Error("nodes.Load: scan failed", "error", err)
 			continue
 		}
@@ -198,6 +206,10 @@ func (s *Service) Load(ctx context.Context) error {
 		if nodeType != "" {
 			n.NodeType = NodeType(nodeType)
 		}
+		if firmwareVersion != nil {
+			n.FirmwareVersion = *firmwareVersion
+		}
+		n.IsLicensed = isLicensed
 		if ahShortID != "" {
 			n.AHShortID = ahShortID
 		}
@@ -412,6 +424,7 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 		node.MacAddr = info.User.MacAddr
 		node.HWModel = info.User.HWModel
 		node.Role = info.User.Role
+		node.IsLicensed = info.User.IsLicensed
 	}
 
 	if info.Position != nil {
@@ -476,6 +489,7 @@ func (s *Service) HandleTelemetry(from uint32, metrics *serial.DeviceMetrics) {
 	node.Voltage = metrics.Voltage
 	node.ChannelUtilization = metrics.ChannelUtilization
 	node.AirUtilTx = metrics.AirUtilTx
+	node.UptimeSeconds = metrics.UptimeSeconds
 	now := time.Now()
 	node.LastHeard = now
 	node.IsOnline = true
@@ -503,6 +517,8 @@ func (s *Service) HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
 	node.Temperature = float64(env.Temperature)
 	node.TemperatureC = float64(env.Temperature)
 	node.TemperatureF = float64(env.Temperature)*9.0/5.0 + 32.0
+	node.Humidity = env.RelativeHumidity
+	node.Pressure = env.BarometricPressure
 	now := time.Now()
 	node.TemperatureUpdatedAt = &now
 	node.LastHeard = now
@@ -513,6 +529,34 @@ func (s *Service) HandleEnvironment(from uint32, env *serial.EnvironmentMetrics)
 		Payload: node,
 	})
 
+	go s.persistNode(node)
+}
+
+// SetFirmwareVersion records the firmware version reported in FromRadioMetadata.
+// Only the local Heltec ever reports its own firmware via this path — remote
+// nodes don't broadcast their firmware version on the mesh. No-op if the node
+// is unknown or the version hasn't changed.
+func (s *Service) SetFirmwareVersion(nodeNum uint32, firmware string) {
+	if firmware == "" {
+		return
+	}
+	s.mu.Lock()
+	node, exists := s.nodes[nodeNum]
+	if !exists {
+		s.mu.Unlock()
+		return
+	}
+	if node.FirmwareVersion == firmware {
+		s.mu.Unlock()
+		return
+	}
+	node.FirmwareVersion = firmware
+	s.mu.Unlock()
+
+	s.hub.Broadcast(ws.Event{
+		Type:    ws.EventNodeUpdate,
+		Payload: node,
+	})
 	go s.persistNode(node)
 }
 
@@ -716,9 +760,9 @@ func (s *Service) persistNode(node *Node) {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			temperature_c, temperature_f, temperature_updated_at, last_message,
-			node_type, ah_short_id, updated_at)
+			node_type, ah_short_id, firmware_version, is_licensed, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-			$17, $18, $19, $20, $21, $22, NOW())
+			$17, $18, $19, $20, $21, $22, $23, $24, NOW())
 		ON CONFLICT (node_num) DO UPDATE SET
 			node_id = COALESCE(EXCLUDED.node_id, nodes.node_id),
 			long_name = COALESCE(EXCLUDED.long_name, nodes.long_name),
@@ -747,6 +791,8 @@ func (s *Service) persistNode(node *Node) {
 				WHEN EXCLUDED.ah_short_id = '' THEN nodes.ah_short_id
 				ELSE EXCLUDED.ah_short_id
 			END,
+			firmware_version = COALESCE(EXCLUDED.firmware_version, nodes.firmware_version),
+			is_licensed = EXCLUDED.is_licensed,
 			updated_at = NOW()`,
 		node.NodeNum, nullStr(node.NodeID), nullStr(node.LongName), nullStr(node.ShortName),
 		nullStr(node.HWModel), nullStr(node.Role),
@@ -758,6 +804,7 @@ func (s *Service) persistNode(node *Node) {
 		nullFloat(node.TemperatureC), nullFloat(node.TemperatureF),
 		nullTimePtr(node.TemperatureUpdatedAt), nullStr(node.LastMessage),
 		string(node.NodeType), node.AHShortID,
+		nullStr(node.FirmwareVersion), node.IsLicensed,
 	)
 	if err != nil {
 		slog.Error("failed to persist node", "nodeNum", node.NodeNum, "error", err)
