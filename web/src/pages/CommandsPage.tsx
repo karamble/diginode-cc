@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState, useMemo, useEffect } from 'react'
+import { useState, useMemo, useEffect, useRef } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 
@@ -630,6 +630,40 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
     enabled: isScanCommand,
   })
 
+  // Split scan results by radio band so the operator can see WiFi vs BLE
+  // detections on separate tabs. AntiHunter sensors emit a single-letter band
+  // marker on every DEVICE: line which the textparser maps to "WiFi" / "BLE";
+  // anything we couldn't classify falls into "other" (rare, e.g. unknown band
+  // codes from a future firmware revision).
+  const wifiDevices = useMemo(
+    () => devices.filter((d) => d.deviceType === 'WiFi'),
+    [devices],
+  )
+  const bleDevices = useMemo(
+    () => devices.filter((d) => d.deviceType === 'BLE'),
+    [devices],
+  )
+  const otherDevices = useMemo(
+    () => devices.filter((d) => d.deviceType !== 'WiFi' && d.deviceType !== 'BLE'),
+    [devices],
+  )
+  type BandTab = 'wifi' | 'ble' | 'other'
+  const [bandTab, setBandTab] = useState<BandTab>('wifi')
+  // Auto-pick a sensible default tab once the first inventory result lands:
+  // if the only data is BLE (e.g. mode=1 scan), default to BLE; if only
+  // "other", default there. Tracked via ref so a later refetch never undoes
+  // a manual user click.
+  const bandTabAutoSet = useRef(false)
+  useEffect(() => {
+    if (devicesLoading || bandTabAutoSet.current) return
+    if (devices.length === 0) return
+    if (wifiDevices.length === 0 && bleDevices.length > 0) setBandTab('ble')
+    else if (wifiDevices.length === 0 && bleDevices.length === 0 && otherDevices.length > 0) setBandTab('other')
+    bandTabAutoSet.current = true
+  }, [devicesLoading, devices.length, wifiDevices.length, bleDevices.length, otherDevices.length])
+  const visibleDevices =
+    bandTab === 'wifi' ? wifiDevices : bandTab === 'ble' ? bleDevices : otherDevices
+
   // Probe-scanner specific: for PROBE_START commands, also fetch the SSIDs
   // captured during the scan window. Modern devices randomize MAC every
   // probe so the SSID list is what reveals what networks were probed for.
@@ -798,7 +832,7 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
               <h3 className="text-xs font-semibold text-dark-200 mb-2">
                 Devices seen during scan
                 <span className="ml-2 text-dark-500 font-normal">
-                  ({devicesLoading ? '…' : devices.length}
+                  ({devicesLoading ? '…' : `${devices.length} total — WiFi: ${wifiDevices.length}, BLE: ${bleDevices.length}`}
                   {nodeFilter ? ` on ${nodeFilter}` : ''})
                 </span>
               </h3>
@@ -810,36 +844,78 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
                   {cmd.status === 'RUNNING' && ' (scan still running)'}
                 </div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-[11px]">
-                    <thead>
-                      <tr className="border-b border-dark-700/50 text-dark-500 uppercase tracking-wider text-[9px]">
-                        <th className="text-left px-2 py-1.5">MAC</th>
-                        <th className="text-left px-2 py-1.5">Type</th>
-                        <th className="text-right px-2 py-1.5">RSSI</th>
-                        <th className="text-right px-2 py-1.5">Ch</th>
-                        <th className="text-left px-2 py-1.5">Name / SSID</th>
-                        <th className="text-left px-2 py-1.5">Manufacturer</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {devices.map((d) => (
-                        <tr key={d.mac} className="border-b border-dark-700/20 hover:bg-dark-800/30">
-                          <td className="px-2 py-1 text-dark-300 font-mono">{d.mac}</td>
-                          <td className="px-2 py-1 text-dark-400">{d.deviceType || '-'}</td>
-                          <td className="px-2 py-1 text-dark-300 text-right font-mono">{d.rssi ?? '-'}</td>
-                          <td className="px-2 py-1 text-dark-400 text-right">{d.channel ?? '-'}</td>
-                          <td className="px-2 py-1 text-dark-300 truncate max-w-[140px]" title={d.deviceName || d.lastSsid}>
-                            {d.deviceName || d.lastSsid || '-'}
-                          </td>
-                          <td className="px-2 py-1 text-dark-400 truncate max-w-[120px]" title={d.manufacturer}>
-                            {d.manufacturer || '-'}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <>
+                  <div className="flex gap-1 mb-2 border-b border-dark-700/50">
+                    <button
+                      onClick={() => setBandTab('wifi')}
+                      className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
+                        bandTab === 'wifi'
+                          ? 'text-primary-300 border-primary-500'
+                          : 'text-dark-400 border-transparent hover:text-dark-200'
+                      }`}
+                    >
+                      WiFi ({wifiDevices.length})
+                    </button>
+                    <button
+                      onClick={() => setBandTab('ble')}
+                      className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
+                        bandTab === 'ble'
+                          ? 'text-primary-300 border-primary-500'
+                          : 'text-dark-400 border-transparent hover:text-dark-200'
+                      }`}
+                    >
+                      BLE ({bleDevices.length})
+                    </button>
+                    {otherDevices.length > 0 && (
+                      <button
+                        onClick={() => setBandTab('other')}
+                        className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
+                          bandTab === 'other'
+                            ? 'text-primary-300 border-primary-500'
+                            : 'text-dark-400 border-transparent hover:text-dark-200'
+                        }`}
+                      >
+                        Other ({otherDevices.length})
+                      </button>
+                    )}
+                  </div>
+                  {visibleDevices.length === 0 ? (
+                    <div className="text-[11px] text-dark-500 py-3 text-center">
+                      No {bandTab === 'wifi' ? 'WiFi' : bandTab === 'ble' ? 'BLE' : 'other'} detections in this window
+                    </div>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-[11px]">
+                        <thead>
+                          <tr className="border-b border-dark-700/50 text-dark-500 uppercase tracking-wider text-[9px]">
+                            <th className="text-left px-2 py-1.5">MAC</th>
+                            <th className="text-left px-2 py-1.5">Type</th>
+                            <th className="text-right px-2 py-1.5">RSSI</th>
+                            <th className="text-right px-2 py-1.5">Ch</th>
+                            <th className="text-left px-2 py-1.5">Name / SSID</th>
+                            <th className="text-left px-2 py-1.5">Manufacturer</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {visibleDevices.map((d) => (
+                            <tr key={d.mac} className="border-b border-dark-700/20 hover:bg-dark-800/30">
+                              <td className="px-2 py-1 text-dark-300 font-mono">{d.mac}</td>
+                              <td className="px-2 py-1 text-dark-400">{d.deviceType || '-'}</td>
+                              <td className="px-2 py-1 text-dark-300 text-right font-mono">{d.rssi ?? '-'}</td>
+                              <td className="px-2 py-1 text-dark-400 text-right">{d.channel ?? '-'}</td>
+                              <td className="px-2 py-1 text-dark-300 truncate max-w-[140px]" title={d.deviceName || d.lastSsid}>
+                                {d.deviceName || d.lastSsid || '-'}
+                              </td>
+                              <td className="px-2 py-1 text-dark-400 truncate max-w-[120px]" title={d.manufacturer}>
+                                {d.manufacturer || '-'}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </>
               )}
             </div>
           )}
