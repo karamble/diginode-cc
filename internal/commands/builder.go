@@ -448,17 +448,19 @@ func validateParam(pd ParamDef, val string) error {
 		}
 	case "text":
 		if pd.Key == "nodeId" {
-			// AntiHunter firmware's sanitizeNodeId (hardware.cpp) forces an "AH"
-			// prefix + digits and silently mutates anything else, so only strings
-			// shaped AH + 1–3 digits round-trip without surprise. The firmware's
-			// own validator accepts any 2–5 alphanumeric chars, but the sanitize
-			// step strips letters after position 2 and pads with random digits —
-			// meaning "NODE1" becomes something like "AH1XX". Reject early here
-			// to keep the UI honest.
+			// Halberd firmware's sanitizeNodeId (hardware.cpp) accepts either an
+			// "AH" or "HB" prefix followed by digits and silently mutates anything
+			// else, so only strings shaped AH/HB + 1–3 digits round-trip without
+			// surprise. The firmware tolerates any 2–5 alphanumeric chars in
+			// principle, but the sanitize step strips letters after position 2
+			// and pads with digits — "NODE1" becomes "HB1XX". Reject early here
+			// to keep the UI honest. AH is preserved for legacy AntiHunter-named
+			// sensors that haven't been re-IDed yet; HB is the default for
+			// newly-deployed Halberd units.
 			upper := strings.ToUpper(val)
-			matched, _ := regexp.MatchString(`^AH\d{1,3}$`, upper)
+			matched, _ := regexp.MatchString(`^(AH|HB)\d{1,3}$`, upper)
 			if !matched {
-				return fmt.Errorf(`node ID must match "AH" + 1–3 digits (e.g. AH07, AH123)`)
+				return fmt.Errorf(`node ID must match "AH" or "HB" + 1–3 digits (e.g. HB64, AH07)`)
 			}
 		}
 		if pd.Key == "name" {
