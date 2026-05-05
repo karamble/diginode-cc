@@ -9,7 +9,8 @@ interface NodeRow {
   nodeType?: string  // "gotailme" | "antihunter" | "gatesensor" | "operator" | ""
   name: string
   shortName?: string
-  ahShortId?: string
+  sensorShortId?: string
+  sensorLineage?: 'halberd' | 'antihunter'  // firmware generation derived from prefix (HB → halberd, AH → legacy)
   hwModel?: string
   macAddr?: string
   role?: string
@@ -70,9 +71,18 @@ function timeAgo(iso?: string): string {
   return `${Math.floor(diff / 86400)}d ago`
 }
 
-function nodeTypeBadge(nodeType?: string): { label: string; color: string } | null {
+// nodeTypeBadge picks a small label + tailwind color combo for the node row.
+// For sensor nodes (nodeType=antihunter) the firmware lineage is shown rather
+// than the legacy "AH" badge: HB-prefixed sensors run halberd firmware (teal),
+// AH-prefixed sensors are legacy AntiHunter units that haven't been reflashed
+// yet (orange). Falling back to "AH" when lineage is unknown keeps existing
+// rows from going blank during the rollout.
+function nodeTypeBadge(nodeType?: string, sensorLineage?: 'halberd' | 'antihunter'): { label: string; color: string } | null {
   if (nodeType === 'gotailme') return { label: 'GTM', color: 'bg-blue-500/20 text-blue-400 border-blue-500/30' }
-  if (nodeType === 'antihunter') return { label: 'AH', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
+  if (nodeType === 'antihunter') {
+    if (sensorLineage === 'halberd') return { label: 'HB', color: 'bg-teal-500/20 text-teal-300 border-teal-500/30' }
+    return { label: 'AH', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
+  }
   if (nodeType === 'gatesensor') return { label: 'GATE', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' }
   if (nodeType === 'operator') return { label: 'OP', color: 'bg-slate-500/20 text-slate-300 border-slate-500/30' }
   return null
@@ -106,10 +116,10 @@ export default function NodesPage() {
 
   // resolveTarget returns the @TARGET string the firmware / UI expects.
   // AntiHunter sensors only honour their CONFIG_NODEID (AH34) — Meshtastic
-  // short names are dropped — so prefer ahShortId when present, fall back to
+  // short names are dropped — so prefer sensorShortId when present, fall back to
   // @NODE_<shortName|nodeNum> for gotailme gateways.
   function resolveTarget(n: NodeRow): string {
-    if (n.nodeType === 'antihunter' && n.ahShortId) return `@${n.ahShortId}`
+    if (n.nodeType === 'antihunter' && n.sensorShortId) return `@${n.sensorShortId}`
     return `@NODE_${n.shortName || n.nodeNum}`
   }
 
@@ -233,7 +243,7 @@ export default function NodesPage() {
             ) : (
               nodes.map((n: NodeRow) => {
                 const sig = signalStrength(n.rssi)
-                const badge = nodeTypeBadge(n.nodeType)
+                const badge = nodeTypeBadge(n.nodeType, n.sensorLineage)
                 return (
                   <>
                     <tr
@@ -271,7 +281,7 @@ export default function NodesPage() {
                           )}
                         </div>
                         <div className="text-dark-500 text-xs font-mono mt-0.5">
-                          {[n.ahShortId || n.shortName || n.id, n.nodeType].filter(Boolean).join(' · ')}
+                          {[n.sensorShortId || n.shortName || n.id, n.nodeType].filter(Boolean).join(' · ')}
                         </div>
                       </td>
 
@@ -383,7 +393,7 @@ export default function NodesPage() {
                                 </div>
                                 <div>
                                   <span className="text-dark-500 block">AH Node ID</span>
-                                  <span className="text-dark-300 font-mono">{n.ahShortId || '-'}</span>
+                                  <span className="text-dark-300 font-mono">{n.sensorShortId || '-'}</span>
                                 </div>
                                 <div>
                                   <span className="text-dark-500 block">Node Type</span>

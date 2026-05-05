@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -54,7 +55,25 @@ type nodeResponse struct {
 	SiteCountry          string     `json:"siteCountry,omitempty"`
 	SiteCity             string     `json:"siteCity,omitempty"`
 	LastMessage          string     `json:"lastMessage,omitempty"`
-	AHShortID            string     `json:"ahShortId,omitempty"`
+	SensorShortID        string     `json:"sensorShortId,omitempty"`
+	SensorLineage        string     `json:"sensorLineage,omitempty"` // "halberd" | "antihunter"
+}
+
+// sensorLineageFromShortID derives the firmware lineage of a sensor from its
+// CONFIG_NODEID prefix. HB nodes are produced by current halberd firmware;
+// AH nodes are legacy AntiHunter-firmware sensors that have not yet been
+// reflashed (the new halberd firmware migrates AH to HB on first boot).
+func sensorLineageFromShortID(shortID string) string {
+	if len(shortID) < 2 {
+		return ""
+	}
+	switch strings.ToUpper(shortID[:2]) {
+	case "HB":
+		return "halberd"
+	case "AH":
+		return "antihunter"
+	}
+	return ""
 }
 
 // mapNodeToResponse converts an internal Node to the CC PRO-compatible
@@ -79,11 +98,11 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 	if id == "" {
 		id = fmt.Sprintf("!%08x", n.NodeNum)
 	}
-	if name == "" && n.AHShortID != "" {
-		name = n.AHShortID
+	if name == "" && n.SensorShortID != "" {
+		name = n.SensorShortID
 	}
-	if shortName == "" && n.AHShortID != "" {
-		shortName = n.AHShortID
+	if shortName == "" && n.SensorShortID != "" {
+		shortName = n.SensorShortID
 	}
 	return nodeResponse{
 		ID:                   id, // CC PRO uses the hex node ID string
@@ -122,7 +141,8 @@ func mapNodeToResponse(n *nodes.Node) nodeResponse {
 		SiteID:               n.SiteID,
 		OriginSiteID:         n.OriginSiteID,
 		LastMessage:          n.LastMessage,
-		AHShortID:            n.AHShortID,
+		SensorShortID:        n.SensorShortID,
+		SensorLineage:        sensorLineageFromShortID(n.SensorShortID),
 	}
 }
 

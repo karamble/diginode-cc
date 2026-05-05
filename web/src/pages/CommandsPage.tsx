@@ -102,7 +102,7 @@ interface NodeRow {
   shortName?: string
   isOnline: boolean
   nodeType?: string
-  ahShortId?: string
+  sensorShortId?: string
   siteName?: string
   siteColor?: string
   siteCountry?: string
@@ -233,12 +233,12 @@ export default function CommandsPage() {
   // For @ALL we pass null, which commandFits() treats as "universal-only".
   // For a specific node we look it up by matching the target value back to the
   // entry in the nodes list (mirrors the target-building logic in the dropdown
-  // above: @<ahShortId> for antihunter, @NODE_<shortName|nodeNum> otherwise).
+  // above: @<sensorShortId> for antihunter, @NODE_<shortName|nodeNum> otherwise).
   const targetNodeType = useMemo<string | null>(() => {
     if (!target || target === '@ALL') return null
     for (const n of nodes) {
-      const tv = n.nodeType === 'antihunter' && n.ahShortId
-        ? `@${n.ahShortId}`
+      const tv = n.nodeType === 'antihunter' && n.sensorShortId
+        ? `@${n.sensorShortId}`
         : `@NODE_${n.shortName || n.nodeNum}`
       if (tv === target) return n.nodeType || null
     }
@@ -335,12 +335,12 @@ export default function CommandsPage() {
             >
               <option value="@ALL">@ALL — broadcast</option>
               {nodes.map(n => {
-                // AntiHunter sensors only honour their CONFIG_NODEID (ahShortId)
+                // AntiHunter sensors only honour their CONFIG_NODEID (sensorShortId)
                 // as a target prefix — Meshtastic short-names are ignored by the
                 // sensor dispatcher. Fall back to @NODE_<shortName> for gotailme
                 // gateways or sensors whose short id hasn't been heard yet.
-                const targetValue = n.nodeType === 'antihunter' && n.ahShortId
-                  ? `@${n.ahShortId}`
+                const targetValue = n.nodeType === 'antihunter' && n.sensorShortId
+                  ? `@${n.sensorShortId}`
                   : `@NODE_${n.shortName || n.nodeNum}`
                 const kind = n.nodeType === 'antihunter' ? 'AH' : 'GTM'
                 const loc = [n.siteCountry, n.siteCity].filter(Boolean).join('/')

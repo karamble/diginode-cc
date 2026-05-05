@@ -68,7 +68,7 @@ export interface MeshNode {
   siteCity?: string
   lastMessage?: string
   temperatureUpdatedAt?: string
-  ahShortId?: string
+  sensorShortId?: string
   nodeType?: string // "gotailme" | "antihunter" | "gatesensor" | ""
 }
 

@@ -16,7 +16,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
-// ahShortIDRe pulls the 2–5 char sensor CONFIG_NODEID prefix out of the
+// sensorShortIDRe pulls the 2–5 char sensor CONFIG_NODEID prefix out of the
 // leading "HB64:" / "AH64:" segment of a TEXTMSG body. The Halberd firmware
 // (and legacy AntiHunter-named units) emits this on every frame it transmits
 // (heartbeats, STATUS, detections, ACKs). Intentionally strict: uppercase
@@ -24,8 +24,8 @@ import (
 // DRONE, SCAN, etc.) so a message like "DRONE: ..." without a node-id prefix
 // doesn't get misread as node "DRONE". The regex itself is prefix-agnostic —
 // both AH<n> and HB<n> match — so dual-prefix support is automatic; the
-// per-prefix policy lives in extractAHShortID + reserved keywords below.
-var ahShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
+// per-prefix policy lives in extractSensorShortID + reserved keywords below.
+var sensorShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
 
 // sensorTypeFieldRe extracts the "Type:<CATEGORY>" field from a STATUS frame.
 // The field is emitted by gotailme-gatesensor firmware (and will be by future
@@ -34,9 +34,9 @@ var ahShortIDRe = regexp.MustCompile(`^([A-Z0-9]{2,5}):\s`)
 // "GateFront" or "WindowKitchen" classifies as long as it declares its Type.
 var sensorTypeFieldRe = regexp.MustCompile(`(?i)\bType:([A-Za-z][A-Za-z0-9_]+)\b`)
 
-// ahShortIDReservedKeywords are AntiHunter message-type words that could
+// sensorShortIDReservedKeywords are AntiHunter message-type words that could
 // syntactically match the prefix regex but aren't node ids.
-var ahShortIDReservedKeywords = map[string]bool{
+var sensorShortIDReservedKeywords = map[string]bool{
 	"ALL":     true,
 	"STATUS":  true,
 	"DRONE":   true,
@@ -65,19 +65,19 @@ var ahShortIDReservedKeywords = map[string]bool{
 	"NODE":    true,
 }
 
-func extractAHShortID(payload string) string {
-	m := ahShortIDRe.FindStringSubmatch(strings.TrimLeft(payload, " \t"))
+func extractSensorShortID(payload string) string {
+	m := sensorShortIDRe.FindStringSubmatch(strings.TrimLeft(payload, " \t"))
 	if m == nil {
 		return ""
 	}
-	if ahShortIDReservedKeywords[m[1]] {
+	if sensorShortIDReservedKeywords[m[1]] {
 		return ""
 	}
 	return m[1]
 }
 
 // isAHSensorOutput returns true if the text looks like AntiHunter sensor output.
-// This is a fallback signal — the strongest one is extractAHShortID's prefix
+// This is a fallback signal — the strongest one is extractSensorShortID's prefix
 // match. The keyword set covers AH frames that lost or stripped their leading
 // "[AHxx]:" id (e.g. wrap-around in long heartbeats), so a sensor still gets
 // classified even when the prefix is gone.
@@ -169,11 +169,11 @@ type Dispatcher struct {
 	onDeviceTime         func(t time.Time)
 	onAlertEval          func(ctx context.Context, evt alerts.DetectionEvent)
 	onWebhookFire        func(eventType string, payload interface{})
-	dedup         map[uint64]time.Time // packet hash → last seen
-	dedupMu       sync.Mutex
-	localNodeSeen bool   // true after first NodeInfo from wantConfig
-	localNodeNum  uint32 // our local Heltec's mesh node number
-	serialMgr     *serial.Manager
+	dedup                map[uint64]time.Time // packet hash → last seen
+	dedupMu              sync.Mutex
+	localNodeSeen        bool   // true after first NodeInfo from wantConfig
+	localNodeNum         uint32 // our local Heltec's mesh node number
+	serialMgr            *serial.Manager
 	// pendingFirmware holds the FirmwareVersion from FromRadio.metadata when
 	// it arrives BEFORE the local NodeInfo (the wantConfig dump emits
 	// my_info → metadata → ... → node_info, so localNodeNum is unknown
@@ -205,11 +205,11 @@ type NodeHandler interface {
 	// SetLastMessage stores the most recent sensor TEXTMSG body so the UI can
 	// show what that node last reported without polling alerts separately.
 	SetLastMessage(nodeNum uint32, msg string)
-	// SetAHShortID records the AntiHunter CONFIG_NODEID short id extracted
+	// SetSensorShortID records the AntiHunter CONFIG_NODEID short id extracted
 	// from the leading "AH01:" prefix in sensor TEXTMSG frames. Commands must
 	// target this string (@AH01) — Meshtastic short-names are ignored by the
 	// sensor dispatcher.
-	SetAHShortID(nodeNum uint32, shortID string)
+	SetSensorShortID(nodeNum uint32, shortID string)
 	// GetLongName returns the node's NodeInfo-supplied long name, or "" if
 	// unknown. Used to distinguish gotailme-firmware nodes (LongName starts
 	// with "GoTailMe") from plain Meshtastic clients that look identical at
@@ -467,7 +467,7 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 			switch {
 			case isGateSensorData(text):
 				d.nodeHandler.ClassifyNode(mp.From, "gatesensor")
-			case extractAHShortID(text) != "" || isAHSensorOutput(text):
+			case extractSensorShortID(text) != "" || isAHSensorOutput(text):
 				d.nodeHandler.ClassifyNode(mp.From, "antihunter")
 			case strings.HasPrefix(d.nodeHandler.GetLongName(mp.From), "GoTailMe"):
 				d.nodeHandler.ClassifyNode(mp.From, "gotailme")
@@ -517,8 +517,8 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 				// "AH01: STATUS: ..."). This is what the remote dispatcher
 				// matches against the @TARGET in outbound commands, so it
 				// must be surfaced on the node record for the UI to target.
-				if shortID := extractAHShortID(payload); shortID != "" {
-					d.nodeHandler.SetAHShortID(mp.From, shortID)
+				if shortID := extractSensorShortID(payload); shortID != "" {
+					d.nodeHandler.SetSensorShortID(mp.From, shortID)
 				}
 			}
 		}

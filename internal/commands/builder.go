@@ -140,8 +140,8 @@ var Registry = map[string]*CommandDef{
 	"CONFIG_RSSI": {Name: "CONFIG_RSSI", Group: "Configuration", Description: "Configure RSSI threshold", SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "rssi", Label: "RSSI Threshold", Type: "number", Required: true, Min: -120, Max: -1},
 	}},
-	"CONFIG_NODEID": {Name: "CONFIG_NODEID", Group: "Configuration", Description: "Set node ID (AH + 1–3 digits, e.g. AH07)", SingleNode: true, SupportedTypes: typeAH, Params: []ParamDef{
-		{Key: "nodeId", Label: "Node ID", Type: "text", Required: true, Placeholder: "AH07"},
+	"CONFIG_NODEID": {Name: "CONFIG_NODEID", Group: "Configuration", Description: "Set node ID (HB + 1–3 digits, e.g. HB07. AH prefix accepted for legacy units.)", SingleNode: true, SupportedTypes: typeAH, Params: []ParamDef{
+		{Key: "nodeId", Label: "Node ID", Type: "text", Required: true, Placeholder: "HB07"},
 	}},
 
 	// Security / Erase (AntiHunter-only)
@@ -448,19 +448,16 @@ func validateParam(pd ParamDef, val string) error {
 		}
 	case "text":
 		if pd.Key == "nodeId" {
-			// Halberd firmware's sanitizeNodeId (hardware.cpp) accepts either an
-			// "AH" or "HB" prefix followed by digits and silently mutates anything
-			// else, so only strings shaped AH/HB + 1–3 digits round-trip without
-			// surprise. The firmware tolerates any 2–5 alphanumeric chars in
-			// principle, but the sanitize step strips letters after position 2
-			// and pads with digits — "NODE1" becomes "HB1XX". Reject early here
-			// to keep the UI honest. AH is preserved for legacy AntiHunter-named
-			// sensors that haven't been re-IDed yet; HB is the default for
-			// newly-deployed Halberd units.
+			// Halberd firmware produces HB-prefixed node IDs only. Legacy AH
+			// sensors that arrive on the mesh are still parsed by the dispatcher
+			// (so they remain visible in the UI), but operators cannot set new
+			// AH IDs through CommandsPage. Reflashing a legacy unit with current
+			// halberd firmware migrates its NVS-stored ID from AH to HB on first
+			// boot, and SET commands always write HB IDs going forward.
 			upper := strings.ToUpper(val)
-			matched, _ := regexp.MatchString(`^(AH|HB)\d{1,3}$`, upper)
+			matched, _ := regexp.MatchString(`^HB\d{1,3}$`, upper)
 			if !matched {
-				return fmt.Errorf(`node ID must match "AH" or "HB" + 1–3 digits (e.g. HB64, AH07)`)
+				return fmt.Errorf(`node ID must match "HB" + 1–3 digits (e.g. HB64)`)
 			}
 		}
 		if pd.Key == "name" {

@@ -63,12 +63,12 @@ type Node struct {
 	SiteID             string    `json:"siteId,omitempty"`
 	OriginSiteID       string    `json:"originSiteId,omitempty"`
 	LastMessage        string    `json:"lastMessage,omitempty"`
-	// AHShortID is the 2–5 char string the AntiHunter firmware uses as its own
+	// SensorShortID is the 2–5 char string the AntiHunter firmware uses as its own
 	// address in TEXTMSG frames ("AH01" in "AH01: STATUS: ..."). It's set by
 	// the sensor's CONFIG_NODEID and is what the remote dispatcher matches
 	// against the @TARGET prefix — without this, @NODE_<meshShortName> routed
 	// commands are silently dropped.
-	AHShortID            string     `json:"ahShortId,omitempty"`
+	SensorShortID        string     `json:"sensorShortId,omitempty"`
 	TemperatureC         float64    `json:"temperatureC,omitempty"`
 	TemperatureF         float64    `json:"temperatureF,omitempty"`
 	TemperatureUpdatedAt *time.Time `json:"temperatureUpdatedAt,omitempty"`
@@ -103,7 +103,7 @@ func (s *Service) Load(ctx context.Context) error {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			site_id, origin_site_id, temperature_c, temperature_f,
-			temperature_updated_at, last_message, node_type, ah_short_id,
+			temperature_updated_at, last_message, node_type, sensor_short_id,
 			firmware_version, is_licensed
 		FROM nodes`)
 	if err != nil {
@@ -127,14 +127,14 @@ func (s *Service) Load(ctx context.Context) error {
 			lastHeard, tempUpdatedAt             *time.Time
 			isOnline                             *bool
 			tempC, tempF                         *float64
-			nodeType, ahShortID                  string
+			nodeType, sensorShortID              string
 			firmwareVersion                      *string
 			isLicensed                           bool
 		)
 		if err := rows.Scan(&nodeNum, &nodeID, &longName, &shortName, &hwModel, &role,
 			&lat, &lon, &alt, &battery, &voltage, &chanUtil, &airUtilTx, &snr,
 			&lastHeard, &isOnline, &siteID, &originSiteID, &tempC, &tempF,
-			&tempUpdatedAt, &lastMessage, &nodeType, &ahShortID,
+			&tempUpdatedAt, &lastMessage, &nodeType, &sensorShortID,
 			&firmwareVersion, &isLicensed); err != nil {
 			slog.Error("nodes.Load: scan failed", "error", err)
 			continue
@@ -211,8 +211,8 @@ func (s *Service) Load(ctx context.Context) error {
 			n.FirmwareVersion = *firmwareVersion
 		}
 		n.IsLicensed = isLicensed
-		if ahShortID != "" {
-			n.AHShortID = ahShortID
+		if sensorShortID != "" {
+			n.SensorShortID = sensorShortID
 		}
 		n.IsOnline = isNodeOnline(n)
 		s.nodes[nodeNum] = n
@@ -629,10 +629,10 @@ func (s *Service) HandleAntihunterHeartbeat(from uint32, lat, lon float64, data 
 	go s.persistNode(node)
 }
 
-// SetAHShortID records the AntiHunter short id for a node (the 2–5 char
+// SetSensorShortID records the AntiHunter short id for a node (the 2–5 char
 // CONFIG_NODEID string, e.g. "AH01"). Only broadcasts on first discovery or
 // when the id changes, so repeated heartbeats don't spam the WS hub.
-func (s *Service) SetAHShortID(from uint32, shortID string) {
+func (s *Service) SetSensorShortID(from uint32, shortID string) {
 	if shortID == "" {
 		return
 	}
@@ -644,10 +644,10 @@ func (s *Service) SetAHShortID(from uint32, shortID string) {
 		node = &Node{NodeNum: from}
 		s.nodes[from] = node
 	}
-	if node.AHShortID == shortID {
+	if node.SensorShortID == shortID {
 		return
 	}
-	node.AHShortID = shortID
+	node.SensorShortID = shortID
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventNodeUpdate,
 		Payload: node,
@@ -767,7 +767,7 @@ func (s *Service) persistNode(node *Node) {
 			latitude, longitude, altitude, battery_level, voltage,
 			channel_utilization, air_util_tx, snr, last_heard, is_online,
 			temperature_c, temperature_f, temperature_updated_at, last_message,
-			node_type, ah_short_id, firmware_version, is_licensed, updated_at)
+			node_type, sensor_short_id, firmware_version, is_licensed, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
 			$17, $18, $19, $20, $21, $22, $23, $24, NOW())
 		ON CONFLICT (node_num) DO UPDATE SET
@@ -794,9 +794,9 @@ func (s *Service) persistNode(node *Node) {
 				WHEN EXCLUDED.node_type = '' THEN nodes.node_type
 				ELSE EXCLUDED.node_type
 			END,
-			ah_short_id = CASE
-				WHEN EXCLUDED.ah_short_id = '' THEN nodes.ah_short_id
-				ELSE EXCLUDED.ah_short_id
+			sensor_short_id = CASE
+				WHEN EXCLUDED.sensor_short_id = '' THEN nodes.sensor_short_id
+				ELSE EXCLUDED.sensor_short_id
 			END,
 			firmware_version = COALESCE(EXCLUDED.firmware_version, nodes.firmware_version),
 			is_licensed = EXCLUDED.is_licensed,
@@ -810,7 +810,7 @@ func (s *Service) persistNode(node *Node) {
 		nullTime(node.LastHeard), node.IsOnline,
 		nullFloat(node.TemperatureC), nullFloat(node.TemperatureF),
 		nullTimePtr(node.TemperatureUpdatedAt), nullStr(node.LastMessage),
-		string(node.NodeType), node.AHShortID,
+		string(node.NodeType), node.SensorShortID,
 		nullStr(node.FirmwareVersion), node.IsLicensed,
 	)
 	if err != nil {

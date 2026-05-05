@@ -646,8 +646,8 @@ func canonicalProbeNode(nodeID string, nodesSvc *nodes.Service) string {
 		return nodeID
 	}
 	node := nodesSvc.GetByNodeNum(uint32(num))
-	if node == nil || node.AHShortID == "" {
+	if node == nil || node.SensorShortID == "" {
 		return nodeID
 	}
-	return node.AHShortID
+	return node.SensorShortID
 }
