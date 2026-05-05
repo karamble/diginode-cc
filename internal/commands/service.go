@@ -185,6 +185,13 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		wantPrefix = "PROBE_"
 	case "SCAN_DONE_ACK":
 		wantSuffix = "SCAN_START" // matches SCAN_START + DEVICE_SCAN_START
+	case "STOP_ACK":
+		// SCAN_STOP / DEVICE_SCAN_STOP wire-emit STOP via WireName, so all
+		// three commands end up triggering a STOP_ACK from the firmware.
+		// Match by suffix so any of the three pending rows can close —
+		// PROBE_STOP also has-suffix STOP but is closed via PROBE_ACK:STOPPED
+		// and never produces a STOP_ACK from this firmware in practice.
+		wantSuffix = "STOP"
 	}
 
 	// Find the latest PENDING/SENT/RUNNING command matching name + target
@@ -306,6 +313,48 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 				name = cmd.CommandType
 			}
 			if name != "PROBE_START" || cmd.Status != StatusRunning {
+				continue
+			}
+			cmd.Status = StatusOK
+			cmd.FinishedAt = &now
+			delete(s.pending, id)
+			s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: cmd})
+			go s.persistCommand(cmd)
+		}
+	}
+
+	// STOP_ACK fan-out: when the operator's STOP / SCAN_STOP / DEVICE_SCAN_STOP
+	// row closes via STOP_ACK, also close any RUNNING scan-class command at
+	// the same target. The firmware halts whatever job is active immediately
+	// on STOP, but its *_DONE summary is gated behind !stopRequested upstream
+	// in scanner.cpp / baseline.cpp / drone_detector.cpp / randomization.cpp,
+	// so the originating *_START never receives its closing *_DONE_ACK.
+	// Detections captured before the stop are already in the inventory DB via
+	// the streaming DEVICE: frames the scanner emits every 3s — the only
+	// missing piece is the lifecycle close.
+	//
+	// Strict target match: a node-targeted STOP closes only that node's RUNNING
+	// scans. An @ALL STOP closes every RUNNING scan-class row regardless of
+	// its target — the broadcast hit every sensor and they're all halting.
+	if ackKind == "STOP_ACK" {
+		scanClass := map[string]bool{
+			"SCAN_START":          true,
+			"DEVICE_SCAN_START":   true,
+			"BASELINE_START":      true,
+			"DRONE_START":         true,
+			"DEAUTH_START":        true,
+			"RANDOMIZATION_START": true,
+			"PROBE_START":         true,
+		}
+		for id, cmd := range s.pending {
+			name := cmd.Name
+			if name == "" {
+				name = cmd.CommandType
+			}
+			if !scanClass[name] || cmd.Status != StatusRunning {
+				continue
+			}
+			if match.Target != "@ALL" && cmd.Target != match.Target {
 				continue
 			}
 			cmd.Status = StatusOK

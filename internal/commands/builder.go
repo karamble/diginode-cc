@@ -20,6 +20,11 @@ type CommandDef struct {
 	// Empty slice defaults to antihunter-only for back-compat with any legacy
 	// entry that doesn't declare its types.
 	SupportedTypes []string
+	// WireName overrides what gets emitted on the mesh, when the firmware verb
+	// differs from the operator-facing name. Used to alias SCAN_STOP /
+	// DEVICE_SCAN_STOP to the firmware's only stop verb (STOP) without
+	// dropping the labelled buttons from the catalog. Empty = use Name.
+	WireName string
 }
 
 // ParamDef defines a single parameter for a command.
@@ -73,13 +78,20 @@ var Registry = map[string]*CommandDef{
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
 		{Key: "channels", Label: "Channels", Type: "channels", Placeholder: "1,6,11 or 1..14"},
 	}},
-	"SCAN_STOP": {Name: "SCAN_STOP", Group: "Scanning", Description: "Stop scanning", SupportedTypes: typeAH},
+	// SCAN_STOP / DEVICE_SCAN_STOP are operator-facing labels for the firmware's
+	// universal STOP verb. The AntiHunter dispatcher only recognises STOP
+	// (network.cpp:515 `command.startsWith("STOP")`); the firmware also enforces
+	// strict one-job-at-a-time at every START site, so a single STOP is enough
+	// to halt whatever the targeted node is currently running. WireName is the
+	// alias bridge — Name keeps the catalog/UI distinction, the wire bytes are
+	// the same.
+	"SCAN_STOP": {Name: "SCAN_STOP", WireName: "STOP", Group: "Scanning", Description: "Stop scanning", SupportedTypes: typeAH},
 	"DEVICE_SCAN_START": {Name: "DEVICE_SCAN_START", Group: "Scanning", Description: "Start device scan", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
 		{Key: "captureProbes", Label: "Capture probes", Type: "bool", LiteralTrue: "+PROBE", Placeholder: "Also record 802.11 probe requests during the scan"},
 	}},
-	"DEVICE_SCAN_STOP": {Name: "DEVICE_SCAN_STOP", Group: "Scanning", Description: "Stop device scan", SupportedTypes: typeAH},
+	"DEVICE_SCAN_STOP": {Name: "DEVICE_SCAN_STOP", WireName: "STOP", Group: "Scanning", Description: "Stop device scan", SupportedTypes: typeAH},
 	"STOP":             {Name: "STOP", Group: "Scanning", Description: "Stop all scanning activities", SupportedTypes: typeAH},
 	"PROBE_START": {Name: "PROBE_START", Group: "Scanning", Description: "Start passive probe-request sniffer. Default broadcasts only CONFIG_TARGETS matches; toggle 'broadcastAll' to push every probe (still 60s dedup per MAC+SSID).", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}, Placeholder: "0=WiFi 1=BLE 2=Both"},
@@ -366,8 +378,15 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 		cleanParams = append(cleanParams[:insertAt], append([]string{"FOREVER"}, cleanParams[insertAt:]...)...)
 	}
 
-	// Build line: {target} {name}:{p1}:{p2}:...
-	line := target + " " + name
+	// Build line: {target} {wireName}:{p1}:{p2}:...
+	// WireName lets the catalog use a labelled name (e.g. SCAN_STOP) while the
+	// mesh sees the firmware's actual verb (STOP). BuildOutput.Name keeps the
+	// original so DB persistence + ACK matching by suffix still work.
+	wireName := name
+	if def.WireName != "" {
+		wireName = def.WireName
+	}
+	line := target + " " + wireName
 	if len(cleanParams) > 0 {
 		line += ":" + strings.Join(cleanParams, ":")
 	}
