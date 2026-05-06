@@ -137,16 +137,17 @@ func (s *Server) handleClearDetectionData(w http.ResponseWriter, r *http.Request
 		errs = append(errs, "inventory: "+err.Error())
 	}
 
-	// Clear position history tables
+	// Clear position history tables + BLE classified detections
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM drone_detections`)
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM target_positions`)
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM node_positions`)
+	s.svc.DB().Pool.Exec(ctx, `DELETE FROM ble_detections`)
 
 	if len(errs) > 0 {
 		writeError(w, http.StatusInternalServerError, "partial failure: "+errs[0])
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "cleared": "drones, targets, inventory, positions, detections"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "cleared": "drones, targets, inventory, positions, detections, ble_detections"})
 }
 
 // handleClearOperationalData wipes all operational data: detection data +
@@ -170,6 +171,7 @@ func (s *Server) handleClearOperationalData(w http.ResponseWriter, r *http.Reque
 	// History tables that have no service-level clear method
 	tables := []string{
 		"drone_detections", "target_positions", "node_positions",
+		"ble_detections",
 		"chat_messages", "commands", "alert_events", "audit_log",
 	}
 	for _, t := range tables {
@@ -197,6 +199,7 @@ func (s *Server) handlePruneOldData(w http.ResponseWriter, r *http.Request) {
 		{"drone_detections", "timestamp"},
 		{"target_positions", "timestamp"},
 		{"node_positions", "timestamp"},
+		{"ble_detections", "timestamp"},
 		{"chat_messages", "timestamp"},
 		{"commands", "created_at"},
 		{"alert_events", "created_at"},
@@ -237,6 +240,7 @@ func (s *Server) handleFactoryReset(w http.ResponseWriter, r *http.Request) {
 	// Order matters: delete dependent tables first
 	tables := []string{
 		"drone_detections", "target_positions", "node_positions",
+		"ble_detections",
 		"webhook_deliveries",
 		"alert_events", "chat_messages", "commands", "audit_log",
 		"drones", "targets", "inventory_devices",

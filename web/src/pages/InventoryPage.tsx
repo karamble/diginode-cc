@@ -82,6 +82,21 @@ export default function InventoryPage() {
     refetchInterval: 10000,
   })
 
+  // Fetch the set of MACs that have a row in ble_detections so we can render
+  // a "RAW" badge on inventory devices that have a richer raw-classified
+  // counterpart. Independent query so the inventory list still renders even
+  // if this fetch fails. Refetched every 30s — the set changes slowly relative
+  // to the inventory list.
+  const { data: bleDetections } = useQuery<{ mac: string }[]>({
+    queryKey: ['ble-classified-macs'],
+    queryFn: () => api.get('/ble/detections?limit=2000'),
+    refetchInterval: 30000,
+  })
+  const bleMacs = useMemo(
+    () => new Set((bleDetections ?? []).map((d) => d.mac.toUpperCase())),
+    [bleDetections],
+  )
+
   const clearMutation = useMutation({
     mutationFn: () => api.post('/inventory/clear'),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ['inventory'] }),
@@ -250,6 +265,14 @@ export default function InventoryPage() {
                         )}
                         {dev.multicast && (
                           <span className="text-[10px] px-1 py-0.5 rounded bg-purple-500/20 text-purple-400" title="Multicast address">MC</span>
+                        )}
+                        {bleMacs.has(dev.mac.toUpperCase()) && (
+                          <span
+                            className="text-[10px] px-1 py-0.5 rounded bg-violet-500/20 text-violet-300 border border-violet-500/30 font-mono"
+                            title="Has a classified raw-advertisement record on the BLE Detections page"
+                          >
+                            RAW
+                          </span>
                         )}
                         {dev.deviceName && (
                           <span className="text-xs text-dark-500">{dev.deviceName}</span>

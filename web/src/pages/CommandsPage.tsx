@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import { useState, useMemo, useEffect, useRef } from 'react'
+import { useState, useMemo, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import api from '../api/client'
 
@@ -62,30 +62,22 @@ interface ProbeSSID {
   distinctMacs24h?: number
 }
 
-interface InventoryDevice {
-  mac: string
-  deviceType?: string
-  rssi?: number
-  channel?: number
-  lastSsid?: string
-  manufacturer?: string
-  deviceName?: string
-  firstSeen: string
-  lastSeen: string
-  lastNodeId?: string
-  lastLat?: number
-  lastLon?: number
-  isKnown?: boolean
-  hits?: number
-}
+// InventoryDevice was used by the retired "Devices seen during scan" panel
+// that queried /inventory directly; the structured cmd.result.detections
+// rendering replaces it. Kept as a comment marker so future maintainers
+// don't accidentally re-introduce the time-window inventory query and hit
+// the same nodeId-format mismatch.
 
 function formatResult(r: Record<string, unknown> | undefined): string {
   if (!r) return ''
   // Summarize the *_DONE scan-summary blobs into a single readable row —
   // e.g. result={W:6,B:0,U:6,TX:6,PEND:0,ackType:'SCAN_DONE_ACK',...}
   // → "W=6 B=0 U=6 TX=6 PEND=0". Skip envelope keys that the textparser
-  // adds when it synthesizes command-acks.
-  const skip = new Set(['ackType', 'status', 'synthesized', 'category', 'nodeId'])
+  // adds when it synthesizes command-acks. Also skip 'detections' — that's
+  // the structured per-device array we render as the collapsed table
+  // further down in the modal; including it here would dump every MAC in
+  // a single inline string at the top of the modal.
+  const skip = new Set(['ackType', 'status', 'synthesized', 'category', 'nodeId', 'detections'])
   const parts: string[] = []
   for (const [k, v] of Object.entries(r)) {
     if (skip.has(k)) continue
@@ -625,61 +617,14 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
     return { seenAfter: sent, seenBefore: before }
   }, [cmd.sentAt, cmd.createdAt, cmd.ackedAt, cmd.finishedAt, cmd.status])
 
-  // Only fetch inventory for scan-type commands — STATUS/HB/CONFIG won't
-  // produce device detections and the time window would give bogus hits.
-  const isScanCommand = useMemo(() => {
-    const n = cmd.commandType || cmd.name || ''
-    return /SCAN_START|BASELINE_START|DEAUTH_START|DRONE_START|RANDOMIZATION_START|PROBE_START/i.test(n)
-  }, [cmd.commandType, cmd.name])
-
-  const { data: devices = [], isLoading: devicesLoading } = useQuery({
-    queryKey: ['cmd-inventory', cmd.id, nodeFilter, seenAfter, seenBefore],
-    queryFn: () => {
-      const q = new URLSearchParams()
-      if (nodeFilter) q.set('nodeId', nodeFilter)
-      if (seenAfter) q.set('seenAfter', seenAfter)
-      if (seenBefore) q.set('seenBefore', seenBefore)
-      return api.get<InventoryDevice[]>(`/inventory?${q.toString()}`)
-    },
-    enabled: isScanCommand,
-    // Poll while the scan is still RUNNING so the device tables fill in
-    // live as the sensor reports detections back.
-    refetchInterval: cmd.status === 'RUNNING' ? 5000 : false,
-  })
-
-  // Split scan results by radio band so the operator can see WiFi vs BLE
-  // detections on separate tabs. AntiHunter sensors emit a single-letter band
-  // marker on every DEVICE: line which the textparser maps to "WiFi" / "BLE";
-  // anything we couldn't classify falls into "other" (rare, e.g. unknown band
-  // codes from a future firmware revision).
-  const wifiDevices = useMemo(
-    () => devices.filter((d) => d.deviceType === 'WiFi'),
-    [devices],
-  )
-  const bleDevices = useMemo(
-    () => devices.filter((d) => d.deviceType === 'BLE'),
-    [devices],
-  )
-  const otherDevices = useMemo(
-    () => devices.filter((d) => d.deviceType !== 'WiFi' && d.deviceType !== 'BLE'),
-    [devices],
-  )
-  type BandTab = 'wifi' | 'ble' | 'other'
-  const [bandTab, setBandTab] = useState<BandTab>('wifi')
-  // Auto-pick a sensible default tab once the first inventory result lands:
-  // if the only data is BLE (e.g. mode=1 scan), default to BLE; if only
-  // "other", default there. Tracked via ref so a later refetch never undoes
-  // a manual user click.
-  const bandTabAutoSet = useRef(false)
-  useEffect(() => {
-    if (devicesLoading || bandTabAutoSet.current) return
-    if (devices.length === 0) return
-    if (wifiDevices.length === 0 && bleDevices.length > 0) setBandTab('ble')
-    else if (wifiDevices.length === 0 && bleDevices.length === 0 && otherDevices.length > 0) setBandTab('other')
-    bandTabAutoSet.current = true
-  }, [devicesLoading, devices.length, wifiDevices.length, bleDevices.length, otherDevices.length])
-  const visibleDevices =
-    bandTab === 'wifi' ? wifiDevices : bandTab === 'ble' ? bleDevices : otherDevices
+  // The legacy /inventory time-window query + per-band tabs panel has been
+  // retired in favour of the structured cmd.result.detections rendering
+  // further down in the modal. The inventory panel showed 0 devices for
+  // every scan because nodeFilter ("HB55") didn't match
+  // inventory_devices.last_node_id (the binary-protocol "!02ed5f04" form),
+  // and the new collapsed table covers the same ground without the format-
+  // mismatch hazard. nodeFilter / seenAfter / seenBefore are still used by
+  // the PROBE_START SSID query below.
 
   // Probe-scanner specific: for PROBE_START commands, also fetch the SSIDs
   // captured during the scan window. Modern devices randomize MAC every
@@ -775,6 +720,69 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
             )}
           </dl>
 
+          {Array.isArray((cmd.result as Record<string, unknown> | undefined)?.detections) && ((cmd.result as { detections: unknown[] }).detections.length > 0) ? (
+            <details className="mt-4">
+              <summary className="cursor-pointer text-xs font-semibold text-dark-200 hover:text-dark-100 select-none">
+                Detections during scan
+                <span className="ml-2 text-[10px] text-dark-400 font-normal">
+                  ({(cmd.result as { detections: unknown[] }).detections.length} rows ・ <span className="text-violet-300 font-mono">BLERAW</span> = raw-advertisement classified ・ <span className="text-sky-300 font-mono">DEVICE</span> = streaming detection)
+                </span>
+              </summary>
+              <div className="mt-2 overflow-x-auto">
+                <table className="w-full text-[11px] font-mono">
+                  <thead className="text-left text-dark-400 border-b border-dark-700">
+                    <tr>
+                      <th className="px-2 py-1">Src</th>
+                      <th className="px-2 py-1">MAC</th>
+                      <th className="px-2 py-1">Band</th>
+                      <th className="px-2 py-1 text-right">RSSI</th>
+                      <th className="px-2 py-1">Type</th>
+                      <th className="px-2 py-1">Manufacturer</th>
+                      <th className="px-2 py-1">Name</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {((cmd.result as { detections: Array<Record<string, unknown>> }).detections).map((d, i) => {
+                      const src = String(d.source ?? '')
+                      const mac = String(d.mac ?? '')
+                      const band = src === 'BLERAW' ? 'BLE' : String(d.band ?? '')
+                      const rssi = typeof d.rssi === 'number' ? d.rssi : parseInt(String(d.rssi ?? '0'), 10)
+                      const type = String(d.detectionType ?? '')
+                      const mfr = String(d.manufacturer ?? '')
+                      const name = String(d.localName ?? '')
+                      const srcColor = src === 'BLERAW' ? 'text-violet-300 bg-violet-500/10 border-violet-500/30' : 'text-sky-300 bg-sky-500/10 border-sky-500/30'
+                      return (
+                        <tr key={`${src}-${mac}-${i}`} className="border-b border-dark-800/60 hover:bg-dark-800/40">
+                          <td className="px-2 py-1">
+                            <span className={`inline-block px-1.5 py-0.5 rounded border text-[10px] ${srcColor}`}>{src}</span>
+                          </td>
+                          <td className="px-2 py-1 text-dark-100">{mac}</td>
+                          <td className="px-2 py-1 text-dark-300">{band}</td>
+                          <td className="px-2 py-1 text-right text-dark-300">{rssi}</td>
+                          <td className="px-2 py-1 text-dark-300">{type}</td>
+                          <td className="px-2 py-1 text-dark-300">{mfr}</td>
+                          <td className="px-2 py-1 text-dark-300 truncate max-w-[200px]" title={name}>{name}</td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          ) : cmd.resultText ? (
+            <details className="mt-4">
+              <summary className="cursor-pointer text-xs font-semibold text-dark-200 hover:text-dark-100 select-none">
+                Detections during scan
+                <span className="ml-2 text-[10px] text-violet-300 font-mono align-middle">
+                  [BLERAW] = raw-classified ・ [DEVICE] = streaming detection
+                </span>
+              </summary>
+              <pre className="mt-2 p-2 bg-dark-900 rounded text-[11px] text-dark-200 font-mono overflow-x-auto whitespace-pre">
+                {cmd.resultText}
+              </pre>
+            </details>
+          ) : null}
+
           {cmd.result && Object.keys(cmd.result).length > 0 && (
             <details className="mt-4">
               <summary className="text-[10px] text-dark-500 cursor-pointer hover:text-dark-300">Raw result JSON</summary>
@@ -845,98 +853,18 @@ function CommandDetailsModal({ cmd, onClose }: { cmd: CommandRecord; onClose: ()
             </div>
           )}
 
-          {isScanCommand && (
-            <div className="mt-5">
-              <h3 className="text-xs font-semibold text-dark-200 mb-2">
-                Devices seen during scan
-                <span className="ml-2 text-dark-500 font-normal">
-                  ({devicesLoading ? '…' : `${devices.length} total — WiFi: ${wifiDevices.length}, BLE: ${bleDevices.length}`}
-                  {nodeFilter ? ` on ${nodeFilter}` : ''})
-                </span>
-              </h3>
-              {devicesLoading ? (
-                <div className="text-[11px] text-dark-500 py-3 text-center">Loading…</div>
-              ) : devices.length === 0 ? (
-                <div className="text-[11px] text-dark-500 py-3 text-center">
-                  No device detections in this window
-                  {cmd.status === 'RUNNING' && ' (scan still running)'}
-                </div>
-              ) : (
-                <>
-                  <div className="flex gap-1 mb-2 border-b border-dark-700/50">
-                    <button
-                      onClick={() => setBandTab('wifi')}
-                      className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
-                        bandTab === 'wifi'
-                          ? 'text-primary-300 border-primary-500'
-                          : 'text-dark-400 border-transparent hover:text-dark-200'
-                      }`}
-                    >
-                      WiFi ({wifiDevices.length})
-                    </button>
-                    <button
-                      onClick={() => setBandTab('ble')}
-                      className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
-                        bandTab === 'ble'
-                          ? 'text-primary-300 border-primary-500'
-                          : 'text-dark-400 border-transparent hover:text-dark-200'
-                      }`}
-                    >
-                      BLE ({bleDevices.length})
-                    </button>
-                    {otherDevices.length > 0 && (
-                      <button
-                        onClick={() => setBandTab('other')}
-                        className={`px-3 py-1.5 text-[11px] font-medium transition-colors border-b-2 -mb-px ${
-                          bandTab === 'other'
-                            ? 'text-primary-300 border-primary-500'
-                            : 'text-dark-400 border-transparent hover:text-dark-200'
-                        }`}
-                      >
-                        Other ({otherDevices.length})
-                      </button>
-                    )}
-                  </div>
-                  {visibleDevices.length === 0 ? (
-                    <div className="text-[11px] text-dark-500 py-3 text-center">
-                      No {bandTab === 'wifi' ? 'WiFi' : bandTab === 'ble' ? 'BLE' : 'other'} detections in this window
-                    </div>
-                  ) : (
-                    <div className="overflow-x-auto">
-                      <table className="w-full text-[11px]">
-                        <thead>
-                          <tr className="border-b border-dark-700/50 text-dark-500 uppercase tracking-wider text-[9px]">
-                            <th className="text-left px-2 py-1.5">MAC</th>
-                            <th className="text-left px-2 py-1.5">Type</th>
-                            <th className="text-right px-2 py-1.5">RSSI</th>
-                            <th className="text-right px-2 py-1.5">Ch</th>
-                            <th className="text-left px-2 py-1.5">Name / SSID</th>
-                            <th className="text-left px-2 py-1.5">Manufacturer</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {visibleDevices.map((d) => (
-                            <tr key={d.mac} className="border-b border-dark-700/20 hover:bg-dark-800/30">
-                              <td className="px-2 py-1 text-dark-300 font-mono">{d.mac}</td>
-                              <td className="px-2 py-1 text-dark-400">{d.deviceType || '-'}</td>
-                              <td className="px-2 py-1 text-dark-300 text-right font-mono">{d.rssi ?? '-'}</td>
-                              <td className="px-2 py-1 text-dark-400 text-right">{d.channel ?? '-'}</td>
-                              <td className="px-2 py-1 text-dark-300 truncate max-w-[140px]" title={d.deviceName || d.lastSsid}>
-                                {d.deviceName || d.lastSsid || '-'}
-                              </td>
-                              <td className="px-2 py-1 text-dark-400 truncate max-w-[120px]" title={d.manufacturer}>
-                                {d.manufacturer || '-'}
-                              </td>
-                            </tr>
-                          ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          )}
+          {/*
+           * Removed the legacy "Devices seen during scan" panel that queried
+           * /inventory with a time-window filter and per-band tabs. It showed
+           * 0 devices for every scan because the panel passed the operator-
+           * facing nodeId form ("HB55") while inventory_devices.last_node_id
+           * stores the binary-protocol form ("!02ed5f04"), so the filter
+           * never matched. The collapsed "Detections during scan" table above
+           * (rendered from cmd.result.detections) covers the same ground
+           * with the merge-by-MAC logic landing each device once with both
+           * the streaming-detection fields and the BLERAW classification
+           * results in a single row.
+           */}
         </div>
       </div>
     </div>

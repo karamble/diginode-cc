@@ -1,6 +1,7 @@
 package serial
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -138,6 +139,42 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DEVICE:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<band>[A-Za-z])\s+(?P<rssi>-?\d+)(?:\s+C(?P<channel>\d+))?(?:\s+N:(?P<name>.+))?`),
 			handler: p.handleDevice,
 		},
+		// D line (short form): "nodeId: D:AA:BB:CC:DD:EE:FF W -75 C6 N:MyDevice"
+		// Compressed verb introduced 2026-05-06 to relieve LoRa frame size
+		// pressure on busy scans. Captured fields are identical to DEVICE: so
+		// it routes through the same handler. Long-form pattern stays active
+		// indefinitely so legacy AntiHunter and pre-rebrand Halberd builds in
+		// the field keep working unchanged.
+		{
+			name: "device-short",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*D:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<band>[A-Za-z])\s+(?P<rssi>-?\d+)(?:\s+C(?P<channel>\d+))?(?:\s+N:(?P<name>.+))?`),
+			handler: p.handleDevice,
+		},
+		// BLERAW line: "nodeId: BLERAW:AA:BB:CC:DD:EE:FF -85 39 BAQEZmlsdC1leA=="
+		// Halberd firmware emits this in addition to the legacy DEVICE: frame
+		// when rawBleMode is on. The base64 payload is the AD-structures
+		// portion of the advertising PDU (everything after the BLE Link Layer
+		// header), capped at 31 bytes for BLE 4.x legacy advertising. The
+		// classification service base64-decodes it and forwards to the BLE
+		// lookupper for identification.
+		{
+			name: "ble-raw",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BLERAW:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<rssi>-?\d+)\s+(?P<channel>\d+)\s+(?P<adv>[A-Za-z0-9+/=]+)`),
+			handler: p.handleBLERaw,
+		},
+		// B line (short form): "nodeId: B:AA:BB:CC:DD:EE:FF -85 BAQEZmlsdC1leA=="
+		// Compressed verb introduced 2026-05-06. The always-zero channel field
+		// is dropped from the wire (handler defaults channel=0 via parseOptInt
+		// on the missing capture group). Long-form BLERAW: pattern stays
+		// active so old firmware keeps populating ble_detections.
+		{
+			name: "ble-raw-short",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*B:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<rssi>-?\d+)\s+(?P<adv>[A-Za-z0-9+/=]+)`),
+			handler: p.handleBLERaw,
+		},
 		// ATTACK long: "nodeId: ATTACK: DEAUTH [BROADCAST] SRC:AA:BB:CC:DD:EE:FF DST:11:22:33:44:55:66 RSSI:-60dBm CH:6"
 		{
 			name: "attack-long",
@@ -234,7 +271,7 @@ func (p *TextParser) initPatterns() {
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE)_ACK):?(?P<status>[A-Z_]*)`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE|RAW_BLE)_ACK):?(?P<status>[A-Z_]*)`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"
@@ -343,6 +380,17 @@ func (p *TextParser) initPatterns() {
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*VIBRATION_STATUS:\s*(?P<body>.+)$`),
 			handler: p.handleDoneSummaryWithAck("vibration-status", "VIBRATION_STATUS_ACK"),
+		},
+		// RAW_BLE_STATUS: "nodeId: RAW_BLE_STATUS:ON" (reply to RAW_BLE_STATUS read command).
+		// Firmware emits a content frame, not a real *_ACK; synthesize one
+		// so the command row closes (mirrors VIBRATION_STATUS / BASELINE_STATUS).
+		// Allow no whitespace after the colon to match the firmware which
+		// emits "...:ON" without a space.
+		{
+			name: "raw-ble-status",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*RAW_BLE_STATUS:\s*(?P<body>.+)$`),
+			handler: p.handleDoneSummaryWithAck("raw-ble-status", "RAW_BLE_STATUS_ACK"),
 		},
 		// AUTOERASE_STATUS: "nodeId: AUTOERASE_STATUS: Enabled:NO" (or "...Enabled:YES SetupMode:ACTIVE ...")
 		// Reply frame to AUTOERASE_STATUS read command. Firmware answers
@@ -831,6 +879,36 @@ func (p *TextParser) handleDevice(match []string, names []string, raw string) []
 
 	return []*ParsedEvent{{
 		Kind:   "target-detected",
+		NodeID: nodeID,
+		Data:   data,
+		Raw:    raw,
+	}}
+}
+
+// handleBLERaw decodes a BLERAW: line into a "ble-raw" event. The base64 adv
+// payload is decoded here so downstream consumers (the classification service)
+// can hand the bytes straight to the lookupper without re-parsing the line.
+// Malformed base64 silently drops the event — at worst we lose one
+// classification round, the legacy DEVICE: frame for the same MAC still feeds
+// inventory_devices.
+func (p *TextParser) handleBLERaw(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+
+	advBytes, err := base64.StdEncoding.DecodeString(g["adv"])
+	if err != nil {
+		return nil
+	}
+
+	data := map[string]interface{}{
+		"mac":      strings.ToUpper(g["mac"]),
+		"rssi":     parseOptInt(g["rssi"]),
+		"channel":  parseOptInt(g["channel"]),
+		"advBytes": advBytes,
+	}
+
+	return []*ParsedEvent{{
+		Kind:   "ble-raw",
 		NodeID: nodeID,
 		Data:   data,
 		Raw:    raw,

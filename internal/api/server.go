@@ -16,6 +16,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/alarms"
 	"github.com/karamble/diginode-cc/internal/alerts"
 	"github.com/karamble/diginode-cc/internal/auth"
+	"github.com/karamble/diginode-cc/internal/bleclassify"
 	"github.com/karamble/diginode-cc/internal/chat"
 	"github.com/karamble/diginode-cc/internal/commands"
 	"github.com/karamble/diginode-cc/internal/config"
@@ -71,6 +72,7 @@ type Services struct {
 	Updates     *updates.Service
 	Database    *database.DB
 	StatusBroadcast *statusbroadcast.Service
+	BLEClassify *bleclassify.Service
 }
 
 // DB returns the database handle for direct queries (admin operations).
@@ -269,6 +271,13 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/clear", s.handleClearInventory)
 				r.Post("/{mac}/promote", s.handlePromoteToTarget)
 				r.Put("/{id}", s.handleUpdateInventoryDevice)
+			})
+
+			// BLE detections persisted from BLERAW: wire frames after
+			// classification by the localhost lookupper.
+			r.Route("/ble", func(r chi.Router) {
+				r.Get("/detections", s.handleListBLEDetections)
+				r.Get("/detections/{mac}", s.handleGetBLEDetectionsByMAC)
 			})
 
 			// Probe-request scanner SSID history (per-(ssid, node_id) pivots,

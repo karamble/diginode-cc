@@ -15,6 +15,7 @@ import UsersPage from './pages/UsersPage'
 import GeofencesPage from './pages/GeofencesPage'
 import TargetsPage from './pages/TargetsPage'
 import InventoryPage from './pages/InventoryPage'
+import BLEDetectionsPage from './pages/BLEDetectionsPage'
 import CommandsPage from './pages/CommandsPage'
 import WebhooksPage from './pages/WebhooksPage'
 import ADSBPage from './pages/ADSBPage'
@@ -38,6 +39,7 @@ function AuthenticatedApp() {
         <Route path="/targets" element={<TargetsPage />} />
         <Route path="/geofences" element={<GeofencesPage />} />
         <Route path="/inventory" element={<InventoryPage />} />
+        <Route path="/ble" element={<BLEDetectionsPage />} />
         <Route path="/commands" element={<CommandsPage />} />
         <Route path="/webhooks" element={<WebhooksPage />} />
         <Route path="/adsb" element={<ADSBPage />} />

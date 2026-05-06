@@ -56,6 +56,12 @@ type Manager struct {
 	// wires this to the alerts service so everything lands in alert_events
 	// + broadcasts to the WS hub.
 	onAlert func(category, level, nodeID, raw string, data map[string]interface{})
+	// onBLERaw receives every parsed "ble-raw" event. The callback is wired
+	// to the BLE classification service which forwards the raw advertisement
+	// bytes to the localhost BLE lookupper for identification. nodeID is the
+	// sensor's CONFIG_NODEID short id (e.g. "HB55"); advBytes is the decoded
+	// AD-structures payload (up to 31 bytes for BLE 4.x legacy advertising).
+	onBLERaw func(nodeID, mac string, rssi, channel int, advBytes []byte)
 	// Stored radio config sections (populated during wantConfig dump)
 	radioConfig   map[string]*ConfigPayload
 	radioConfigMu sync.RWMutex
@@ -100,6 +106,15 @@ func (m *Manager) SetCommandAckCallback(fn func(ackKind, ackStatus, ackNode stri
 // persists to alert_events and broadcasts on the WS hub.
 func (m *Manager) SetAlertCallback(fn func(category, level, nodeID, raw string, data map[string]interface{})) {
 	m.onAlert = fn
+}
+
+// SetBLERawCallback registers the handler for every Kind="ble-raw" event the
+// textparser emits (Halberd's BLERAW: wire frame). The callback is invoked
+// once per advertisement with the sensor's node ID, the MAC, RSSI, BLE
+// channel, and the decoded AD-structures payload. Downstream forwards the
+// payload to the localhost BLE lookupper for classification.
+func (m *Manager) SetBLERawCallback(fn func(nodeID, mac string, rssi, channel int, advBytes []byte)) {
+	m.onBLERaw = fn
 }
 
 // SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
@@ -353,12 +368,62 @@ func (m *Manager) readLoopBinary() {
 			// Parse text lines for sensor data and message echoes.
 			// After wantConfig, the firmware is in API mode but still
 			// outputs some text debug lines (especially message echoes).
+			//
+			// Skip event Kinds that also arrive via the binary Meshtastic
+			// TEXTMSG path (handled by ProcessMeshText). The Heltec emits
+			// the same content twice on serial — once as a binary FromRadio
+			// frame and once as a "[MESH RX] msg=..." debug console line —
+			// and processing both produces duplicate database rows. The
+			// binary path is authoritative; the debug-text duplicate is
+			// only useful as a legacy fallback when the protocol parser
+			// can't extract the message (which is rare in API mode).
+			//
+			// Block-list (deny specific dual-path Kinds rather than allow-
+			// list specific text-only Kinds) so newly-added firmware
+			// patterns dispatch by default. Only block Kinds that:
+			//   (a) can arrive via BOTH binary protocol and text-debug, and
+			//   (b) write to a DB table without natural dedup (no UPSERT,
+			//       no UNIQUE constraint, no in-memory dedup cache).
+			//
+			// Currently blocked:
+			//   raw            — explicitly skipped to suppress noise
+			//   ble-raw        — bleclassify INSERTs into ble_detections
+			//                    with no UNIQUE; was producing double rows
+			//                    on the BLE Detections page
+			//   target-detected— inventory.TrackFull UPSERTs by MAC so
+			//                    practical impact is limited, but still
+			//                    safer to gate
+			//   alert          — alerts.TriggerDirect INSERTs into
+			//                    alert_events without dedup (probe category
+			//                    has its own dedup but other categories
+			//                    don't); double-fires would also fan out
+			//                    duplicate webhook + ntfy notifications
+			//   tri-data       — targets.AddDetection INSERTs into
+			//                    target_positions (no UNIQUE); doubles
+			//                    triangulation samples and skews the
+			//                    averaging window
+			//   tri-final      — targets.ApplyTrackingEstimate INSERTs the
+			//                    fix into target_positions
+			//   tri-complete   — completion log; no DB write but kept here
+			//                    so the lifecycle stays paired with T_D/T_F
+			//
+			// NOT blocked (text-debug-only sources, must dispatch):
+			//   command-ack    — firmware ACK responses; commands table
+			//                    UPSERTs by ID anyway
+			//   node-telemetry — Heltec's own local GPS/battery/temp,
+			//                    nodes table UPSERTs by node_id
+			//   text-message   — only emitted by parseTextEcho, never via
+			//                    binary; chat path is text-debug-exclusive
+			//   drone-telemetry, gate-codes — no DB consumer wired
 			if m.textParser != nil {
 				events := m.textParser.ParseLine(line)
 				for _, evt := range events {
-					if evt.Kind != "raw" {
-						m.dispatchTextEvent(evt)
+					switch evt.Kind {
+					case "raw", "ble-raw", "target-detected",
+						"alert", "tri-data", "tri-final", "tri-complete":
+						continue
 					}
+					m.dispatchTextEvent(evt)
 				}
 			}
 		}
@@ -525,6 +590,18 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 
 		if m.onTargetDetected != nil {
 			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID)
+		}
+
+	case "ble-raw":
+		mac, _ := evt.Data["mac"].(string)
+		if mac == "" {
+			break
+		}
+		rssi, _ := evt.Data["rssi"].(int)
+		channel, _ := evt.Data["channel"].(int)
+		advBytes, _ := evt.Data["advBytes"].([]byte)
+		if m.onBLERaw != nil && len(advBytes) > 0 {
+			m.onBLERaw(evt.NodeID, mac, rssi, channel, advBytes)
 		}
 
 	case "tri-data":

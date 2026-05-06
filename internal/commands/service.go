@@ -2,9 +2,11 @@ package commands
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -14,6 +16,17 @@ import (
 	"github.com/karamble/diginode-cc/internal/database"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
+
+// newCommandID returns a fresh UUID v4 in the canonical hyphenated form,
+// matching the format used by handlers_commands.go for parent commands.
+// The commands.id column is typed UUID in postgres so any non-UUID string
+// (e.g. "<parent-id>-raw_ble_off") makes persistCommand fail with SQLSTATE
+// 22P02 and the row never lands in the DB.
+func newCommandID() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("%08x-%04x-%04x-%04x-%012x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+}
 
 // CommandStatus represents the lifecycle state of a command.
 type CommandStatus string
@@ -39,6 +52,29 @@ var (
 	ErrCommandNotFound = errors.New("command not found")
 	ErrRateLimited     = errors.New("rate limited: too many commands to this node")
 )
+
+// ScanDetection is one per-device row appended to a running scan command's
+// in-memory detection list. The accumulator is finalised into ResultText
+// when the scan transitions to terminal state (SCAN_DONE_ACK or STOP_ACK
+// fan-out) so the CommandsPage modal can render the device list captured
+// during the scan window.
+//
+// Source distinguishes how the device was observed:
+//   - "DEVICE": streaming D:/DEVICE: detection (no raw advertisement)
+//   - "BLERAW": classified through the lookupper from a B:/BLERAW: frame
+//
+// A single MAC can appear with both sources during the same scan (the
+// firmware emits D: and B: separately when raw mode is on); RecordScanDetection
+// dedups per (MAC, Source) so each pairing contributes at most one row.
+type ScanDetection struct {
+	MAC           string `json:"mac"`
+	RSSI          int    `json:"rssi"`
+	Band          string `json:"band,omitempty"`          // "W"/"B"/"U" (DEVICE only)
+	Source        string `json:"source"`                  // "DEVICE" or "BLERAW"
+	DetectionType string `json:"detectionType,omitempty"` // BLERAW only
+	Manufacturer  string `json:"manufacturer,omitempty"`
+	LocalName     string `json:"localName,omitempty"`
+}
 
 // Command represents a queued command to a mesh node.
 type Command struct {
@@ -67,6 +103,18 @@ type Command struct {
 	AckNode    string `json:"ackNode,omitempty"`   // node that sent ACK
 	ResultText string `json:"resultText,omitempty"`
 	ErrorText  string `json:"errorText,omitempty"`
+
+	// autoRawAttached flags a DEVICE_SCAN_START where the service auto-
+	// enqueued a RAW_BLE_ON because the BLE lookupper was available. When
+	// the command later transitions to terminal state (STOP_ACK,
+	// SCAN_DONE_ACK, or scan-timeout reaper), the service auto-fires
+	// RAW_BLE_OFF to the same target. In-memory only — never persisted.
+	autoRawAttached bool
+
+	// scanRows accumulates per-device detections observed while a scan-class
+	// command is in StatusRunning. Finalised into ResultText on terminal
+	// state transition. In-memory only — never persisted as a column.
+	scanRows []ScanDetection
 }
 
 // Service manages the command queue with rate limiting and ACK tracking.
@@ -77,6 +125,10 @@ type Service struct {
 	nodeRate map[uint32]time.Time // last command time per node
 	mu       sync.Mutex
 	sendFn   func(nodeNum uint32, cmdType string, payload []byte) error
+	// rawBLEAvailable gates the auto-attach of RAW_BLE_ON/OFF around
+	// DEVICE_SCAN_START. Set once at boot from the lookupper's
+	// startup-probe result. Never flipped at runtime.
+	rawBLEAvailable bool
 }
 
 // NewService creates a new command queue service.
@@ -87,6 +139,16 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 		pending:  make(map[string]*Command),
 		nodeRate: make(map[uint32]time.Time),
 	}
+}
+
+// SetRawBLEAvailable records whether the BLE lookupper was reachable at
+// startup. When true, Enqueue auto-attaches a RAW_BLE_ON to every accepted
+// DEVICE_SCAN_START targeting an antihunter-class node, and fires
+// RAW_BLE_OFF when the scan terminates.
+func (s *Service) SetRawBLEAvailable(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rawBLEAvailable = v
 }
 
 // SetSendFunc sets the function used to actually transmit commands via serial.
@@ -116,8 +178,103 @@ func (s *Service) Enqueue(cmd *Command) error {
 
 	s.pending[cmd.ID] = cmd
 
+	// Auto-attach for DEVICE_SCAN_START when the BLE lookupper is available.
+	// Critical ordering: RAW_BLE_ON must be sent BEFORE the scan start so the
+	// firmware has rawBleMode=true on the very first BLE callback. If we sent
+	// the parent first, the firmware would be 3-7 s into the scan before
+	// rawBleMode flipped, and any BLE devices detected in that pre-RAW window
+	// would miss bleRawCache population on first sight. We send RAW_BLE_ON
+	// immediately and defer the parent by autoAttachDelay so they don't
+	// collide on the Pi-side Heltec SerialModule's UART input window.
+	if s.rawBLEAvailable && cmd.Name == "DEVICE_SCAN_START" {
+		cmd.autoRawAttached = true
+		s.enqueuePrecedingRawBLEOnLocked(cmd)
+		return nil
+	}
+
 	go s.send(cmd)
 	return nil
+}
+
+// autoAttachDelay is the gap inserted between the auto-attached RAW_BLE_*
+// follow-on and the parent scan command (or vice versa) on the /dev/lora
+// wire. Without this delay both writes hit the Pi-side Heltec's Meshtastic
+// SerialModule UART input window simultaneously, the SerialModule batches
+// them into one TEXTMSG, and one of the two commands gets corrupted (the
+// loser of the race silently drops, leaving its row stuck at SENT forever).
+// 3000ms matches the firmware's MESH_TX_PACING_MS and the SerialRateLimiter
+// REFILL_INTERVAL so the magnitude is consistent across the system.
+const autoAttachDelay = 3 * time.Second
+
+// enqueuePrecedingRawBLEOnLocked queues a RAW_BLE_ON to fire FIRST, then the
+// parent DEVICE_SCAN_START to fire after autoAttachDelay. The order matters:
+// the firmware must have rawBleMode=true on the very first BLE callback of
+// the new scan so bleRawCache populates from the start. Sending the parent
+// first leaves the first 3-7 seconds of the scan with rawBleMode=false, and
+// devices detected in that window won't get a B: frame later (the BLE
+// callback's first-sight check excludes re-inserts for already-seen MACs).
+//
+// Caller must hold s.mu.
+func (s *Service) enqueuePrecedingRawBLEOnLocked(parent *Command) {
+	if parent == nil {
+		return
+	}
+	rawOn := &Command{
+		ID:          newCommandID(),
+		TargetNode:  parent.TargetNode,
+		CommandType: "RAW_BLE_ON",
+		Status:      StatusPending,
+		CreatedAt:   time.Now(),
+		MaxRetries:  3,
+		Target:      parent.Target,
+		Name:        "RAW_BLE_ON",
+		Line:        parent.Target + " RAW_BLE_ON",
+	}
+	s.pending[rawOn.ID] = rawOn
+	// RAW_BLE_ON goes immediately so the firmware's NVS rawBleMode flips to
+	// true before the scan begins. Parent DEVICE_SCAN_START is deferred by
+	// autoAttachDelay so the two writes land in separate Heltec SerialModule
+	// input windows and the firmware's command parser sees them as distinct
+	// LoRa TEXTMSGs.
+	go s.send(rawOn)
+	go func() {
+		time.Sleep(autoAttachDelay)
+		s.send(parent)
+	}()
+}
+
+// enqueueRawBLEFollowonLocked appends a RAW_BLE_OFF command (the close pair
+// for an auto-attached RAW_BLE_ON) targeting the same node as the parent.
+// Used on SCAN_DONE_ACK and STOP_ACK fan-out — by then the firmware has
+// finished emitting all D: + B: frames so timing relative to the ACK matters
+// less than for the scan-start case. Bypasses the rate limiter because the
+// follow-on pairs with a freshly-completed scan, not a separately-issued
+// operator action.
+//
+// Caller must hold s.mu. The actual on-wire send is deferred by
+// autoAttachDelay so the closing ACK frame from the firmware and the
+// follow-on RAW_BLE_OFF write don't collide on the Heltec SerialModule's
+// input window in the opposite direction.
+func (s *Service) enqueueRawBLEFollowonLocked(parent *Command, name string) {
+	if parent == nil {
+		return
+	}
+	follow := &Command{
+		ID:          newCommandID(),
+		TargetNode:  parent.TargetNode,
+		CommandType: name,
+		Status:      StatusPending,
+		CreatedAt:   time.Now(),
+		MaxRetries:  3,
+		Target:      parent.Target,
+		Name:        name,
+		Line:        parent.Target + " " + name,
+	}
+	s.pending[follow.ID] = follow
+	go func() {
+		time.Sleep(autoAttachDelay)
+		s.send(follow)
+	}()
 }
 
 // HandleACK processes an acknowledgment for a pending command.
@@ -183,6 +340,11 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		// follow-up fan-out below also closes any still-RUNNING PROBE_START
 		// when a STOPPED ack lands.
 		wantPrefix = "PROBE_"
+	case "RAW_BLE_ACK":
+		// Firmware replies HB55: RAW_BLE_ACK:ON|OFF for both RAW_BLE_ON and
+		// RAW_BLE_OFF. The latest-pending tiebreak picks the freshly-sent
+		// row for whichever toggle the operator just issued.
+		wantPrefix = "RAW_BLE_"
 	case "SCAN_DONE_ACK":
 		wantSuffix = "SCAN_START" // matches SCAN_START + DEVICE_SCAN_START
 	case "STOP_ACK":
@@ -258,6 +420,13 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		upper == "FINISHED" || upper == "SUCCESS" ||
 		upper == "STOPPED" ||
 		upper == "ENABLED" || upper == "DISABLED" ||
+		// RAW_BLE_ACK uses "ON"/"OFF" tokens to confirm the requested
+		// raw-advertisement-forwarding state was applied. The auto-
+		// attached RAW_BLE_ON / RAW_BLE_OFF rows that pair with every
+		// DEVICE_SCAN_START close on these tokens; without them the
+		// follow-on commands would stay stuck at StatusSent forever even
+		// though the firmware did acknowledge.
+		upper == "ON" || upper == "OFF" ||
 		upper == "CANCELLED" || upper == "CANCELED" ||
 		upper == "UPDATED" || upper == "EXISTS" ||
 		strings.HasPrefix(upper, "INTERVAL"))
@@ -284,7 +453,35 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	// pending so their *_DONE frame can find them later.
 	if match.Status != StatusRunning {
 		match.FinishedAt = &now
+		// Finalise scan-class detections so the CommandsPage modal can
+		// render the per-device list captured while the scan was running.
+		// Two parallel representations:
+		//   * ResultText — human-readable multi-line summary (legacy
+		//     fallback, rendered as <pre> if no structured data).
+		//   * Result["detections"] — JSON array of ScanDetection rows that
+		//     the frontend renders as a real <table> with columns for
+		//     Source/MAC/Band/RSSI/Type/Manufacturer/Name. Persists into
+		//     the commands.result jsonb column alongside the existing
+		//     ack envelope so a modal opened minutes after scan close can
+		//     still render the rich table.
+		if match.Name == "DEVICE_SCAN_START" || match.Name == "SCAN_START" {
+			if len(match.scanRows) > 0 {
+				merged := mergeScanRows(match.scanRows)
+				match.ResultText = formatScanRows(merged)
+				if match.Result == nil {
+					match.Result = map[string]interface{}{}
+				}
+				match.Result["detections"] = merged
+			}
+		}
 		delete(s.pending, matchKey)
+		// If this DEVICE_SCAN_START had an auto-attached RAW_BLE_ON,
+		// fire RAW_BLE_OFF now that the scan ended (SCAN_DONE_ACK
+		// path). The STOP_ACK path below handles operator-issued
+		// stops; this branch covers natural completion.
+		if match.autoRawAttached && match.Name == "DEVICE_SCAN_START" {
+			s.enqueueRawBLEFollowonLocked(match, "RAW_BLE_OFF")
+		}
 	}
 
 	slog.Info("structured ACK matched", "ackKind", ackKind, "cmdName", cmdName, "status", match.Status)
@@ -359,11 +556,187 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 			}
 			cmd.Status = StatusOK
 			cmd.FinishedAt = &now
+			// Same finalisation as the SCAN_DONE_ACK path — flush any
+			// accumulated scan-row detections into ResultText AND into
+			// Result["detections"] for the modal table.
+			if cmd.Name == "DEVICE_SCAN_START" || cmd.Name == "SCAN_START" {
+				if len(cmd.scanRows) > 0 {
+					merged := mergeScanRows(cmd.scanRows)
+					cmd.ResultText = formatScanRows(merged)
+					if cmd.Result == nil {
+						cmd.Result = map[string]interface{}{}
+					}
+					cmd.Result["detections"] = merged
+				}
+			}
 			delete(s.pending, id)
 			s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: cmd})
 			go s.persistCommand(cmd)
+			// If a DEVICE_SCAN_START closed by this STOP fan-out had an
+			// auto-attached RAW_BLE_ON, fire RAW_BLE_OFF for the same
+			// target now that raw mode is no longer needed.
+			if cmd.autoRawAttached && cmd.Name == "DEVICE_SCAN_START" {
+				s.enqueueRawBLEFollowonLocked(cmd, "RAW_BLE_OFF")
+			}
 		}
 	}
+}
+
+// RecordScanDetection appends a per-device row to every RUNNING scan-class
+// command targeting the originating node (or @ALL). Called from the serial
+// target-detected callback (Source="DEVICE") and the bleclassify
+// classified-detection callback (Source="BLERAW") so each row of the
+// CommandsPage modal can show what was actually seen during the scan,
+// tagged with whether the firmware emitted a streaming D: frame for it
+// or whether the lookupper classified its raw advertisement.
+//
+// Dedup is per (MAC, Source) so a device that arrived as both D: and B:
+// during the same scan contributes two rows, while repeated emissions
+// of the same kind across scan cycles contribute only one.
+func (s *Service) RecordScanDetection(nodeID string, det ScanDetection) {
+	if det.MAC == "" || det.Source == "" {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Two formats arrive here depending on the source path:
+	//   * binary Meshtastic protocol path: nodeID is the sender's Meshtastic
+	//     node-num formatted as "!02ed5f04" (8 hex chars, ! prefix).
+	//   * text-debug path (now blocked for target-detected): nodeID was the
+	//     firmware short name like "HB55".
+	// Operator commands target by short name ("@HB55"), but the matching ACK
+	// landed via the binary path so cmd.AckNode is the !hex form. Match
+	// against either to handle both legacy and current dispatch paths.
+	targetWithAt := "@" + nodeID
+	for _, cmd := range s.pending {
+		name := cmd.Name
+		if name == "" {
+			name = cmd.CommandType
+		}
+		isScanCmd := name == "DEVICE_SCAN_START" || name == "SCAN_START"
+		if !isScanCmd || cmd.Status != StatusRunning {
+			continue
+		}
+		targetMatches := cmd.Target == "@ALL" ||
+			cmd.Target == targetWithAt ||
+			cmd.AckNode == nodeID
+		if !targetMatches {
+			continue
+		}
+		dup := false
+		for _, r := range cmd.scanRows {
+			if r.MAC == det.MAC && r.Source == det.Source {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			cmd.scanRows = append(cmd.scanRows, det)
+		}
+	}
+}
+
+// formatScanRows serialises an accumulated scan-detection list into the
+// human-readable result_text shown in the CommandsPage modal. One row per
+// line, prefixed by [DEVICE] or [BLERAW] so operators can see at a glance
+// which devices were classified via the raw-advertisement pipeline vs.
+// just observed as streaming detections.
+func formatScanRows(rows []ScanDetection) string {
+	if len(rows) == 0 {
+		return ""
+	}
+	var sb strings.Builder
+	sb.WriteString("Devices: ")
+	sb.WriteString(strconv.Itoa(len(rows)))
+	sb.WriteString("\n")
+	for _, r := range rows {
+		sb.WriteString("[")
+		sb.WriteString(r.Source)
+		sb.WriteString("] ")
+		sb.WriteString(r.MAC)
+		if r.Band != "" {
+			sb.WriteString(" ")
+			sb.WriteString(r.Band)
+		}
+		sb.WriteString(" RSSI=")
+		sb.WriteString(strconv.Itoa(r.RSSI))
+		if r.DetectionType != "" {
+			sb.WriteString(" type=")
+			sb.WriteString(r.DetectionType)
+		}
+		if r.Manufacturer != "" {
+			sb.WriteString(" mfr=")
+			sb.WriteString(strconv.Quote(r.Manufacturer))
+		}
+		if r.LocalName != "" {
+			sb.WriteString(" name=")
+			sb.WriteString(strconv.Quote(r.LocalName))
+		}
+		sb.WriteString("\n")
+	}
+	return sb.String()
+}
+
+// mergeScanRows collapses a per-(MAC, Source) row list into one row per MAC.
+// Each BLE device produces two ScanDetection rows during a scan (a [DEVICE]
+// row from the streaming D: emit and a [BLERAW] row from the raw-
+// advertisement classifier callback) and the modal table rendered them as
+// two separate entries. The BLERAW row carries the enriched fields
+// (DetectionType, Manufacturer) and the DEVICE row carries the Band ("WiFi"
+// or "BLE") that the firmware reported.
+//
+// Merge rule per MAC:
+//   - Source is "BLERAW" if any contributing row was BLERAW (operators care
+//     that the device went through the classifier, not that it also emitted
+//     D:); otherwise "DEVICE".
+//   - Band falls back to the DEVICE row's Band when BLERAW didn't set one
+//     (which it never does).
+//   - DetectionType, Manufacturer, LocalName take the first non-empty value
+//     across rows — typically BLERAW provides the rich values and DEVICE
+//     might fill LocalName from the firmware's "N:Name" suffix.
+//   - RSSI takes the most recently observed value (last row in source order;
+//     the BLERAW row arrives after its paired DEVICE row).
+//
+// Order is preserved by first-sight: the first row's MAC determines the
+// position in the merged slice, regardless of which Source produced it.
+func mergeScanRows(rows []ScanDetection) []ScanDetection {
+	if len(rows) == 0 {
+		return rows
+	}
+	type entry struct {
+		idx int
+		row ScanDetection
+	}
+	byMAC := make(map[string]*entry, len(rows))
+	order := make([]string, 0, len(rows))
+	for _, r := range rows {
+		if e, ok := byMAC[r.MAC]; ok {
+			if r.Source == "BLERAW" {
+				e.row.Source = "BLERAW"
+			}
+			if e.row.Band == "" && r.Band != "" {
+				e.row.Band = r.Band
+			}
+			if e.row.DetectionType == "" && r.DetectionType != "" {
+				e.row.DetectionType = r.DetectionType
+			}
+			if e.row.Manufacturer == "" && r.Manufacturer != "" {
+				e.row.Manufacturer = r.Manufacturer
+			}
+			if e.row.LocalName == "" && r.LocalName != "" {
+				e.row.LocalName = r.LocalName
+			}
+			e.row.RSSI = r.RSSI
+			continue
+		}
+		byMAC[r.MAC] = &entry{idx: len(order), row: r}
+		order = append(order, r.MAC)
+	}
+	out := make([]ScanDetection, 0, len(order))
+	for _, mac := range order {
+		out = append(out, byMAC[mac].row)
+	}
+	return out
 }
 
 // RecordProbeHit increments the probeHits counter on the latest RUNNING
@@ -469,16 +842,25 @@ func (s *Service) GetByID(ctx context.Context, id string) (*Command, error) {
 	}
 	s.mu.Unlock()
 
-	// Fall back to DB
+	// Fall back to DB. Select every column List() does so the modal-rendered
+	// fields (ack_kind, ack_status, result_text, error_text, target, name,
+	// line, params, finished_at) survive the round-trip from in-memory
+	// command → DB persist → API read after the command left s.pending. The
+	// previous narrow SELECT silently dropped result_text on terminated scans.
 	var cmd Command
 	var payloadJSON, resultJSON []byte
+	var target, name, line, ackKind, ackStatus, ackNode, resultText, errorText sql.NullString
+	var params []string
 	err := s.db.Pool.QueryRow(ctx, `
 		SELECT id, target_node, command_type, payload, status,
-			sent_at, acked_at, result, retry_count, max_retries, created_at
+			sent_at, acked_at, finished_at, result, retry_count, max_retries, created_at,
+			target, name, params, line, ack_kind, ack_status, ack_node, result_text, error_text
 		FROM commands WHERE id = $1`, id).Scan(
 		&cmd.ID, &cmd.TargetNode, &cmd.CommandType, &payloadJSON,
-		&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &resultJSON,
-		&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt)
+		&cmd.Status, &cmd.SentAt, &cmd.AckedAt, &cmd.FinishedAt, &resultJSON,
+		&cmd.RetryCount, &cmd.MaxRetries, &cmd.CreatedAt,
+		&target, &name, &params, &line, &ackKind, &ackStatus, &ackNode,
+		&resultText, &errorText)
 	if err != nil {
 		return nil, ErrCommandNotFound
 	}
@@ -488,6 +870,15 @@ func (s *Service) GetByID(ctx context.Context, id string) (*Command, error) {
 	if resultJSON != nil {
 		json.Unmarshal(resultJSON, &cmd.Result)
 	}
+	cmd.Target = target.String
+	cmd.Name = name.String
+	cmd.Line = line.String
+	cmd.AckKind = ackKind.String
+	cmd.AckStatus = ackStatus.String
+	cmd.AckNode = ackNode.String
+	cmd.ResultText = resultText.String
+	cmd.ErrorText = errorText.String
+	cmd.Params = params
 	return &cmd, nil
 }
 

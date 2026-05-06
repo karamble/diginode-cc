@@ -167,6 +167,17 @@ var Registry = map[string]*CommandDef{
 	"BATTERY_SAVER_STOP":   {Name: "BATTERY_SAVER_STOP", Group: "Battery", Description: "Stop battery saver", SupportedTypes: typeAH},
 	"BATTERY_SAVER_STATUS": {Name: "BATTERY_SAVER_STATUS", Group: "Battery", Description: "Check battery saver status", SupportedTypes: typeAH},
 
+	// Raw BLE forwarding (AntiHunter-only). When ON, the firmware emits a
+	// BLERAW: wire frame alongside the legacy DEVICE: line so the C2 can
+	// reparse the full advertisement payload server-side. Roughly doubles
+	// per-detection bytes on the mesh; intended for short-window targeted
+	// classification rather than always-on. Auto-attached by the commands
+	// service for the duration of a DEVICE_SCAN_START when the BLE
+	// lookupper is reachable on this host.
+	"RAW_BLE_ON":     {Name: "RAW_BLE_ON", Group: "Configuration", Description: "Enable raw BLE advertisement forwarding (BLERAW: wire frames)", SingleNode: true, SupportedTypes: typeAH},
+	"RAW_BLE_OFF":    {Name: "RAW_BLE_OFF", Group: "Configuration", Description: "Disable raw BLE advertisement forwarding", SingleNode: true, SupportedTypes: typeAH},
+	"RAW_BLE_STATUS": {Name: "RAW_BLE_STATUS", Group: "Configuration", Description: "Query raw BLE forwarding state", SingleNode: true, SupportedTypes: typeAH},
+
 	// System (universal)
 	"REBOOT": {Name: "REBOOT", Group: "System", Description: "Reboot node", SupportedTypes: typeUniversal},
 
@@ -249,6 +260,13 @@ var ACKMap = map[string]string{
 	"VIBRATION_STATUS_ACK":     "VIBRATION_STATUS",
 	"BASELINE_STATUS_ACK":      "BASELINE_STATUS",
 	"BATTERY_SAVER_STATUS_ACK": "BATTERY_SAVER_STATUS",
+	// RAW_BLE_ACK covers RAW_BLE_ON / RAW_BLE_OFF (firmware emits the same
+	// ACK kind for both with status ON/OFF). The matcher's prefix-match
+	// branch in service.go handles the OFF case. RAW_BLE_STATUS is a
+	// content frame (RAW_BLE_STATUS:ON|OFF), not an _ACK; the textparser
+	// synthesizes RAW_BLE_STATUS_ACK from that reply so the lifecycle closes.
+	"RAW_BLE_ACK":        "RAW_BLE_ON",
+	"RAW_BLE_STATUS_ACK": "RAW_BLE_STATUS",
 	// *_DONE synthesized ACKs: long-running scans/detections reach RUNNING on
 	// the initial *_ACK:STARTED reply, then the firmware broadcasts a
 	// *_DONE: W=... B=... summary when the scan window ends. textparser

@@ -19,6 +19,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/api"
 	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/auth"
+	"github.com/karamble/diginode-cc/internal/bleclassify"
 	"github.com/karamble/diginode-cc/internal/chat"
 	"github.com/karamble/diginode-cc/internal/commands"
 	"github.com/karamble/diginode-cc/internal/config"
@@ -378,6 +379,19 @@ func main() {
 				geofencesSvc.NotifyViolation(g, "target", mac, lat, lon)
 			}
 		}
+
+		// 5. Scan-row correlation: append a [DEVICE] row to any RUNNING
+		//    DEVICE_SCAN_START / SCAN_START targeting this node so the
+		//    CommandsPage modal can render the per-device list when the
+		//    scan terminates.
+		commandsSvc.RecordScanDetection(nodeID, commands.ScanDetection{
+			MAC:          mac,
+			RSSI:         rssi,
+			Band:         deviceType,
+			Source:       "DEVICE",
+			Manufacturer: manufacturer,
+			LocalName:    ssid,
+		})
 	})
 
 	// Wire triangulation protocol (T_D / T_F / T_C) → target tracking service
@@ -399,6 +413,36 @@ func main() {
 			slog.Info("triangulation complete", "mac", mac, "nodes", nodes)
 		},
 	)
+
+	// BLE classification: one-shot existence probe of the localhost lookupper
+	// at startup. If reachable, BLERAW: wire frames from Halberd sensors are
+	// forwarded for identification and the result is broadcast on the WS hub.
+	// If not, the callback short-circuits and only the legacy DEVICE: feed
+	// keeps inventory_devices populated.
+	lookupper := bleclassify.NewLookupper(context.Background())
+	bleSvc := bleclassify.NewService(db, hub, lookupper)
+	// Mirror BLE classifications into RUNNING scans as [BLERAW] rows so
+	// the CommandsPage modal differentiates raw-classified hits from
+	// streaming D: detections in the per-device summary it renders on
+	// SCAN_DONE_ACK / STOP_ACK.
+	bleSvc.SetClassifiedCallback(func(nodeID, mac string, rssi int, result *bleclassify.ClassifyResult) {
+		det := commands.ScanDetection{
+			MAC:    mac,
+			RSSI:   rssi,
+			Source: "BLERAW",
+		}
+		if result != nil {
+			det.DetectionType = result.DetectionType
+			det.Manufacturer = result.Manufacturer
+			det.LocalName = result.LocalName
+		}
+		commandsSvc.RecordScanDetection(nodeID, det)
+	})
+	serialMgr.SetBLERawCallback(bleSvc.HandleRaw)
+	// Gate the auto-attach in commandsSvc on the same one-shot probe result.
+	// When the lookupper isn't reachable, RAW_BLE_ON/OFF aren't auto-fired
+	// around DEVICE_SCAN_START and the raw-BLE wire frames stay disabled.
+	commandsSvc.SetRawBLEAvailable(lookupper.Available())
 	_ = trackingSvc // used via callbacks
 
 	// Load startup data from DB
@@ -496,6 +540,7 @@ func main() {
 		Updates:     updatesSvc,
 		Database:    db,
 		StatusBroadcast: statusSvc,
+		BLEClassify: bleSvc,
 	}
 
 	// HTTP server

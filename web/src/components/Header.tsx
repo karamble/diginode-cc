@@ -14,6 +14,7 @@ const PAGE_TITLES: Record<string, string> = {
   '/targets': 'Targets',
   '/geofences': 'Geofences',
   '/inventory': 'Devices',
+  '/ble': 'BLE Detections',
   '/commands': 'Commands',
   '/adsb': 'ADS-B',
   '/acars': 'ACARS',
