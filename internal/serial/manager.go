@@ -56,6 +56,12 @@ type Manager struct {
 	// wires this to the alerts service so everything lands in alert_events
 	// + broadcasts to the WS hub.
 	onAlert func(category, level, nodeID, raw string, data map[string]interface{})
+	// onBLERaw receives every parsed "ble-raw" event. The callback is wired
+	// to the BLE classification service which forwards the raw advertisement
+	// bytes to the localhost BLE lookupper for identification. nodeID is the
+	// sensor's CONFIG_NODEID short id (e.g. "HB55"); advBytes is the decoded
+	// AD-structures payload (up to 31 bytes for BLE 4.x legacy advertising).
+	onBLERaw func(nodeID, mac string, rssi, channel int, advBytes []byte)
 	// Stored radio config sections (populated during wantConfig dump)
 	radioConfig   map[string]*ConfigPayload
 	radioConfigMu sync.RWMutex
@@ -100,6 +106,15 @@ func (m *Manager) SetCommandAckCallback(fn func(ackKind, ackStatus, ackNode stri
 // persists to alert_events and broadcasts on the WS hub.
 func (m *Manager) SetAlertCallback(fn func(category, level, nodeID, raw string, data map[string]interface{})) {
 	m.onAlert = fn
+}
+
+// SetBLERawCallback registers the handler for every Kind="ble-raw" event the
+// textparser emits (Halberd's BLERAW: wire frame). The callback is invoked
+// once per advertisement with the sensor's node ID, the MAC, RSSI, BLE
+// channel, and the decoded AD-structures payload. Downstream forwards the
+// payload to the localhost BLE lookupper for classification.
+func (m *Manager) SetBLERawCallback(fn func(nodeID, mac string, rssi, channel int, advBytes []byte)) {
+	m.onBLERaw = fn
 }
 
 // SetTriangulationCallbacks sets handlers for T_D/T_F/T_C triangulation protocol events.
@@ -525,6 +540,18 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 
 		if m.onTargetDetected != nil {
 			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID)
+		}
+
+	case "ble-raw":
+		mac, _ := evt.Data["mac"].(string)
+		if mac == "" {
+			break
+		}
+		rssi, _ := evt.Data["rssi"].(int)
+		channel, _ := evt.Data["channel"].(int)
+		advBytes, _ := evt.Data["advBytes"].([]byte)
+		if m.onBLERaw != nil && len(advBytes) > 0 {
+			m.onBLERaw(evt.NodeID, mac, rssi, channel, advBytes)
 		}
 
 	case "tri-data":

@@ -67,6 +67,13 @@ type Command struct {
 	AckNode    string `json:"ackNode,omitempty"`   // node that sent ACK
 	ResultText string `json:"resultText,omitempty"`
 	ErrorText  string `json:"errorText,omitempty"`
+
+	// autoRawAttached flags a DEVICE_SCAN_START where the service auto-
+	// enqueued a RAW_BLE_ON because the BLE lookupper was available. When
+	// the command later transitions to terminal state (STOP_ACK,
+	// SCAN_DONE_ACK, or scan-timeout reaper), the service auto-fires
+	// RAW_BLE_OFF to the same target. In-memory only — never persisted.
+	autoRawAttached bool
 }
 
 // Service manages the command queue with rate limiting and ACK tracking.
@@ -77,6 +84,10 @@ type Service struct {
 	nodeRate map[uint32]time.Time // last command time per node
 	mu       sync.Mutex
 	sendFn   func(nodeNum uint32, cmdType string, payload []byte) error
+	// rawBLEAvailable gates the auto-attach of RAW_BLE_ON/OFF around
+	// DEVICE_SCAN_START. Set once at boot from the lookupper's
+	// startup-probe result. Never flipped at runtime.
+	rawBLEAvailable bool
 }
 
 // NewService creates a new command queue service.
@@ -87,6 +98,16 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 		pending:  make(map[string]*Command),
 		nodeRate: make(map[uint32]time.Time),
 	}
+}
+
+// SetRawBLEAvailable records whether the BLE lookupper was reachable at
+// startup. When true, Enqueue auto-attaches a RAW_BLE_ON to every accepted
+// DEVICE_SCAN_START targeting an antihunter-class node, and fires
+// RAW_BLE_OFF when the scan terminates.
+func (s *Service) SetRawBLEAvailable(v bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rawBLEAvailable = v
 }
 
 // SetSendFunc sets the function used to actually transmit commands via serial.
@@ -116,8 +137,41 @@ func (s *Service) Enqueue(cmd *Command) error {
 
 	s.pending[cmd.ID] = cmd
 
+	// Auto-attach RAW_BLE_ON for the duration of a DEVICE_SCAN_START when the
+	// BLE lookupper is available. The follow-on bypasses the rate limiter
+	// because it pairs with the just-accepted command — operators don't see
+	// it as a separately-queued action.
+	if s.rawBLEAvailable && cmd.Name == "DEVICE_SCAN_START" {
+		cmd.autoRawAttached = true
+		s.enqueueRawBLEFollowonLocked(cmd, "RAW_BLE_ON")
+	}
+
 	go s.send(cmd)
 	return nil
+}
+
+// enqueueRawBLEFollowonLocked appends a RAW_BLE_ON or RAW_BLE_OFF command
+// targeting the same node as the parent. Caller must hold s.mu. Bypasses
+// the rate limiter because it pairs with a freshly-accepted scan command,
+// not a separately-issued operator action. The follow-on inherits the
+// parent's TargetNode and Target so the wire frame addresses the same node.
+func (s *Service) enqueueRawBLEFollowonLocked(parent *Command, name string) {
+	if parent == nil {
+		return
+	}
+	follow := &Command{
+		ID:          parent.ID + "-" + strings.ToLower(name),
+		TargetNode:  parent.TargetNode,
+		CommandType: name,
+		Status:      StatusPending,
+		CreatedAt:   time.Now(),
+		MaxRetries:  3,
+		Target:      parent.Target,
+		Name:        name,
+		Line:        parent.Target + " " + name,
+	}
+	s.pending[follow.ID] = follow
+	go s.send(follow)
 }
 
 // HandleACK processes an acknowledgment for a pending command.
@@ -285,6 +339,13 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	if match.Status != StatusRunning {
 		match.FinishedAt = &now
 		delete(s.pending, matchKey)
+		// If this DEVICE_SCAN_START had an auto-attached RAW_BLE_ON,
+		// fire RAW_BLE_OFF now that the scan ended (SCAN_DONE_ACK
+		// path). The STOP_ACK path below handles operator-issued
+		// stops; this branch covers natural completion.
+		if match.autoRawAttached && match.Name == "DEVICE_SCAN_START" {
+			s.enqueueRawBLEFollowonLocked(match, "RAW_BLE_OFF")
+		}
 	}
 
 	slog.Info("structured ACK matched", "ackKind", ackKind, "cmdName", cmdName, "status", match.Status)
@@ -362,6 +423,12 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 			delete(s.pending, id)
 			s.hub.Broadcast(ws.Event{Type: ws.EventCommand, Payload: cmd})
 			go s.persistCommand(cmd)
+			// If a DEVICE_SCAN_START closed by this STOP fan-out had an
+			// auto-attached RAW_BLE_ON, fire RAW_BLE_OFF for the same
+			// target now that raw mode is no longer needed.
+			if cmd.autoRawAttached && cmd.Name == "DEVICE_SCAN_START" {
+				s.enqueueRawBLEFollowonLocked(cmd, "RAW_BLE_OFF")
+			}
 		}
 	}
 }

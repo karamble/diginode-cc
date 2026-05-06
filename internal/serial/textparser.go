@@ -1,6 +1,7 @@
 package serial
 
 import (
+	"encoding/base64"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -137,6 +138,19 @@ func (p *TextParser) initPatterns() {
 			regex: regexp.MustCompile(
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*DEVICE:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<band>[A-Za-z])\s+(?P<rssi>-?\d+)(?:\s+C(?P<channel>\d+))?(?:\s+N:(?P<name>.+))?`),
 			handler: p.handleDevice,
+		},
+		// BLERAW line: "nodeId: BLERAW:AA:BB:CC:DD:EE:FF -85 39 BAQEZmlsdC1leA=="
+		// Halberd firmware emits this in addition to the legacy DEVICE: frame
+		// when rawBleMode is on. The base64 payload is the AD-structures
+		// portion of the advertising PDU (everything after the BLE Link Layer
+		// header), capped at 31 bytes for BLE 4.x legacy advertising. The
+		// classification service base64-decodes it and forwards to the BLE
+		// lookupper for identification.
+		{
+			name: "ble-raw",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*BLERAW:(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+(?P<rssi>-?\d+)\s+(?P<channel>\d+)\s+(?P<adv>[A-Za-z0-9+/=]+)`),
+			handler: p.handleBLERaw,
 		},
 		// ATTACK long: "nodeId: ATTACK: DEAUTH [BROADCAST] SRC:AA:BB:CC:DD:EE:FF DST:11:22:33:44:55:66 RSSI:-60dBm CH:6"
 		{
@@ -831,6 +845,36 @@ func (p *TextParser) handleDevice(match []string, names []string, raw string) []
 
 	return []*ParsedEvent{{
 		Kind:   "target-detected",
+		NodeID: nodeID,
+		Data:   data,
+		Raw:    raw,
+	}}
+}
+
+// handleBLERaw decodes a BLERAW: line into a "ble-raw" event. The base64 adv
+// payload is decoded here so downstream consumers (the classification service)
+// can hand the bytes straight to the lookupper without re-parsing the line.
+// Malformed base64 silently drops the event — at worst we lose one
+// classification round, the legacy DEVICE: frame for the same MAC still feeds
+// inventory_devices.
+func (p *TextParser) handleBLERaw(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+
+	advBytes, err := base64.StdEncoding.DecodeString(g["adv"])
+	if err != nil {
+		return nil
+	}
+
+	data := map[string]interface{}{
+		"mac":      strings.ToUpper(g["mac"]),
+		"rssi":     parseOptInt(g["rssi"]),
+		"channel":  parseOptInt(g["channel"]),
+		"advBytes": advBytes,
+	}
+
+	return []*ParsedEvent{{
+		Kind:   "ble-raw",
 		NodeID: nodeID,
 		Data:   data,
 		Raw:    raw,

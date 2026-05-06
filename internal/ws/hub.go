@@ -27,6 +27,7 @@ const (
 	EventGeofence       EventType = "geofence.event"
 	EventADSB           EventType = "adsb.update"
 	EventACARS          EventType = "acars.message"
+	EventBLEDetection   EventType = "ble.detection"
 )
 
 // Event is a WebSocket message envelope.

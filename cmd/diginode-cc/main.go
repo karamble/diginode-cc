@@ -19,6 +19,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/api"
 	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/auth"
+	"github.com/karamble/diginode-cc/internal/bleclassify"
 	"github.com/karamble/diginode-cc/internal/chat"
 	"github.com/karamble/diginode-cc/internal/commands"
 	"github.com/karamble/diginode-cc/internal/config"
@@ -399,6 +400,19 @@ func main() {
 			slog.Info("triangulation complete", "mac", mac, "nodes", nodes)
 		},
 	)
+
+	// BLE classification: one-shot existence probe of the localhost lookupper
+	// at startup. If reachable, BLERAW: wire frames from Halberd sensors are
+	// forwarded for identification and the result is broadcast on the WS hub.
+	// If not, the callback short-circuits and only the legacy DEVICE: feed
+	// keeps inventory_devices populated.
+	lookupper := bleclassify.NewLookupper(context.Background())
+	bleSvc := bleclassify.NewService(db, hub, lookupper)
+	serialMgr.SetBLERawCallback(bleSvc.HandleRaw)
+	// Gate the auto-attach in commandsSvc on the same one-shot probe result.
+	// When the lookupper isn't reachable, RAW_BLE_ON/OFF aren't auto-fired
+	// around DEVICE_SCAN_START and the raw-BLE wire frames stay disabled.
+	commandsSvc.SetRawBLEAvailable(lookupper.Available())
 	_ = trackingSvc // used via callbacks
 
 	// Load startup data from DB
@@ -496,6 +510,7 @@ func main() {
 		Updates:     updatesSvc,
 		Database:    db,
 		StatusBroadcast: statusSvc,
+		BLEClassify: bleSvc,
 	}
 
 	// HTTP server

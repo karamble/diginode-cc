@@ -167,6 +167,17 @@ var Registry = map[string]*CommandDef{
 	"BATTERY_SAVER_STOP":   {Name: "BATTERY_SAVER_STOP", Group: "Battery", Description: "Stop battery saver", SupportedTypes: typeAH},
 	"BATTERY_SAVER_STATUS": {Name: "BATTERY_SAVER_STATUS", Group: "Battery", Description: "Check battery saver status", SupportedTypes: typeAH},
 
+	// Raw BLE forwarding (AntiHunter-only). When ON, the firmware emits a
+	// BLERAW: wire frame alongside the legacy DEVICE: line so the C2 can
+	// reparse the full advertisement payload server-side. Roughly doubles
+	// per-detection bytes on the mesh; intended for short-window targeted
+	// classification rather than always-on. Auto-attached by the commands
+	// service for the duration of a DEVICE_SCAN_START when the BLE
+	// lookupper is reachable on this host.
+	"RAW_BLE_ON":     {Name: "RAW_BLE_ON", Group: "Configuration", Description: "Enable raw BLE advertisement forwarding (BLERAW: wire frames)", SingleNode: true, SupportedTypes: typeAH},
+	"RAW_BLE_OFF":    {Name: "RAW_BLE_OFF", Group: "Configuration", Description: "Disable raw BLE advertisement forwarding", SingleNode: true, SupportedTypes: typeAH},
+	"RAW_BLE_STATUS": {Name: "RAW_BLE_STATUS", Group: "Configuration", Description: "Query raw BLE forwarding state", SingleNode: true, SupportedTypes: typeAH},
+
 	// System (universal)
 	"REBOOT": {Name: "REBOOT", Group: "System", Description: "Reboot node", SupportedTypes: typeUniversal},
 
