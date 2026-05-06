@@ -105,6 +105,12 @@ interface Target {
   mac?: string
   latitude?: number
   longitude?: number
+  // Server-side fallback from the most recent geocoded target_hits row.
+  // Used when triangulation hasn't produced a fix yet (BLE fingerprint
+  // targets typically don't triangulate). Mirrors the TargetsPage
+  // Position cell's `~lat,lon` approximate display.
+  lastHitLatitude?: number
+  lastHitLongitude?: number
   status: string
   trackingConfidence?: number | null
   trackingUncertainty?: number | null
@@ -199,7 +205,19 @@ export default function MapPage() {
   // Filter entities with valid positions
   const droneMarkers = drones.filter((d: DroneRow) => d.lat !== 0 && d.lon !== 0)
   const nodeMarkers = nodes.filter((n: NodeRow) => n.lat && n.lon && (n.lat !== 0 || n.lon !== 0))
-  const targetMarkers = targets.filter((t: Target) => t.latitude && t.longitude && (t.latitude !== 0 || t.longitude !== 0))
+  // Targets render at their LATEST KNOWN position. Priority:
+  //   1. triangulated fix (targets.latitude/longitude, written by
+  //      ApplyTrackingEstimate when a T_F frame lands)
+  //   2. last geocoded target_hit (lastHitLatitude/Longitude, the
+  //      LATERAL-joined latest target_hits row with non-null GPS)
+  // BLE fingerprint targets typically only have (2). Without this
+  // fallback the map's Targets layer counter reads (0) even when
+  // hits with GPS exist in target_hits.
+  const targetMarkers = targets.filter((t: Target) => {
+    const lat = (t.latitude && t.latitude !== 0) ? t.latitude : t.lastHitLatitude
+    const lon = (t.longitude && t.longitude !== 0) ? t.longitude : t.lastHitLongitude
+    return !!lat && !!lon && (lat !== 0 || lon !== 0)
+  })
   const aircraftMarkers = aircraft.filter((a: Aircraft) => a.lat && a.lon && (a.lat !== 0 || a.lon !== 0))
 
   // All positions for auto-fit
@@ -428,10 +446,14 @@ export default function MapPage() {
 
             <LayersControl.Overlay checked name="Targets">
               <LayerGroup>
-                {targetMarkers.map((t: Target) => (
+                {targetMarkers.map((t: Target) => {
+                  const triangulated = !!(t.latitude && t.latitude !== 0 && t.longitude && t.longitude !== 0)
+                  const lat = triangulated ? t.latitude! : t.lastHitLatitude!
+                  const lon = triangulated ? t.longitude! : t.lastHitLongitude!
+                  return (
                   <Marker
                     key={`target-${t.id}`}
-                    position={[t.latitude!, t.longitude!]}
+                    position={[lat, lon]}
                     icon={targetMapIcon(t.targetType, t.status, getPulse('target', t.id))}
                   >
                     <Popup>
@@ -454,11 +476,17 @@ export default function MapPage() {
                             </div>
                           )}
                           {t.triangulationMethod && <div style={{ fontSize: '10px', color: '#64748B' }}>{t.triangulationMethod}</div>}
+                          {!triangulated && (
+                            <div style={{ marginTop: '4px', color: '#fbbf24', fontSize: '10px' }}>
+                              ~ approximate (last hit GPS)
+                            </div>
+                          )}
                         </div>
                       </div>
                     </Popup>
                   </Marker>
-                ))}
+                  )
+                })}
               </LayerGroup>
             </LayersControl.Overlay>
 

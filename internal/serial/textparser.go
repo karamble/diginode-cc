@@ -122,14 +122,19 @@ func (p *TextParser) initPatterns() {
 		{
 			name: "target-type-first",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*Target:\s*(?P<type>\w+)\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+RSSI:(?P<rssi>-?\d+)(?:\s+Name:(?P<name>[^ ]+))?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*Target:\s*(?P<type>\w+)\s+(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+RSSI:(?P<rssi>-?\d+)(?:\s+Name:(?P<name>[^ ]+))?(?:\s+TID:(?P<tid>T-[A-Z]-\d+))?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleTarget,
 		},
-		// Target: mac-first: "nodeId: Target: AA:BB:CC:DD:EE:FF RSSI:-75 Type:WiFi Name:MyDevice"
+		// Target: mac-first: "nodeId: Target: AA:BB:CC:DD:EE:FF RSSI:-75 Type:WiFi Name:MyDevice [TID:T-B-1001] [GPS=...]"
+		// Halberd appends TID:T-B-#### when the device matched a BLE fingerprint
+		// target — the C2 routes those hits as category="ble-target-hit"
+		// alerts and decorates the alert payload with the matched target name.
+		// Plain MAC/SSID matches leave TID absent so the optional capture is
+		// skipped without affecting the rest of the regex.
 		{
 			name: "target-mac-first",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*Target:\s*(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+RSSI:(?P<rssi>-?\d+)\s+Type:(?P<type>\w+)(?:\s+Name:(?P<name>[^ ]+))?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*Target:\s*(?P<mac>(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})\s+RSSI:(?P<rssi>-?\d+)\s+Type:(?P<type>\w+)(?:\s+Name:(?P<name>[^ ]+))?(?:\s+TID:(?P<tid>T-[A-Z]-\d+))?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleTarget,
 		},
 		// DEVICE line: "nodeId: DEVICE:AA:BB:CC:DD:EE:FF W -75 C6 N:MyDevice"
@@ -268,10 +273,14 @@ func (p *TextParser) initPatterns() {
 		// VIBRATION_(ON|OFF)_ACK was added for the vibration toggle; HB/HITS_RESET/
 		// DEBOUNCE/CODE for the meshtastic-gate-sensor CMD handler. PROBE_ACK
 		// was added with the probe-request scanner — emits STARTED/STOPPED/BUSY.
+		// CONFIG_ACK uniquely has the shape CONFIG_ACK:SUBKIND:VALUE
+		// (e.g. CONFIG_ACK:TARGETS_BLE:OK, CONFIG_ACK:CHANNELS:1,6,11);
+		// the optional second capture group picks up that trailing VALUE so
+		// handleACK can prefer it over the subkind when computing terminal status.
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE|RAW_BLE)_ACK):?(?P<status>[A-Z_]*)`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE|RAW_BLE|TARGET_INTERVAL)_ACK):?(?P<status>[A-Z0-9_]*)(?::(?P<value>[A-Z0-9_,.\- +]+))?`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"
@@ -833,6 +842,12 @@ func (p *TextParser) handleTarget(match []string, names []string, raw string) []
 	if v := g["name"]; v != "" {
 		data["name"] = v
 	}
+	if v := g["tid"]; v != "" {
+		// BLE fingerprint match — firmware emits "TID:T-B-####" so the C2
+		// can correlate the hit to an operator-defined target row. Plain
+		// MAC/SSID matches leave this absent.
+		data["targetId"] = v
+	}
 	if v := g["lat"]; v != "" {
 		data["lat"] = parseOptFloat(v)
 	}
@@ -847,10 +862,22 @@ func (p *TextParser) handleTarget(match []string, names []string, raw string) []
 		Raw:    raw,
 	}
 
+	// BLE fingerprint hits route to the dedicated "ble-target-hit" category
+	// so operators can filter / rule against them separately from the
+	// existing WiFi "inventory" category. Plain MAC/SSID matches keep the
+	// legacy "inventory" category for backward compat with existing alert
+	// rules.
+	alertCategory := "inventory"
+	alertLevel := "NOTICE"
+	if tid, ok := data["targetId"].(string); ok && strings.HasPrefix(tid, "T-B-") {
+		alertCategory = "ble-target-hit"
+		alertLevel = "ALERT"
+	}
+
 	alert := &ParsedEvent{
 		Kind:     "alert",
-		Level:    "NOTICE",
-		Category: "inventory",
+		Level:    alertLevel,
+		Category: alertCategory,
 		NodeID:   nodeID,
 		Data:     copyMap(data),
 		Raw:      raw,
@@ -1061,19 +1088,33 @@ func (p *TextParser) handleACK(match []string, names []string, raw string) []*Pa
 	g := extractGroups(match, names)
 	nodeID := g["id"]
 
-	status := g["status"]
+	// For CONFIG_ACK frames the firmware emits CONFIG_ACK:SUBKIND:VALUE —
+	// VALUE is the actual status (OK / INVALID_LEN / 1,6,11 / -65). For the
+	// flat shape (SCAN_ACK:OK / RAW_BLE_ACK:ON / etc.) only the first group
+	// is captured. Prefer value when present.
+	subkind := g["status"]
+	value := g["value"]
+	status := value
+	if status == "" {
+		status = subkind
+	}
 	if status == "" {
 		status = "OK"
+	}
+
+	data := map[string]interface{}{
+		"ackType": g["kind"],
+		"status":  status,
+	}
+	if value != "" {
+		data["subkind"] = subkind
 	}
 
 	return []*ParsedEvent{{
 		Kind:   "command-ack",
 		NodeID: nodeID,
-		Data: map[string]interface{}{
-			"ackType": g["kind"],
-			"status":  status,
-		},
-		Raw: raw,
+		Data:   data,
+		Raw:    raw,
 	}}
 }
 

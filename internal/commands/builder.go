@@ -76,7 +76,7 @@ var Registry = map[string]*CommandDef{
 	"SCAN_START": {Name: "SCAN_START", Group: "Scanning", Description: "Start WiFi/BLE scanning", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}, Placeholder: "0=WiFi 1=BLE 2=Both"},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
-		{Key: "channels", Label: "Channels", Type: "channels", Placeholder: "1,6,11 or 1..14"},
+		{Key: "channels", Label: "Channels", Type: "channels", Placeholder: "e.g. 1,6,11 (default) or 1..14"},
 	}},
 	// SCAN_STOP / DEVICE_SCAN_STOP are operator-facing labels for the firmware's
 	// universal STOP verb. The AntiHunter dispatcher only recognises STOP
@@ -137,6 +137,9 @@ var Registry = map[string]*CommandDef{
 	"CONFIG_TARGETS": {Name: "CONFIG_TARGETS", Group: "Configuration", Description: "Configure target MACs", SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "targets", Label: "Target MACs", Type: "pipeList", Required: true, Placeholder: "AA:BB:CC:DD:EE:FF|11:22:33:44:55:66"},
 	}},
+	"CONFIG_TARGETS_BLE": {Name: "CONFIG_TARGETS_BLE", Group: "Configuration", Description: "Push BLE fingerprint targets to firmware (operator picks from saved BLE targets list)", SupportedTypes: typeAH, Params: []ParamDef{
+		{Key: "targets", Label: "BLE Targets", Type: "bleTargetMultiSelect", Required: true, Placeholder: "Pick one or more T-B-#### targets to push"},
+	}},
 	"CONFIG_RSSI": {Name: "CONFIG_RSSI", Group: "Configuration", Description: "Configure RSSI threshold", SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "rssi", Label: "RSSI Threshold", Type: "number", Required: true, Min: -120, Max: -1},
 	}},
@@ -187,6 +190,13 @@ var Registry = map[string]*CommandDef{
 	"HB_INTERVAL": {Name: "HB_INTERVAL", Group: "Status", Description: "Set heartbeat interval", SupportedTypes: typeUniversal, Params: []ParamDef{
 		{Key: "minutes", Label: "Interval (min)", Type: "number", Required: true, Min: 1, Max: 60},
 	}},
+	// TARGET_INTERVAL caps how often the firmware re-emits a Target: hit for
+	// the same target while it stays in range. Default firmware-side is 30 s.
+	// The override constants (RSSI delta, GPS delta) still trigger immediate
+	// re-emit when a target moves or wakes up.
+	"TARGET_INTERVAL": {Name: "TARGET_INTERVAL", Group: "Status", Description: "Set per-target hit notification interval", SupportedTypes: typeAH, Params: []ParamDef{
+		{Key: "seconds", Label: "Interval (s)", Type: "number", Required: true, Min: 5, Max: 600},
+	}},
 
 	// Triangulation coordinator-only sync pulse (AntiHunter-only)
 	"TRI_CYCLE_START": {Name: "TRI_CYCLE_START", Group: "Triangulation", Description: "Sync participant scan cycle (coordinator only)", SupportedTypes: typeAH, Params: []ParamDef{
@@ -231,6 +241,7 @@ var ACKMap = map[string]string{
 	"AUTOERASE_STATUS_ACK": "AUTOERASE_STATUS",
 	"BATTERY_SAVER_ACK":    "BATTERY_SAVER_START",
 	"HB_ACK":               "HB_ON",
+	"TARGET_INTERVAL_ACK":  "TARGET_INTERVAL",
 	"STOP_ACK":             "STOP",
 	"REBOOT_ACK":           "REBOOT",
 	// STATUS_ACK is synthesized by the textparser from the plain STATUS: reply
@@ -370,6 +381,29 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 			}
 		}
 		cleanParams = append(cleanParams, val)
+	}
+
+	// SCAN_START channels handling. The catalog declares positional params
+	// mode / duration / channels. Channels are a WiFi-only setting consumed
+	// by listScanTask's WiFi branch — for BLE-only scans (mode=1) the
+	// segment is dead weight, so we strip it. For WiFi / both, we substitute
+	// the drone-optimised default when the operator left the slot empty so
+	// the wire frame stays auditable and so older deployed firmware (pre-
+	// the parser fix that makes channels truly optional) still parses.
+	if name == "SCAN_START" && len(cleanParams) >= 1 {
+		mode := cleanParams[0]
+		switch mode {
+		case "1":
+			if len(cleanParams) >= 3 {
+				cleanParams = cleanParams[:2]
+			}
+		case "0", "2":
+			if len(cleanParams) == 2 {
+				cleanParams = append(cleanParams, "1,6,11")
+			} else if len(cleanParams) >= 3 && strings.TrimSpace(cleanParams[2]) == "" {
+				cleanParams[2] = "1,6,11"
+			}
+		}
 	}
 
 	// Append FOREVER if requested and allowed.

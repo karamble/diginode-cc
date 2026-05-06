@@ -259,10 +259,13 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Get("/", s.handleListTargets)
 				r.Post("/", s.handleCreateTarget)
 				r.Post("/clear", s.handleClearTargets)
+				r.Post("/ble", s.handleCreateBLETarget)
 				r.Put("/{id}", s.handleUpdateTarget)
 				r.Delete("/{id}", s.handleDeleteTarget)
 				r.Get("/{id}/positions", s.handleGetTargetPositions)
+				r.Get("/{id}/hits", s.handleListTargetHits)
 				r.Post("/{id}/resolve", s.handleResolveTarget)
+				r.Post("/{id}/reactivate", s.handleReactivateTarget)
 			})
 
 			// Inventory

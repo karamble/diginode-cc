@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -53,6 +54,69 @@ func (s *Server) handleCreateCommand(w http.ResponseWriter, r *http.Request) {
 	var cmd commands.Command
 
 	if req.Name != "" {
+		// CONFIG_TARGETS_BLE arrives with a comma-separated list of T-B-####
+		// target IDs in params[0]. The frontend's multi-select UI is what
+		// the operator sees; the wire frame the firmware needs is the
+		// fully-expanded "T-B-####:key=val;..." body. Resolve the IDs to
+		// fingerprints here so commands.Build sees a single positional
+		// parameter holding the already-expanded body, and the resulting
+		// command line is "@HB55 CONFIG_TARGETS_BLE:<expanded body>".
+		if strings.ToUpper(strings.TrimSpace(req.Name)) == "CONFIG_TARGETS_BLE" {
+			// CONFIG_TARGETS_BLE arrives in one of two shapes:
+			//   - With targets:   req.Params = ["T-B-1003,T-B-1004"]
+			//   - Empty (clear):  req.Params = []           or = [""]
+			// Empty means "clear the firmware's blelist" — the firmware
+			// reads "CONFIG_TARGETS_BLE:" with an empty body as a full
+			// wipe (saveBleTargetsList on an empty string clears the
+			// vector + NVS key). The empty case bypasses commands.Build()
+			// because the param's Required:true would otherwise reject it.
+			ids := []string{}
+			if len(req.Params) > 0 {
+				for _, raw := range strings.Split(req.Params[0], ",") {
+					tid := strings.TrimSpace(raw)
+					if tid == "" {
+						continue
+					}
+					if strings.HasPrefix(tid, "T-") {
+						if t := s.svc.Targets.FindByBLEShortID(tid); t != nil {
+							ids = append(ids, t.ID)
+							continue
+						}
+					}
+					ids = append(ids, tid)
+				}
+			}
+
+			if len(ids) == 0 {
+				target := strings.ToUpper(strings.TrimSpace(req.Target))
+				if !strings.HasPrefix(target, "@") {
+					target = "@" + target
+				}
+				cmd = commands.Command{
+					ID:          id,
+					Target:      target,
+					Name:        "CONFIG_TARGETS_BLE",
+					Params:      []string{},
+					Line:        target + " CONFIG_TARGETS_BLE:",
+					CommandType: "CONFIG_TARGETS_BLE",
+					TargetNode:  req.TargetNode,
+				}
+				if err := s.svc.Commands.Enqueue(&cmd); err != nil {
+					writeError(w, http.StatusTooManyRequests, err.Error())
+					return
+				}
+				writeJSON(w, http.StatusCreated, cmd)
+				return
+			}
+
+			body, err := s.svc.Targets.BuildConfigTargetsBLEWireFrame(ids)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "build BLE targets frame: "+err.Error())
+				return
+			}
+			req.Params = []string{body}
+		}
+
 		// Structured input (CC PRO parity)
 		output, err := commands.Build(req.Target, req.Name, req.Params, req.Forever)
 		if err != nil {
@@ -216,10 +280,21 @@ func (s *Server) handleListCommandTypes(w http.ResponseWriter, r *http.Request) 
 
 	var result []cmdOut
 	for _, group := range commands.GroupOrder {
-		for _, def := range commands.Registry {
-			if def.Group != group {
-				continue
+		// Two-pass walk: collect names whose Group matches, sort A-Z so
+		// pair/family commands cluster (the Registry naming is already
+		// prefix-disciplined, so SCAN_START/SCAN_STOP, RAW_BLE_ON/OFF/STATUS,
+		// CODE_*, HB_*, etc. land adjacent for free). Replaces the prior
+		// per-group `for name, def := range Registry` walk which inherited
+		// Go's randomised map iteration order.
+		names := make([]string, 0, len(commands.Registry))
+		for name, def := range commands.Registry {
+			if def.Group == group {
+				names = append(names, name)
 			}
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			def := commands.Registry[name]
 			c := cmdOut{
 				Name:           def.Name,
 				Group:          def.Group,

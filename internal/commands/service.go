@@ -415,6 +415,15 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 	//                  code) — operation can't proceed, terminal error.
 	upper := strings.ToUpper(ackStatus)
 	isRunning := upper == "STARTED"
+	// TARGET_INTERVAL_ACK echoes the applied seconds value as the payload
+	// (e.g. "TARGET_INTERVAL_ACK:120"). Any non-INVALID numeric token
+	// confirms the firmware accepted the interval, so we treat it as
+	// terminal-OK on the TARGET_INTERVAL command. Without this carve-out
+	// the seconds value falls through to the default branch and the
+	// command gets stuck at StatusSent forever — same shape as the
+	// CONFIG_ACK:TARGETS_BLE:OK lifecycle bug fixed earlier.
+	isTargetIntervalOK := ackKind == "TARGET_INTERVAL_ACK" &&
+		!strings.HasPrefix(upper, "INVALID") && upper != ""
 	isTerminalOK := !isRunning && (upper == "" ||
 		upper == "OK" || upper == "COMPLETE" || upper == "COMPLETED" ||
 		upper == "FINISHED" || upper == "SUCCESS" ||
@@ -429,7 +438,8 @@ func (s *Service) HandleStructuredACK(ackKind, ackStatus, ackNode string, result
 		upper == "ON" || upper == "OFF" ||
 		upper == "CANCELLED" || upper == "CANCELED" ||
 		upper == "UPDATED" || upper == "EXISTS" ||
-		strings.HasPrefix(upper, "INTERVAL"))
+		strings.HasPrefix(upper, "INTERVAL") ||
+		isTargetIntervalOK)
 	isTerminalErr := upper == "ERROR" || upper == "FAILED" || upper == "TIMEOUT" ||
 		upper == "FULL" || upper == "NOT_FOUND" ||
 		strings.HasPrefix(upper, "INVALID")

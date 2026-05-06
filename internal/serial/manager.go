@@ -43,7 +43,10 @@ type Manager struct {
 	protocol         string        // "binary" or "text" (default "text")
 	textParser       *TextParser   // text-mode line parser
 	syntheticID      atomic.Uint32 // monotonic counter for synthetic packet IDs (text-mode fallback)
-	onTargetDetected func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)
+	// targetID is empty for plain MAC/SSID matches and "T-B-####" / "T-W-####"
+	// when the firmware emitted a TID:T-X-#### suffix in the Target: hit
+	// frame (BLE fingerprint match or future identity-tracker hits).
+	onTargetDetected func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID, targetID string)
 	onTriData        func(mac, nodeID string, rssi int, lat, lon float64)
 	onTriFinal       func(mac string, lat, lon, confidence, uncertainty float64)
 	onTriComplete    func(mac string, nodes int)
@@ -82,7 +85,7 @@ func NewManager(cfg *config.Config, hub *ws.Hub) *Manager {
 }
 
 // SetTargetDetectedCallback sets the handler for target/device detection events from mesh sensors.
-func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string)) {
+func (m *Manager) SetTargetDetectedCallback(fn func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID, targetID string)) {
 	m.onTargetDetected = fn
 }
 
@@ -587,9 +590,10 @@ func (m *Manager) dispatchTextEvent(evt *ParsedEvent) {
 		channel, _ := evt.Data["channel"].(int)
 		lat, _ := evt.Data["lat"].(float64)
 		lon, _ := evt.Data["lon"].(float64)
+		targetID, _ := evt.Data["targetId"].(string)
 
 		if m.onTargetDetected != nil {
-			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID)
+			m.onTargetDetected(mac, ssid, devType, rssi, channel, lat, lon, evt.NodeID, targetID)
 		}
 
 	case "ble-raw":

@@ -341,7 +341,7 @@ func main() {
 	})
 
 	// Wire target-detected events → inventory + alerts + webhooks + geofences
-	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID string) {
+	serialMgr.SetTargetDetectedCallback(func(mac, ssid, deviceType string, rssi, channel int, lat, lon float64, nodeID, targetID string) {
 		// 1. Inventory upsert with OUI lookup
 		manufacturer := inventory.LookupOUI(mac)
 		inventorySvc.TrackFull(mac, manufacturer, ssid, deviceType, rssi, nodeID, lat, lon, channel)
@@ -361,7 +361,7 @@ func main() {
 		})
 
 		// 3. Webhook dispatch
-		webhooksSvc.Dispatch("target.detected", map[string]interface{}{
+		webhookPayload := map[string]interface{}{
 			"mac":        mac,
 			"ssid":       ssid,
 			"deviceType": deviceType,
@@ -370,7 +370,18 @@ func main() {
 			"latitude":   lat,
 			"longitude":  lon,
 			"nodeId":     nodeID,
-		})
+		}
+		// BLE fingerprint hit — decorate with the matched target's name
+		// + short ID so webhook subscribers don't need to round-trip the
+		// targets API to get a human-readable label.
+		if strings.HasPrefix(targetID, "T-B-") {
+			if t := targetsSvc.FindByBLEShortID(targetID); t != nil {
+				webhookPayload["bleTargetShortId"] = t.BLEShortID
+				webhookPayload["bleTargetName"] = t.Name
+				webhookPayload["bleTargetId"] = t.ID
+			}
+		}
+		webhooksSvc.Dispatch("target.detected", webhookPayload)
 
 		// 4. Geofence check (if target has GPS)
 		if lat != 0 && lon != 0 {
@@ -392,6 +403,38 @@ func main() {
 			Manufacturer: manufacturer,
 			LocalName:    ssid,
 		})
+
+		// 6. Per-hit history: record into target_hits when this observation
+		//    resolves to a known target row. BLE fingerprint hits resolve
+		//    via TID:T-B-####; legacy WiFi MAC targets resolve via the
+		//    observed MAC. Untargeted observations are intentionally
+		//    skipped — they live in inventory_devices.
+		var matched *targets.Target
+		if strings.HasPrefix(targetID, "T-B-") {
+			matched = targetsSvc.FindByBLEShortID(targetID)
+		} else {
+			matched = targetsSvc.FindByMAC(strings.ToUpper(mac))
+		}
+		if matched != nil {
+			rs := int16(rssi)
+			h := targets.Hit{
+				TargetID:      matched.ID,
+				TargetShortID: matched.BLEShortID,
+				ObservedMAC:   strings.ToUpper(mac),
+				ObservedName:  ssid,
+				RSSI:          &rs,
+				NodeID:        nodeID,
+			}
+			if lat != 0 && lon != 0 {
+				lt := lat
+				ln := lon
+				h.Latitude = &lt
+				h.Longitude = &ln
+			}
+			if err := targetsSvc.RecordHit(context.Background(), &h); err != nil {
+				slog.Warn("failed to record target hit", "target_id", matched.ID, "error", err)
+			}
+		}
 	})
 
 	// Wire triangulation protocol (T_D / T_F / T_C) → target tracking service

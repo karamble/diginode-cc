@@ -137,9 +137,14 @@ func (s *Server) handleClearDetectionData(w http.ResponseWriter, r *http.Request
 		errs = append(errs, "inventory: "+err.Error())
 	}
 
-	// Clear position history tables + BLE classified detections
+	// Clear position history tables + BLE classified detections.
+	// target_hits cascades via FK ON DELETE CASCADE when Targets.ClearAll
+	// runs above, but we DELETE it explicitly so the cleared-list status
+	// reflects what happened and so any orphaned rows (shouldn't occur
+	// post-FK, but defence in depth) are still removed.
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM drone_detections`)
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM target_positions`)
+	s.svc.DB().Pool.Exec(ctx, `DELETE FROM target_hits`)
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM node_positions`)
 	s.svc.DB().Pool.Exec(ctx, `DELETE FROM ble_detections`)
 
@@ -147,7 +152,7 @@ func (s *Server) handleClearDetectionData(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusInternalServerError, "partial failure: "+errs[0])
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "cleared": "drones, targets, inventory, positions, detections, ble_detections"})
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok", "cleared": "drones, targets, target_hits, inventory, positions, detections, ble_detections"})
 }
 
 // handleClearOperationalData wipes all operational data: detection data +
@@ -168,9 +173,11 @@ func (s *Server) handleClearOperationalData(w http.ResponseWriter, r *http.Reque
 	s.svc.Inventory.ClearAll(ctx)
 	s.svc.Nodes.ClearAll(ctx)
 
-	// History tables that have no service-level clear method
+	// History tables that have no service-level clear method.
+	// target_hits cascades via Targets.ClearAll above; listed explicitly
+	// so the operational-clear flow stays auditable from the table list.
 	tables := []string{
-		"drone_detections", "target_positions", "node_positions",
+		"drone_detections", "target_positions", "target_hits", "node_positions",
 		"ble_detections",
 		"chat_messages", "commands", "alert_events", "audit_log",
 	}

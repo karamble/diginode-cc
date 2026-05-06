@@ -153,6 +153,100 @@ function ValidationAlert({ message }: { message: string }) {
   )
 }
 
+// parseChannelsCSV expands the CSV-or-range string the operator typed
+// into a Set of channel numbers. Accepts "1,6,11", "1..14", or any
+// mix. Out-of-range entries are silently dropped — the firmware does
+// the same in main.cpp parseChannelsCSV().
+function parseChannelsValue(s: string): Set<number> {
+  const out = new Set<number>()
+  const txt = s.trim()
+  if (!txt) return out
+  if (txt.includes('..')) {
+    const [a, b] = txt.split('..').map((x) => parseInt(x.trim(), 10))
+    if (Number.isFinite(a) && Number.isFinite(b)) {
+      const lo = Math.min(a, b)
+      const hi = Math.max(a, b)
+      for (let ch = lo; ch <= hi; ch++) {
+        if (ch >= 1 && ch <= 14) out.add(ch)
+      }
+    }
+    return out
+  }
+  for (const part of txt.split(',')) {
+    const n = parseInt(part.trim(), 10)
+    if (Number.isFinite(n) && n >= 1 && n <= 14) out.add(n)
+  }
+  return out
+}
+
+// ChannelGrid is the operator-facing widget for the SCAN_START
+// channels parameter. Renders a flat 1..14 checkbox grid (every
+// channel equally first-class — the product is operated
+// internationally) plus three presets. Value round-trips as a CSV so
+// the existing form-submit path through Build is unchanged.
+function ChannelGrid({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const selected = parseChannelsValue(value)
+  const toggle = (ch: number) => {
+    const next = new Set(selected)
+    if (next.has(ch)) next.delete(ch); else next.add(ch)
+    const sorted = Array.from(next).sort((a, b) => a - b)
+    onChange(sorted.join(','))
+  }
+  const setAll = (chs: number[]) => onChange(chs.join(','))
+  const all = Array.from({ length: 14 }, (_, i) => i + 1)
+  return (
+    <div className="bg-dark-800 border border-dark-600 rounded p-2">
+      <div className="grid grid-cols-7 gap-1 mb-2">
+        {all.map((ch) => {
+          const checked = selected.has(ch)
+          return (
+            <label
+              key={ch}
+              className={`flex items-center justify-center gap-1 px-1.5 py-1 rounded text-[11px] font-mono cursor-pointer border transition-colors
+                ${checked
+                  ? 'bg-primary-500/20 border-primary-500/60 text-primary-200'
+                  : 'bg-dark-900 border-dark-700 text-dark-400 hover:border-dark-500'}`}
+            >
+              <input
+                type="checkbox"
+                checked={checked}
+                onChange={() => toggle(ch)}
+                className="hidden"
+              />
+              <span>{ch}</span>
+            </label>
+          )
+        })}
+      </div>
+      <div className="flex flex-wrap gap-2 text-[10px]">
+        <button
+          type="button"
+          onClick={() => setAll([1, 6, 11])}
+          className="px-2 py-1 rounded bg-dark-900 border border-dark-700 text-dark-300 hover:border-primary-500/60 hover:text-primary-300 transition-colors"
+          title="Drone-detection optimised — three non-overlapping channels (firmware default)"
+        >
+          Drone-optimised (1,6,11)
+        </button>
+        <button
+          type="button"
+          onClick={() => setAll(all)}
+          className="px-2 py-1 rounded bg-dark-900 border border-dark-700 text-dark-300 hover:border-primary-500/60 hover:text-primary-300 transition-colors"
+        >
+          All 1..14
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange('')}
+          className="px-2 py-1 rounded bg-dark-900 border border-dark-700 text-dark-300 hover:border-red-500/50 hover:text-red-400 transition-colors"
+        >
+          Clear
+        </button>
+        <span className="ml-auto text-dark-600 self-center">CSV: {value || '(empty → defaults to 1,6,11)'}</span>
+      </div>
+    </div>
+  )
+}
+
 export default function CommandsPage() {
   const queryClient = useQueryClient()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -194,6 +288,20 @@ export default function CommandsPage() {
     queryFn: () => api.get('/nodes'),
     refetchInterval: 10000,
   })
+
+  // BLE fingerprint targets — populates the bleTargetMultiSelect param
+  // type used by the CONFIG_TARGETS_BLE command. Filters in-memory to
+  // rows with bleShortId set (the discriminator for BLE targets in the
+  // mixed targets table).
+  const { data: allTargets = [] } = useQuery<Array<Record<string, unknown>>>({
+    queryKey: ['targets'],
+    queryFn: () => api.get('/targets'),
+    refetchInterval: 30000,
+  })
+  const bleTargets = useMemo(
+    () => allTargets.filter((t) => typeof t.bleShortId === 'string' && (t.bleShortId as string).length > 0),
+    [allTargets],
+  )
 
   const sendMutation = useMutation({
     mutationFn: (body: { target: string; name: string; params: string[]; forever: boolean }) =>
@@ -385,8 +493,14 @@ export default function CommandsPage() {
         {/* Dynamic parameter form */}
         {activeDef && activeDef.params.length > 0 && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-3">
-            {activeDef.params.map(p => (
-              <div key={p.key}>
+            {activeDef.params.map(p => {
+              // Channels are a WiFi-only setting. Hide the entire param
+              // when Mode is BLE-only (1). The C2 builder also strips the
+              // channels segment from the wire frame in that case, so the
+              // hidden field stays consistent with what gets emitted.
+              if (p.type === 'channels' && paramValues['mode'] === '1') return null
+              return (
+              <div key={p.key} className={p.type === 'channels' ? 'col-span-2 md:col-span-4' : ''}>
                 <label className="text-[10px] text-dark-500 block mb-1">
                   {p.label}{' '}
                   {p.required && (forever && activeDef.allowForever && p.type === 'duration' ? (
@@ -394,6 +508,9 @@ export default function CommandsPage() {
                   ) : (
                     <span className="text-red-400">*</span>
                   ))}
+                  {p.type === 'channels' && (
+                    <span className="ml-2 text-dark-600">WiFi-only setting · ignored when Mode is BLE</span>
+                  )}
                 </label>
                 {p.type === 'select' ? (
                   <select
@@ -420,6 +537,50 @@ export default function CommandsPage() {
                     />
                     <span className="text-dark-400 text-[10px]">{p.placeholder || 'Enable'}</span>
                   </label>
+                ) : p.type === 'bleTargetMultiSelect' ? (
+                  <div className="bg-dark-800 border border-dark-600 rounded p-2 max-h-60 overflow-y-auto">
+                    {bleTargets.length === 0 ? (
+                      <div className="text-[11px] text-dark-500 italic">
+                        No BLE targets defined yet — create one from the BLE Detections page.
+                      </div>
+                    ) : (
+                      bleTargets.map((t) => {
+                        const id = t.bleShortId as string
+                        const selected = (paramValues[p.key] || '').split(',').map(s => s.trim()).filter(Boolean)
+                        const checked = selected.includes(id)
+                        const toggle = () => {
+                          const next = checked ? selected.filter(s => s !== id) : [...selected, id]
+                          setParam(p.key, next.join(','))
+                        }
+                        return (
+                          <label key={id} className="flex items-start gap-2 py-1 cursor-pointer hover:bg-dark-700/30 rounded px-1">
+                            <input type="checkbox" checked={checked} onChange={toggle} className="mt-0.5" />
+                            <div className="flex-1 min-w-0">
+                              <div className="text-xs text-dark-200 flex items-center gap-2">
+                                <span className="font-mono text-violet-300">{id}</span>
+                                <span className="truncate">{t.name as string}</span>
+                              </div>
+                              <div className="text-[10px] text-dark-500 font-mono break-all">
+                                {(() => {
+                                  const parts: string[] = []
+                                  if (t.bleManufacturerId != null) parts.push(`mfr=0x${(t.bleManufacturerId as number).toString(16).padStart(4, '0')}`)
+                                  const u16 = t.bleServiceUuids16 as number[] | undefined
+                                  if (u16 && u16.length > 0) parts.push(`uuid=${u16.map((u) => u.toString(16).padStart(4, '0').toUpperCase()).join(',')}`)
+                                  if (t.bleLocalNameGlob) parts.push(`name="${t.bleLocalNameGlob as string}"`)
+                                  return parts.join(' ') || '(empty)'
+                                })()}
+                              </div>
+                            </div>
+                          </label>
+                        )
+                      })
+                    )}
+                  </div>
+                ) : p.type === 'channels' ? (
+                  <ChannelGrid
+                    value={paramValues[p.key] || ''}
+                    onChange={(v) => setParam(p.key, v)}
+                  />
                 ) : (
                   <input
                     type={p.type === 'number' || p.type === 'duration' ? 'number' : 'text'}
@@ -432,7 +593,8 @@ export default function CommandsPage() {
                   />
                 )}
               </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
