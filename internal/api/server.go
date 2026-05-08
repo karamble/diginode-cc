@@ -24,6 +24,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/exports"
 	"github.com/karamble/diginode-cc/internal/faa"
 	"github.com/karamble/diginode-cc/internal/firewall"
+	"github.com/karamble/diginode-cc/internal/fleetsec"
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
@@ -73,6 +74,7 @@ type Services struct {
 	Database    *database.DB
 	StatusBroadcast *statusbroadcast.Service
 	BLEClassify *bleclassify.Service
+	FleetSec    *fleetsec.Service
 }
 
 // DB returns the database handle for direct queries (admin operations).
@@ -360,6 +362,29 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/prune", s.handlePruneOldData)
 				r.Post("/factory-reset", s.handleFactoryReset)
 				r.Delete("/tiles-cache", s.handleClearTileCache)
+			})
+
+			// Fleet Security: control-center identity, per-node trust roster,
+			// channel PSK rotation. Reads OPERATOR+; mutations ADMIN-only.
+			// PSK rotation, recovery, policy edits land in steps 8/9/10.
+			r.Route("/fleet-security", func(r chi.Router) {
+				// Identity (read)
+				r.With(auth.RequireRole(auth.RoleOperator)).Group(func(r chi.Router) {
+					r.Get("/identity", s.handleFleetSecGetIdentity)
+					r.Get("/identity/pubkey", s.handleFleetSecExportPubkey)
+					r.Get("/identities", s.handleFleetSecListIdentities)
+					r.Get("/trust", s.handleFleetSecListTrust)
+					r.Get("/trust/{nodeNum}", s.handleFleetSecGetTrust)
+					r.Post("/trust/{nodeNum}/verify", s.handleFleetSecVerifyTrust)
+				})
+				// Identity + Trust (mutations) -- ADMIN only
+				r.With(auth.RequireRole(auth.RoleAdmin)).Group(func(r chi.Router) {
+					r.Post("/identity/import", s.handleFleetSecImportIdentity)
+					r.Post("/identities", s.handleFleetSecRegisterIdentity)
+					r.Delete("/identities/{fingerprint}", s.handleFleetSecRevokeIdentity)
+					r.Put("/trust/{nodeNum}/admin-keys", s.handleFleetSecSetAdminKeys)
+					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
+				})
 			})
 
 			// Exports

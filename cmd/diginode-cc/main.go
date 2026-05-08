@@ -28,6 +28,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/exports"
 	"github.com/karamble/diginode-cc/internal/faa"
 	"github.com/karamble/diginode-cc/internal/firewall"
+	"github.com/karamble/diginode-cc/internal/fleetsec"
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
@@ -527,6 +528,13 @@ func main() {
 	// Audit logging service
 	auditSvc := audit.NewService(db)
 
+	// Fleet Security service: control-center identity, per-node trust
+	// roster, channel PSK rotation. Wires its transaction tracker into
+	// the dispatcher so inbound ADMIN/ROUTING acks land back here for
+	// in-flight transaction resolution. See FLEET_SECURITY.md.
+	fleetSecSvc := fleetsec.NewService(db, auditSvc, serialMgr, dispatcher)
+	dispatcher.SetAdminReplyHandler(fleetSecSvc.Tracker())
+
 	// Start serial manager (always runs; retries until device appears)
 	go func() {
 		if err := serialMgr.Start(); err != nil {
@@ -584,6 +592,7 @@ func main() {
 		Database:    db,
 		StatusBroadcast: statusSvc,
 		BLEClassify: bleSvc,
+		FleetSec:    fleetSecSvc,
 	}
 
 	// HTTP server
