@@ -412,6 +412,76 @@ func (s *Server) handleFleetSecRetryRotation(w http.ResponseWriter, r *http.Requ
 	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
 }
 
+// ---- Recovery ----
+
+func (s *Server) handleFleetSecStartRecovery(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	var body struct {
+		RescuePrivB64    string `json:"rescuePrivB64"`
+		RescuePubB64     string `json:"rescuePubB64"`
+		Ack              string `json:"ack"`
+		NewPrimaryLabel  string `json:"newPrimaryLabel"`
+		Notes            string `json:"notes"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if body.RescuePrivB64 == "" || body.RescuePubB64 == "" {
+		writeError(w, http.StatusBadRequest, "rescuePrivB64 + rescuePubB64 required")
+		return
+	}
+	priv, err := fleetsec.DecodePrivkeyB64(body.RescuePrivB64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "rescue priv: "+err.Error())
+		return
+	}
+	defer fleetsec.NewSecret(priv).Clear()
+	pub, err := fleetsec.DecodePubkeyB64(body.RescuePubB64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "rescue pub: "+err.Error())
+		return
+	}
+
+	id, err := s.svc.FleetSec.StartRecovery(r.Context(), userIDFromCtx(r),
+		priv, pub, fleetsec.StartRecoveryOpts{
+			Ack:             body.Ack,
+			NewPrimaryLabel: body.NewPrimaryLabel,
+			Notes:           body.Notes,
+		})
+	if err != nil {
+		switch {
+		case errors.Is(err, fleetsec.ErrInvalidAck):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"recoveryId": id})
+}
+
+func (s *Server) handleFleetSecGetRecovery(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	rec, err := s.svc.FleetSec.GetRecovery(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, fleetsec.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "recovery not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
 // ---- Helpers ----
 
 func parseNodeNumParam(w http.ResponseWriter, r *http.Request) (uint32, bool) {

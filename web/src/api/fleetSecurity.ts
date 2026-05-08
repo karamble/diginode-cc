@@ -133,6 +133,18 @@ export const fleetSecurityApi = {
       `/fleet-security/rotations/${id}/retry`,
       { pskB64, targets },
     ),
+
+  // Recovery
+  startRecovery: (body: {
+    rescuePrivB64: string
+    rescuePubB64: string
+    ack: string
+    newPrimaryLabel?: string
+    notes?: string
+  }) =>
+    api.post<{ recoveryId: string }>('/fleet-security/recovery', body),
+  getRecovery: (id: string) =>
+    api.get<RecoveryStatus>(`/fleet-security/recovery/${id}`),
 }
 
 // ---- Channels + Rotations types ----
@@ -182,5 +194,36 @@ export interface RotationProgressEvent {
 }
 
 export const FLEET_SEC_ROTATION_EVENT = 'fleet-security.rotation.progress'
+
+// ---- Recovery types ----
+
+export type RecoveryStage =
+  | 'install-rescue'
+  | 'push-fleet'
+  | 'restore-primary'
+  | 'done'
+  | 'failed'
+
+export interface RecoveryStatus {
+  id: string
+  stage: RecoveryStage
+  startedAt: string
+  completedAt?: string
+  newPrimaryFingerprint: string
+  rescueFingerprint?: string
+  oldPrimaryFingerprint?: string
+  targets: RotationTarget[]
+  notes?: string
+}
+
+export interface RecoveryProgressEvent {
+  recoveryId: string
+  stage: RecoveryStage
+  targets: RotationTarget[]
+  done: boolean
+  error?: string
+}
+
+export const FLEET_SEC_RECOVERY_EVENT = 'fleet-security.recovery.progress'
 
 export default fleetSecurityApi

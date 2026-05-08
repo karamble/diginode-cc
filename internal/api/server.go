@@ -388,6 +388,8 @@ func (s *Server) setupRoutes() chi.Router {
 					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
 					r.Post("/channels/{idx}/rotate", s.handleFleetSecRotatePSK)
 					r.Post("/rotations/{id}/retry", s.handleFleetSecRetryRotation)
+					r.Post("/recovery", s.handleFleetSecStartRecovery)
+					r.Get("/recovery/{id}", s.handleFleetSecGetRecovery)
 				})
 			})
 

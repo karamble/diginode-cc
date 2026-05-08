@@ -6,14 +6,18 @@
 // read-only data; ADMIN gets the full set of actions on each card.
 
 import { Navigate } from 'react-router-dom'
+import { useState } from 'react'
 
 import { useAuthStore } from '../stores/authStore'
 import IdentityCard from './fleet/IdentityCard'
 import TrustRoster from './fleet/TrustRoster'
 import ChannelsCard from './fleet/ChannelsCard'
+import RecoveryWizard from './fleet/RecoveryWizard'
 
 export default function FleetSecurityPage() {
   const { user } = useAuthStore()
+  const [recoveryOpen, setRecoveryOpen] = useState(false)
+  const isAdmin = user?.role === 'ADMIN'
 
   // VIEWER (and unauthenticated, though Layout would have already
   // redirected) cannot see Fleet Security at all.
@@ -36,17 +40,30 @@ export default function FleetSecurityPage() {
       <TrustRoster />
       <ChannelsCard />
 
-      {/* Recovery wizard lands in step 9. */}
-      <section className="bg-dark-800/30 border border-dashed border-dark-700/50 rounded-lg p-5">
-        <h3 className="text-sm font-semibold text-dark-300">Recovery</h3>
-        <p className="text-xs text-dark-500 mt-1">
-          The Recover from compromise… wizard lands in a follow-up commit
-          (FLEET_SECURITY.md §6.4). Until then, operators recovering from
-          an identity compromise must manually use a rescue key from the
-          identity registry to push fresh admin_key lists via the Trust
-          card's Edit action.
-        </p>
-      </section>
+      {isAdmin && (
+        <section className="bg-red-900/10 border border-red-700/30 rounded-lg p-5">
+          <h3 className="text-sm font-semibold text-red-200">Recovery</h3>
+          <p className="text-xs text-red-200/70 mt-1 mb-3">
+            Use this if your control-center identity has been compromised
+            or lost. Walks through installing a rescue keypair on the
+            local Heltec, minting a new primary, pushing the new admin_key
+            list to every reachable deployed node, then restoring the new
+            primary locally. See FLEET_SECURITY.md §6.4 for the full
+            playbook.
+          </p>
+          <button
+            type="button"
+            onClick={() => setRecoveryOpen(true)}
+            className="px-3 py-1.5 rounded bg-red-700 hover:bg-red-600 text-xs text-white"
+          >
+            Recover from compromise…
+          </button>
+        </section>
+      )}
+
+      {recoveryOpen && (
+        <RecoveryWizard onClose={() => setRecoveryOpen(false)} />
+      )}
     </div>
   )
 }
