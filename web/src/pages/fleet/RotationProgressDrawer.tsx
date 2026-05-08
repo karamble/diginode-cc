@@ -37,21 +37,25 @@ const statusStyles: Record<TargetStatus, string> = {
   failed:     'bg-red-700/30 text-red-200 border-red-600/40',
 }
 
-// Per-phase styling for the five-step staged-rotation indicator. Used
-// by the stepper rendered in each target row -- each step's dot reads
-// its own colour from this map based on whether the target is past,
-// at, or before that phase. Failed phases get red dots that bleed
-// into the next step's color so the failure is visually anchored.
+// Per-phase styling for the rotation stepper. Reflects the new
+// 3-phase atomic flow: Phase B is one atomic transaction per remote
+// that does the install + promote + old-PSK-wipe in a single firmware
+// flash write; Phase C is the operator-paced Pi-local migration that
+// runs when Retire is clicked. The rotation worker never enters
+// has_new_psk or phase_c_promoting in the new design, so step C
+// transitions straight from pending to ok in one tick for remotes.
+// For the Pi-local target the per-row stepper stays at "C-pending"
+// throughout Phase B and only flips to "C-ok" once Retire runs.
 const stepLabels: { id: 'B' | 'C'; label: string; helpText: string }[] = [
   {
     id: 'B',
-    label: 'B push',
-    helpText: 'Pi pushes new PSK to the remote on a SECONDARY channel slot',
+    label: 'B migrate (atomic)',
+    helpText: 'Atomic transaction on the remote: begin → SetChannel(staging, PRIMARY, new) → SetChannel(old, DISABLED) → commit. ~5-10s commit-side latency over PKC.',
   },
   {
     id: 'C',
-    label: 'C promote',
-    helpText: 'Remote promotes the staged SECONDARY to PRIMARY',
+    label: 'C Pi promote',
+    helpText: 'Operator-paced. Runs when you click "Retire old PSK". Same atomic transaction on Pi-local: promotes staging to PRIMARY, wipes old PSK in one flash write.',
   },
 ]
 
@@ -167,6 +171,22 @@ export default function RotationProgressDrawer({
     },
   })
 
+  // Inline Phase C trigger. The Retire-now button on the Pi-local row
+  // calls this directly. On success the bottom action label flips from
+  // "Continue in background" to "Job finished, close now" so the
+  // operator gets a clear "you can close this" signal.
+  const retireM = useMutation({
+    mutationFn: () => fleetSecurityApi.retireOldPSK(rotationId),
+    onSuccess: () => {
+      // Refresh everything that depends on the post-retire state.
+      qc.invalidateQueries({ queryKey: ['fleet-security', 'rotation', rotationId] })
+      qc.invalidateQueries({ queryKey: ['fleet-security', 'pending-retirements'] })
+      qc.invalidateQueries({ queryKey: ['fleet-security', 'channels'] })
+      qc.invalidateQueries({ queryKey: ['fleet-security', 'trust'] })
+    },
+  })
+  const retireSucceeded = retireM.isSuccess && retireM.data?.ok === true
+
   const failed = (data?.targets ?? []).filter((t) => t.status === 'failed')
   const acked = (data?.targets ?? []).filter((t) => t.status === 'acked').length
   const total = data?.targets?.length ?? 0
@@ -202,9 +222,44 @@ export default function RotationProgressDrawer({
             )}
           </div>
 
+          {(() => null)() /* gate state computed below; isolated for readability */}
+          {/* Retirement gate is open when every non-pending target has
+              already reached on_new_psk (or retired). In the new flow
+              that means every managed remote has been atomically
+              migrated by Phase B, so the only thing left is Pi-local
+              Phase C. Once the gate is open, the Pi-local row's badge
+              switches from "waiting for retire" to "ready for retire"
+              with a clickable Retire-now button (when the parent wired
+              onTriggerRetire). */}
           <div className="space-y-1 max-h-72 overflow-y-auto">
-            {data.targets.map((t) => {
+            {(() => {
+              // Hoist gate computation so each row reuses it.
+              const nonPiTargets = data.targets.filter(
+                (t) => effectivePhase(t) !== 'pending',
+              )
+              const allNonPiOnNew = nonPiTargets.length > 0 && nonPiTargets.every((t) => {
+                const p = effectivePhase(t)
+                return p === 'on_new_psk' || p === 'retired'
+              })
+              const gateOpen =
+                data.piLocalPhase === 'staging_added' && allNonPiOnNew
+              return data.targets.map((t) => {
               const phase = effectivePhase(t)
+              // Pi-local detection in the 3-phase atomic flow: when
+              // pi_local_phase is staging_added (Phase A done, Phase B
+              // walking remotes) and a target is still at phase=pending,
+              // that target is almost certainly the Pi-local node
+              // waiting for the operator to click Retire (Phase C). We
+              // don't have a strict nodeNum=localNodeNum check here
+              // because the drawer doesn't fetch identity, but the
+              // (staging_added && pending) signal is unambiguous: every
+              // managed remote has been atomically migrated by Phase B,
+              // so anything stuck at pending is the deliberate
+              // operator-paced Pi-local target.
+              const isWaitingForRetire =
+                data.piLocalPhase === 'staging_added' &&
+                phase === 'pending'
+              const isReadyForRetire = isWaitingForRetire && gateOpen
               return (
                 <div
                   key={t.nodeNum}
@@ -231,13 +286,41 @@ export default function RotationProgressDrawer({
                         attempt {t.attempts}
                       </span>
                     )}
-                    <span className="uppercase tracking-wider text-[10px]">
-                      {phase.replace(/_/g, ' ')}
-                    </span>
+                    {isReadyForRetire ? (
+                      <>
+                        <span
+                          title="Every reachable managed remote is on the new PSK. Pi-local can promote now."
+                          className="uppercase tracking-wider text-[10px] text-emerald-300"
+                        >
+                          ready for retire
+                        </span>
+                        <button
+                          type="button"
+                          disabled={retireM.isPending}
+                          onClick={() => retireM.mutate()}
+                          title="Phase C: atomic transaction on Pi-local promotes staging to PRIMARY and wipes old PSK in one flash write"
+                          className="px-2 py-0.5 rounded border border-amber-600/40 bg-amber-700/20 hover:bg-amber-700/40 disabled:bg-dark-700 disabled:border-dark-600 disabled:text-dark-500 text-[10px] text-amber-100"
+                        >
+                          {retireM.isPending ? 'Retiring…' : 'Retire now'}
+                        </button>
+                      </>
+                    ) : isWaitingForRetire ? (
+                      <span
+                        title="The rotation worker has finished migrating every reachable remote. The Pi local Heltec migrates last, when you click Retire old PSK below. Until then Pi keeps both old + new PSK so any laggard that comes online can still be caught up via the still-active old channel."
+                        className="uppercase tracking-wider text-[10px] text-amber-300"
+                      >
+                        waiting for retire
+                      </span>
+                    ) : (
+                      <span className="uppercase tracking-wider text-[10px]">
+                        {phase.replace(/_/g, ' ')}
+                      </span>
+                    )}
                   </span>
                 </div>
               )
-            })}
+            })
+            })()}
           </div>
 
           {failed.length > 0 && (
@@ -318,10 +401,22 @@ export default function RotationProgressDrawer({
         )}
       </div>
 
+      {/* Bottom action label flips based on lifecycle state:
+          - retire just succeeded -> emphatic "Job finished, close now"
+          - rotation worker hit done flag (Phase B finished, Phase C
+            may still be pending operator click) -> "Close"
+          - otherwise -> "Continue in background" so operator knows it
+            keeps running after they leave the modal. */}
       <ModalActions
         onCancel={onClose}
         onSubmit={onClose}
-        submitLabel={done ? 'Close' : 'Continue in background'}
+        submitLabel={
+          retireSucceeded
+            ? 'Job finished, close now'
+            : done
+              ? 'Close'
+              : 'Continue in background'
+        }
       />
     </ModalShell>
   )
