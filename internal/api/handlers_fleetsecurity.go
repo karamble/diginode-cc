@@ -199,7 +199,7 @@ func (s *Server) handleFleetSecVerifyTrust(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
-	res := s.svc.FleetSec.VerifyTrust(r.Context(), num)
+	res := s.svc.FleetSec.VerifyTrust(r.Context(), userIDFromCtx(r), num)
 	writeJSON(w, http.StatusOK, res)
 }
 

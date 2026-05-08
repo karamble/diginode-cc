@@ -107,17 +107,33 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 // "Verify now" button. Returns a VerifyResult struct optimised for the
 // common case (success → green pill); on error, preserves the message
 // for the UI's failed-tray.
-func (s *Service) VerifyTrust(ctx context.Context, nodeNum uint32) VerifyResult {
+//
+// Writes a fleetsec.verify_trust audit row keyed to userID (the operator
+// who clicked the button). Required for §10.10 review -- background
+// drift checks call GetTrust directly and don't audit, so the audit log
+// reflects only user-initiated verify actions.
+func (s *Service) VerifyTrust(ctx context.Context, userID string, nodeNum uint32) VerifyResult {
 	res := VerifyResult{NodeNum: nodeNum}
 	got, err := s.GetTrust(ctx, nodeNum)
 	if err != nil {
 		res.Err = err.Error()
+		s.auditFleet(ctx, userID, "verify_trust", "node", fmt.Sprintf("%d", nodeNum), map[string]any{
+			"ok":    false,
+			"error": err.Error(),
+		})
 		return res
 	}
 	res.OK = true
 	res.Method = got.LastVerifyMethod
 	res.AdminKeyFPs = got.AdminKeyFPs
 	res.IsManaged = got.IsManaged
+	s.auditFleet(ctx, userID, "verify_trust", "node", fmt.Sprintf("%d", nodeNum), map[string]any{
+		"ok":                     true,
+		"method":                 string(got.LastVerifyMethod),
+		"admin_key_fingerprints": got.AdminKeyFPs,
+		"is_managed":             got.IsManaged,
+		"drift_status":           string(got.DriftStatus),
+	})
 	return res
 }
 
