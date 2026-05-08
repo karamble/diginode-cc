@@ -381,21 +381,50 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 			if d.onDeviceTime != nil {
 				d.onDeviceTime(time.Now())
 			}
-			// Mark the local node as a gotailme C2 gateway
+			// MyInfo.MyNodeNum is the authoritative local-node identity --
+			// the firmware emits it before any NodeInfo in the wantConfig
+			// dump. Pin localNodeNum here so a later NodeInfo arriving
+			// out-of-order (e.g. for HB35 when the Pi-Heltec's NodeDB has
+			// been re-pinned) can't be mis-identified as us. fleetsec uses
+			// this value to decide local-vs-remote admin paths -- a wrong
+			// value sends remote PKC operations down the local-loopback
+			// path and they time out.
+			if pkt.MyInfo.MyNodeNum != 0 {
+				d.localNodeSeen = true
+				d.localNodeNum = pkt.MyInfo.MyNodeNum
+			}
+			// Mark the local node as a gotailme C2 gateway. Skipped if the
+			// node-handler hasn't seen the matching NodeInfo yet -- the
+			// NodeInfo path below will MarkLocal once it lands.
 			if d.nodeHandler != nil && pkt.MyInfo.MyNodeNum != 0 {
 				d.nodeHandler.TouchNode(pkt.MyInfo.MyNodeNum, 0, 0)
 				d.nodeHandler.ClassifyNode(pkt.MyInfo.MyNodeNum, "gotailme")
+				d.nodeHandler.MarkLocal(pkt.MyInfo.MyNodeNum)
+				if d.pendingFirmware != "" {
+					d.nodeHandler.SetFirmwareVersion(pkt.MyInfo.MyNodeNum, d.pendingFirmware)
+				}
 			}
 		}
 
 	case serial.FromRadioNodeInfo:
 		if pkt.NodeInfo != nil && d.nodeHandler != nil {
 			d.nodeHandler.HandleNodeInfo(pkt.NodeInfo)
-			// The first NodeInfo in the wantConfig dump is the local node.
-			// Mark it as our own gotailme C2 gateway.
+			// Fallback path: if MyInfo never arrived (very early window
+			// or quirky firmware), pin localNodeNum from the first
+			// NodeInfo we see. The MyInfo handler above is preferred
+			// and runs first under normal conditions.
 			if !d.localNodeSeen && pkt.NodeInfo.Num != 0 {
 				d.localNodeSeen = true
 				d.localNodeNum = pkt.NodeInfo.Num
+				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
+				if d.pendingFirmware != "" {
+					d.nodeHandler.SetFirmwareVersion(pkt.NodeInfo.Num, d.pendingFirmware)
+				}
+			} else if pkt.NodeInfo.Num == d.localNodeNum && d.localNodeNum != 0 {
+				// MyInfo set localNodeNum but couldn't MarkLocal because
+				// the nodes service hadn't created the node entry yet.
+				// Now that NodeInfo for the local node has arrived, the
+				// entry exists -- promote it.
 				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
 				if d.pendingFirmware != "" {
 					d.nodeHandler.SetFirmwareVersion(pkt.NodeInfo.Num, d.pendingFirmware)
