@@ -1,39 +1,59 @@
-.PHONY: all build build-frontend run test clean proto proto-tools proto-check docker-build docker-push docker-up docker-down docker-logs
+.PHONY: all build build-frontend run test clean proto proto-tools docker-build docker-push docker-up docker-down docker-logs
 
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 LDFLAGS := -ldflags="-s -w -X main.Version=$(VERSION)"
 BINARY := diginode-cc
 
 # Meshtastic protobuf generation.
-# The protos are NOT vendored. `make proto` downloads the source tarball at
-# the pinned SHA, runs protoc against it in a temp dir, and writes the
-# generated Go bindings to internal/meshpb/. The generated files are checked
-# in, so routine builds and CI don't need protoc or network access -- only
-# someone bumping the pin (or running proto-check in CI) does.
+# The protos are NOT vendored and the generated bindings are NOT committed
+# (internal/meshpb/ is gitignored). `make proto` downloads the source tarball
+# at the pinned SHA, runs protoc against it in a temp dir, and writes the
+# generated Go bindings to internal/meshpb/. `make build` and `make all`
+# auto-trigger generation if internal/meshpb/ is missing, so first-time
+# clones just run `make all` -- they do still need protoc + protoc-gen-go
+# + curl on PATH (see proto-tools to install protoc-gen-go).
 #
-# To bump: change PROTO_SHA below, run `make proto`, commit the diff in
-# internal/meshpb/.
-PROTO_REPO := meshtastic/protobufs
-PROTO_SHA  := 97ea65a10d31f24d84c8510342f2cd2d213c35a5
-PROTO_OUT  := internal/meshpb
+# To bump the pin: change PROTO_SHA below, run `make proto`, test, commit
+# the Makefile change.
+PROTO_REPO   := meshtastic/protobufs
+PROTO_SHA    := 97ea65a10d31f24d84c8510342f2cd2d213c35a5
+PROTO_OUT    := internal/meshpb
+PROTO_MODULE := github.com/karamble/diginode-cc
 PROTO_FILES := \
 	meshtastic/admin.proto \
+	meshtastic/atak.proto \
 	meshtastic/channel.proto \
 	meshtastic/config.proto \
-	meshtastic/mesh.proto \
-	meshtastic/portnums.proto \
-	meshtastic/module_config.proto \
-	meshtastic/telemetry.proto \
+	meshtastic/connection_status.proto \
+	meshtastic/device_ui.proto \
 	meshtastic/deviceonly.proto \
 	meshtastic/localonly.proto \
-	meshtastic/connection_status.proto \
-	meshtastic/xmodem.proto \
-	meshtastic/remote_hardware.proto
+	meshtastic/mesh.proto \
+	meshtastic/module_config.proto \
+	meshtastic/portnums.proto \
+	meshtastic/remote_hardware.proto \
+	meshtastic/telemetry.proto \
+	meshtastic/xmodem.proto
+
+# Remap each .proto's go_package option to our module path so generated files
+# land flat in $(PROTO_OUT)/ under package "meshpb", regardless of what the
+# upstream protos declare ("github.com/meshtastic/go/generated"). The
+# `path;name` form forces both the import path and the Go package name.
+PROTO_M_FLAGS := $(foreach f,$(PROTO_FILES),--go_opt=M$f=$(PROTO_MODULE)/$(PROTO_OUT)\;meshpb)
 
 all: build-frontend build
 
-build:
+# Auto-trigger proto generation if the generated package is missing.
+# Order-only prerequisite (the | guard) so it doesn't re-run on every build
+# once the directory exists.
+build: | $(PROTO_OUT)
 	go build $(LDFLAGS) -o $(BINARY) ./cmd/diginode-cc
+
+# Stamp target: presence of $(PROTO_OUT) is enough to satisfy the prereq.
+# Run `make proto` to refresh after bumping PROTO_SHA.
+$(PROTO_OUT):
+	@echo "internal/meshpb/ missing -- running make proto"
+	@$(MAKE) proto
 
 build-frontend:
 	cd web && npm run build
@@ -41,7 +61,7 @@ build-frontend:
 run: build
 	./$(BINARY)
 
-test:
+test: | $(PROTO_OUT)
 	go test ./...
 
 # proto-tools installs the protoc-gen-go plugin pinned in tools/tools.go.
@@ -61,28 +81,21 @@ proto:
 		echo "Fetching $(PROTO_REPO)@$(PROTO_SHA)..." && \
 		curl -fsSL "https://github.com/$(PROTO_REPO)/archive/$(PROTO_SHA).tar.gz" \
 			| tar -xz -C $$TMPDIR --strip-components=1 && \
-		mkdir -p $(PROTO_OUT) && \
+		rm -rf $(PROTO_OUT) && mkdir -p $(PROTO_OUT) && \
 		protoc \
+			--experimental_allow_proto3_optional \
 			--proto_path=$$TMPDIR \
-			--go_out=$(PROTO_OUT) \
-			--go_opt=paths=source_relative \
+			--go_out=. \
+			--go_opt=module=$(PROTO_MODULE) \
+			$(PROTO_M_FLAGS) \
 			$(addprefix $$TMPDIR/,$(PROTO_FILES)) && \
+		sed -i '/^\t_ "github\.com\/meshtastic\/go\/generated"$$/d' $(PROTO_OUT)/*.pb.go && \
 		echo "Generated bindings in $(PROTO_OUT)/ from $(PROTO_REPO)@$(PROTO_SHA)"
-
-# proto-check is the CI guard: regenerate, then assert the working tree is clean.
-# A non-empty diff means someone hand-edited internal/meshpb/ or the pinned SHA
-# was bumped without committing the regenerated files.
-proto-check: proto
-	@if ! git diff --quiet -- $(PROTO_OUT); then \
-		echo "ERROR: $(PROTO_OUT) is out of sync with $(PROTO_REPO)@$(PROTO_SHA). Run 'make proto' and commit."; \
-		git diff -- $(PROTO_OUT); \
-		exit 1; \
-	fi
-	@echo "$(PROTO_OUT) is in sync with $(PROTO_REPO)@$(PROTO_SHA)"
 
 clean:
 	rm -f $(BINARY)
 	rm -rf web/dist
+	rm -rf $(PROTO_OUT)
 
 # Docker targets
 docker-build:

@@ -56,7 +56,7 @@ The existing hand-coded builders in `internal/serial/encode.go` (TextMessage, Po
 
 **Pin**: `github.com/meshtastic/protobufs` at tag **`v2.7.23`** (full commit SHA `97ea65a10d31f24d84c8510342f2cd2d213c35a5`, 2026-04-22). This is the latest tagged release as of plan time and predates the in-flight `serial_hal` work we don't need. There is no official Meshtastic Go SDK (`github.com/meshtastic/go` 404s), and the third-party options (`lmatte7/goMesh`, `meshnet-gophers/meshtastic-go`) either aren't aimed at AdminMessage as a first-class concern or are stale — generating ourselves is the right call.
 
-**No submodule, no vendor directory.** `make proto` downloads the source tarball at the pinned SHA into a temp dir, runs `protoc` against it, and cleans up. Generated `*.pb.go` files in `internal/meshpb/` are checked in, so routine builds and CI need neither protoc nor network access — only someone bumping the pin (or running `make proto-check` in CI) does. The pinned SHA lives as a single variable in the Makefile; bumping is "edit one line, run `make proto`, commit the diff."
+**No submodule, no vendor directory, no committed bindings.** `make proto` downloads the source tarball at the pinned SHA into a temp dir, runs `protoc` against it, and cleans up. Generated `*.pb.go` files land in `internal/meshpb/`, which is gitignored — `make build` and `make test` declare it as an order-only prerequisite, so first-time clones just run `make build` and the bindings are generated transparently. Contributors do need protoc + protoc-gen-go + curl on PATH (one-time install via `make proto-tools` for the plugin). The pinned SHA lives as a single `PROTO_SHA` variable in the Makefile; bumping is "edit one line, test, commit the Makefile change."
 
 **Generated package**: `internal/meshpb/` — the only place generated `.pb.go` files live. Generate from a curated subset of the proto tree (others pull in TAK / serial_hal / paxcounter that we don't need):
 
@@ -68,9 +68,10 @@ telemetry.proto    deviceonly.proto    (transitive — required by Mesh)
 
 **Generation toolchain**:
 - `make proto-tools` installs the `protoc-gen-go` plugin (one-time per dev environment).
-- `make proto` curls the tarball at `PROTO_SHA`, extracts to `mktemp -d`, runs `protoc --go_out=internal/meshpb --go_opt=paths=source_relative -I <tmpdir> ...` for each listed file, then removes the tmp dir.
-- Generated files are checked in so routine builds and CI don't need protoc or network access.
-- CI runs `make proto-check` (regenerate + assert clean working tree) on PRs that touch `internal/meshpb/` or the Makefile pin.
+- `make proto` curls the tarball at `PROTO_SHA`, extracts to `mktemp -d`, runs `protoc --go_out=. --go_opt=module=github.com/karamble/diginode-cc -Mfoo.proto=...;meshpb ...` for each listed file (the `path;name` form forces all generated code into a single `package meshpb` regardless of the upstream `go_package` option), then removes the tmp dir. A trailing `sed` strips the residual blank import of `github.com/meshtastic/go/generated` left over from nanopb annotations.
+- `internal/meshpb/` is gitignored. `make build` and `make test` declare it as an order-only prerequisite (`build: | $(PROTO_OUT)`), so first-time clones run `make build` and the bindings are generated transparently.
+- CI runs `make build && make test` like any other build; the auto-trigger handles generation.
+- `make clean` removes both the binary and `internal/meshpb/`.
 
 **Confirmed field numbers** (cross-checked against `meshtastic/protobufs@97ea65a` so the generated bindings produce the right wire format — kept here as a reviewer-aid only; the generated code is the source of truth):
 
@@ -482,9 +483,10 @@ The `severity` column is not currently in `audit_log`; check schema and add it v
 ## 8. Critical files to modify or create
 
 **Backend (Go) — proto bindings**:
-- `internal/meshpb/` — generated `*.pb.go` files (admin, channel, config, mesh, portnums, module_config, telemetry, deviceonly, plus transitive deps), checked in
-- `Makefile` — `proto`, `proto-tools`, `proto-check` targets (already added). `PROTO_SHA` variable holds the pinned commit.
-- `go.mod` — add `google.golang.org/protobuf`
+- `internal/meshpb/` — generated `*.pb.go` files (admin, channel, config, mesh, portnums, module_config, telemetry, deviceonly, plus transitive deps). Gitignored; auto-regenerated on `make build`.
+- `Makefile` — `proto`, `proto-tools` targets and order-only build/test prereq on `$(PROTO_OUT)` (already added). `PROTO_SHA` variable holds the pinned commit.
+- `go.mod` — `google.golang.org/protobuf` added (auto-pulled by `go mod tidy` once meshpb compiles).
+- `.gitignore` — `/internal/meshpb/` entry.
 - No submodule, no vendor directory, no `tools/tools.go` — `protoc-gen-go` is installed via `make proto-tools` (one-time per dev environment).
 
 **Backend (Go) — feature code**:
@@ -535,7 +537,7 @@ The `severity` column is not currently in `audit_log`; check schema and add it v
 
 **Risks to call out during review:**
 - **Lockout if recovery wizard fails mid-way**: between "rescue installed locally" and "primary_new pushed to remotes", the local Heltec's identity is `rescue`. If the process crashes or the operator unplugs, the rescue privkey is now persisted on the live Heltec — defeating the cold-storage assumption. Mitigation: the wizard explicitly warns of this, and the final step zeroizes `rescue` from the live Heltec by re-installing `primary_new` and overwriting. Document a "what to do if the wizard crashes mid-flight" runbook.
-- **Proto pin drift**: pinned at `97ea65a10d31f24d84c8510342f2cd2d213c35a5` (v2.7.23) via the `PROTO_SHA` Makefile variable. When bumping, edit `PROTO_SHA`, run `make proto`, review the diff in `internal/meshpb/` for any field renames or removals on `AdminMessage` / `SecurityConfig` / `Channel`, then commit. CI's `make proto-check` catches accidental drift but not intentional bumps — those need a human review of the upstream changelog.
+- **Proto pin drift**: pinned at `97ea65a10d31f24d84c8510342f2cd2d213c35a5` (v2.7.23) via the `PROTO_SHA` Makefile variable. When bumping, edit `PROTO_SHA`, run `make clean && make proto`, eyeball `git diff` of `internal/meshpb/` for field renames or removals on `AdminMessage` / `SecurityConfig` / `Channel`, run the test suite, then commit the Makefile change. Because the bindings aren't committed, the only artifact of the bump is the `PROTO_SHA` change itself — review must catch regressions by running tests, not by reading a binding diff.
 - **Airtime / regulatory compliance**: rotating 50 nodes in EU868 will hit duty-cycle limits. The rotation engine must respect a minimum inter-target gap (configurable, default 5s) and a maximum airtime budget per minute. Surface as a setting in fleet policy.
 - **Concurrent admin from multiple control centers** (if any deployment runs more than one). The `admin_key` list permits up to 3 keys; if two control centers each rotate identity at the same time, they could interleave updates. Out of scope for v1; document that only one control center should drive admin at a time.
 - **Heltec firmware compatibility**: the proto field numbers used here are stable in Meshtastic 2.5+. Older firmwares may reject. Add a runtime check on `MyInfo.firmware_version` before enabling PKC features.
@@ -582,7 +584,7 @@ If steps a–d all pass, the feature is ready for a real deployment dry-run on a
 
 Sequence the work so each step is independently reviewable and the previous one is verifiable before moving on.
 
-1. **Proto generation** (~½ day): Makefile `proto` target is in place; run `make proto-tools && make proto` to populate `internal/meshpb/`, commit. Add `make proto-check` to CI so pin bumps are caught.
+1. **Proto generation** (~½ day): Makefile targets in place. First-time setup: `make proto-tools` (one-off), then `make build` auto-generates the bindings into the gitignored `internal/meshpb/`. Verify with `go build ./internal/meshpb/...`.
 2. **Envelope helpers** (~½ day): `BuildAdminPacket` + `BuildAdminPacketPKC` in `internal/serial/encode.go`, plus unit tests asserting wire bytes against canonical encodings.
 3. **Dispatcher routing** (~½ day): `case PortNumAdmin:` and Routing-ack capture; stub `fleetsec.Service.HandleAdminReply` for now.
 4. **Migrations + DB layer** (~1 day): `000024_fleet_security.up/down.sql`; pgx queries in `internal/fleetsec/store.go` (or extend an existing storage layer).
