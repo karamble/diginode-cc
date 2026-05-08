@@ -15,13 +15,24 @@ import (
 // fakeSerial captures the most recent ToRadio frame and (after caller
 // invokes RouteAck or RouteAdminReply) feeds it back through the
 // service's tracker so service code that awaits a reply unblocks.
+//
+// Two scripting modes:
+//   - reply: a single canned Reply, replayed for every Send. Convenient
+//     for one-shot tests like a single Get or Set admin.
+//   - replyQueue: ordered Reply values, one consumed per Send. The
+//     tests of multi-step helpers (pushStagingToRemote, etc) use this
+//     to script a Get-then-Set sequence with different replies. When
+//     replyQueue is non-empty it's preferred over reply.
+//
+// history accumulates every outbound frame in order so tests can
+// assert the sequence + content of admin packets the helper emitted.
 type fakeSerial struct {
-	mu      sync.Mutex
-	tracker *Tracker
-	last    []byte
-	// reply is the canned reply the tracker should deliver next.
-	// If nil, no auto-reply (caller must drive the tracker manually).
-	reply *Reply
+	mu         sync.Mutex
+	tracker    *Tracker
+	last       []byte
+	history    [][]byte
+	reply      *Reply
+	replyQueue []Reply
 }
 
 func newFakeSerial(tr *Tracker, reply *Reply) *fakeSerial {
@@ -30,8 +41,17 @@ func newFakeSerial(tr *Tracker, reply *Reply) *fakeSerial {
 
 func (f *fakeSerial) SendToRadio(data []byte) error {
 	f.mu.Lock()
-	f.last = append([]byte(nil), data...)
-	reply := f.reply
+	cp := append([]byte(nil), data...)
+	f.last = cp
+	f.history = append(f.history, cp)
+	var reply *Reply
+	if len(f.replyQueue) > 0 {
+		r := f.replyQueue[0]
+		f.replyQueue = f.replyQueue[1:]
+		reply = &r
+	} else {
+		reply = f.reply
+	}
 	f.mu.Unlock()
 
 	if reply == nil {
