@@ -86,6 +86,12 @@ type NodeTrustRecord struct {
 	LastVerifyMethod  VerifyMethod `json:"lastVerifyMethod,omitempty"`
 	LastDriftCheckAt  *time.Time   `json:"lastDriftCheckAt,omitempty"`
 	DriftStatus       DriftStatus  `json:"driftStatus"`
+	// CurrentPSKFP is the PSK fingerprint this node was last confirmed
+	// on -- stamped during a successful Verify (PKC GetConfig SECURITY
+	// round-trip proves channel-layer alignment). Migration 000028
+	// added the column. NULL means "never verified post-000028";
+	// retirement gate treats null as not-yet-migrated.
+	CurrentPSKFP      string       `json:"currentPskFp,omitempty"`
 	Notes             string       `json:"notes,omitempty"`
 }
 

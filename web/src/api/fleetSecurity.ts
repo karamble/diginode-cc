@@ -45,6 +45,12 @@ export interface NodeTrust {
   lastVerifyMethod?: VerifyMethod
   lastDriftCheckAt?: string
   driftStatus: DriftStatus
+  // PSK fingerprint the node was last confirmed on (= local PRIMARY's
+  // fp at the moment of a successful Verify round-trip). Compared
+  // against the channel's current fingerprint to detect "old psk" /
+  // "migration lagging" trust rows during a staged rotation. Empty
+  // means "never verified since 000028".
+  currentPskFp?: string
   notes?: string
 }
 
@@ -138,6 +144,17 @@ export const fleetSecurityApi = {
       pskB64 ? { pskB64, targets } : { targets },
     ),
 
+  // Phase E retirement of a completed staged rotation. ack must be
+  // "RETIRE" (typed-confirmation gate, the same way RotatePSK requires
+  // "ROTATE"). Returns 409 with laggards on gate failure -- callers
+  // should render the laggards list as "still pending" before
+  // re-enabling the Retire button.
+  retireOldPSK: (id: string) =>
+    api.post<RetireOldPSKResult>(
+      `/fleet-security/rotations/${id}/retire-old-psk`,
+      { ack: 'RETIRE' },
+    ),
+
   // Recovery
   startRecovery: (body: {
     rescuePrivB64: string
@@ -167,10 +184,40 @@ export interface Channel {
 }
 
 export type RotationKind = 'psk' | 'identity' | 'admin-keys' | 'recovery'
+// Legacy 4-state status, kept for backward-compat with older Rotation
+// rows (pre-migration 000027). New code reads `phase`.
 export type TargetStatus = 'pending' | 'in-flight' | 'acked' | 'failed'
+// 5-phase staged rotation per project_psk_rotation_secondary_channel_staging.md.
+//
+//   pending           -> phase_b_pushing  -> has_new_psk
+//                                          -> failed_b
+//   has_new_psk       -> phase_c_promoting -> on_new_psk
+//                                          -> failed_c
+//   on_new_psk        -> retired (after Phase E)
+//
+// failed_b: Phase B push failed; remote stays on PSK_OLD only,
+// reachable. Retry from pending re-runs Phase B.
+// failed_c: Phase B succeeded, Phase C didn't; remote has both
+// channels active. Retry from has_new_psk runs only Phase C.
+export type RotationPhase =
+  | 'pending'
+  | 'phase_b_pushing'
+  | 'has_new_psk'
+  | 'phase_c_promoting'
+  | 'on_new_psk'
+  | 'retired'
+  | 'failed_b'
+  | 'failed_c'
+
+export type PiLocalPhase =
+  | 'pending'
+  | 'staging_added'
+  | 'phase_d_promoted'
+  | 'retired'
 
 export interface RotationTarget {
   nodeNum: number
+  phase?: RotationPhase
   status: TargetStatus
   attempts: number
   lastError?: string
@@ -180,12 +227,26 @@ export interface Rotation {
   id: string
   kind: RotationKind
   channelIndex?: number
+  stagingChannelIndex?: number
+  piLocalPhase?: PiLocalPhase
   startedBy?: string
   startedAt: string
   completedAt?: string
+  retiredAt?: string
   targets: RotationTarget[]
   newPskFingerprint?: string
   notes?: string
+}
+
+// Result of POST /rotations/{id}/retire-old-psk. ok=false + non-empty
+// laggards means the gate (every managed-trust row's current_psk_fp ==
+// rotation's new fp) failed; the UI shows the laggards as "still
+// pending: <node-nums>" until they're verified on the new PSK.
+export interface RetireOldPSKResult {
+  ok: boolean
+  laggards?: number[]
+  oldChannelIndex?: number
+  newPskFingerprint?: string
 }
 
 // WebSocket event payload from EventFleetSecRotation.

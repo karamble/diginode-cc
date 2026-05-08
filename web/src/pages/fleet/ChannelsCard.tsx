@@ -10,10 +10,11 @@
 import { useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 
-import fleetSecurityApi, { type Channel } from '../../api/fleetSecurity'
+import fleetSecurityApi, { type Channel, type Rotation } from '../../api/fleetSecurity'
 import { useAuthStore } from '../../stores/authStore'
 import RotatePSKModal from './RotatePSKModal'
 import RotationProgressDrawer from './RotationProgressDrawer'
+import RetireOldPSKModal from './RetireOldPSKModal'
 
 export default function ChannelsCard() {
   const { user } = useAuthStore()
@@ -26,6 +27,33 @@ export default function ChannelsCard() {
 
   const [rotating, setRotating] = useState<Channel | null>(null)
   const [activeRotation, setActiveRotation] = useState<{ id: string; pskB64: string } | null>(null)
+  const [retireRotation, setRetireRotation] = useState<Rotation | null>(null)
+
+  // Most-recent rotation per channel index, for the "Retire old PSK"
+  // affordance. The card only surfaces a Retire button when the local
+  // Heltec has reached phase_d_promoted (Phase D done) but hasn't been
+  // retired yet -- ie, both PSKs are alive on Pi pending operator
+  // confirmation that all nodes have migrated.
+  const { data: pendingRetirements } = useQuery<Record<number, Rotation>>({
+    queryKey: ['fleet-security', 'pending-retirements'],
+    queryFn: async () => {
+      const list = await fleetSecurityApi.listChannels()
+      const out: Record<number, Rotation> = {}
+      for (const ch of list) {
+        if (!ch.lastRotationId) continue
+        try {
+          const rot = await fleetSecurityApi.getRotation(ch.lastRotationId)
+          if (rot.piLocalPhase === 'phase_d_promoted' && !rot.retiredAt) {
+            out[ch.index] = rot
+          }
+        } catch {
+          // ignore -- rotation may have been pruned
+        }
+      }
+      return out
+    },
+    refetchInterval: 30000,
+  })
 
   return (
     <section className="bg-dark-800/60 border border-dark-700/50 rounded-lg p-5">
@@ -79,6 +107,11 @@ export default function ChannelsCard() {
               channel={ch}
               isAdmin={isAdmin}
               onRotate={() => setRotating(ch)}
+              pendingRetirement={pendingRetirements?.[ch.index]}
+              onRetire={() => {
+                const r = pendingRetirements?.[ch.index]
+                if (r) setRetireRotation(r)
+              }}
             />
           ))}
         </div>
@@ -101,6 +134,18 @@ export default function ChannelsCard() {
           onClose={() => setActiveRotation(null)}
         />
       )}
+      {retireRotation && (
+        <RetireOldPSKModal
+          rotation={retireRotation}
+          onClose={() => setRetireRotation(null)}
+          onRetired={() => {
+            setRetireRotation(null)
+            // Trigger a refetch of channels + pending-retirements; the
+            // server stamps retired_at + retired phase, and the next
+            // listChannels read picks up the cleared state.
+          }}
+        />
+      )}
     </section>
   )
 }
@@ -109,12 +154,28 @@ interface ChannelPanelProps {
   channel: Channel
   isAdmin: boolean
   onRotate: () => void
+  // pendingRetirement is the most-recent rotation on this channel that
+  // has finished Phase D (pi_local_phase = phase_d_promoted) and hasn't
+  // been retired yet. Drives the migration progress strip + the Retire
+  // button. undefined means no rotation is pending retirement on this
+  // channel.
+  pendingRetirement?: Rotation
+  onRetire: () => void
 }
 
-function ChannelPanel({ channel, isAdmin, onRotate }: ChannelPanelProps) {
+function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire }: ChannelPanelProps) {
   const ageStr = channel.lastRotatedAt
     ? formatRelative(channel.lastRotatedAt)
     : '—'
+
+  const retireSummary = (() => {
+    if (!pendingRetirement) return null
+    const targets = pendingRetirement.targets ?? []
+    const total = targets.length
+    const onNew = targets.filter((t) => t.phase === 'on_new_psk' || t.phase === 'retired').length
+    return { total, onNew, gateOpen: total > 0 && onNew === total }
+  })()
+
   return (
     <div className="bg-dark-900/40 border border-dark-700/50 rounded p-4">
       <div className="flex items-center justify-between mb-3">
@@ -129,16 +190,52 @@ function ChannelPanel({ channel, isAdmin, onRotate }: ChannelPanelProps) {
             {channel.role}
           </span>
         </div>
-        {isAdmin && (
-          <button
-            type="button"
-            onClick={onRotate}
-            className="px-3 py-1 rounded bg-dark-700 hover:bg-dark-600 text-xs text-dark-200"
-          >
-            Rotate PSK…
-          </button>
-        )}
+        <div className="flex items-center gap-2">
+          {isAdmin && pendingRetirement && (
+            <button
+              type="button"
+              onClick={onRetire}
+              disabled={!retireSummary?.gateOpen}
+              title={retireSummary?.gateOpen
+                ? 'All fleet members confirmed on the new PSK; safe to retire'
+                : `Waiting on ${retireSummary ? retireSummary.total - retireSummary.onNew : '?'} laggards to migrate before retirement is safe`}
+              className="px-3 py-1 rounded bg-amber-700/30 border border-amber-600/40 hover:bg-amber-700/50 disabled:bg-dark-700 disabled:border-dark-600 disabled:text-dark-500 text-xs text-amber-100"
+            >
+              Retire old PSK
+              {retireSummary && (
+                <span className="ml-1.5 text-[10px] opacity-70">
+                  {retireSummary.onNew}/{retireSummary.total}
+                </span>
+              )}
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={onRotate}
+              className="px-3 py-1 rounded bg-dark-700 hover:bg-dark-600 text-xs text-dark-200"
+            >
+              Rotate PSK…
+            </button>
+          )}
+        </div>
       </div>
+
+      {pendingRetirement && retireSummary && (
+        <div className="mb-3 rounded border border-amber-700/30 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-100/90">
+          <div className="flex items-center justify-between">
+            <span>
+              Migration in progress -- both PSKs alive on Pi
+              {retireSummary.gateOpen
+                ? ' (ready to retire)'
+                : ` (${retireSummary.total - retireSummary.onNew} node${retireSummary.total - retireSummary.onNew === 1 ? '' : 's'} still on old PSK)`}
+            </span>
+            <span className="font-mono text-[10px] opacity-70">
+              {retireSummary.onNew}/{retireSummary.total} on new
+            </span>
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 gap-3 text-xs">
         <div>

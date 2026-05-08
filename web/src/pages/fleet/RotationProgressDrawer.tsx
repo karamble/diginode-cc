@@ -13,7 +13,9 @@ import { useEffect, useState } from 'react'
 import fleetSecurityApi, {
   FLEET_SEC_ROTATION_EVENT,
   type Rotation,
+  type RotationPhase,
   type RotationProgressEvent,
+  type RotationTarget,
   type TargetStatus,
 } from '../../api/fleetSecurity'
 import wsClient from '../../api/websocket'
@@ -33,6 +35,71 @@ const statusStyles: Record<TargetStatus, string> = {
   'in-flight':'bg-amber-700/30 text-amber-200 border-amber-600/40 animate-pulse',
   acked:      'bg-emerald-700/30 text-emerald-200 border-emerald-600/40',
   failed:     'bg-red-700/30 text-red-200 border-red-600/40',
+}
+
+// Per-phase styling for the five-step staged-rotation indicator. Used
+// by the stepper rendered in each target row -- each step's dot reads
+// its own colour from this map based on whether the target is past,
+// at, or before that phase. Failed phases get red dots that bleed
+// into the next step's color so the failure is visually anchored.
+const stepLabels: { id: 'B' | 'C'; label: string; helpText: string }[] = [
+  {
+    id: 'B',
+    label: 'B push',
+    helpText: 'Pi pushes new PSK to the remote on a SECONDARY channel slot',
+  },
+  {
+    id: 'C',
+    label: 'C promote',
+    helpText: 'Remote promotes the staged SECONDARY to PRIMARY',
+  },
+]
+
+// stepStateFor renders one of {pending, active, ok, fail, skip} for a
+// step based on the target's current phase.
+function stepStateFor(phase: RotationPhase | undefined, step: 'B' | 'C'): 'pending' | 'active' | 'ok' | 'fail' | 'skip' {
+  const p = phase ?? 'pending'
+  if (step === 'B') {
+    if (p === 'pending') return 'pending'
+    if (p === 'phase_b_pushing') return 'active'
+    if (p === 'failed_b') return 'fail'
+    // anything past Phase B (has_new_psk, phase_c_promoting, on_new_psk,
+    // failed_c, retired) means B succeeded.
+    return 'ok'
+  }
+  // step === 'C'
+  if (p === 'failed_b') return 'skip' // never got to C
+  if (p === 'pending' || p === 'phase_b_pushing' || p === 'has_new_psk') return 'pending'
+  if (p === 'phase_c_promoting') return 'active'
+  if (p === 'failed_c') return 'fail'
+  // on_new_psk / retired
+  return 'ok'
+}
+
+const stepColors: Record<'pending' | 'active' | 'ok' | 'fail' | 'skip', string> = {
+  pending: 'bg-dark-700/40 text-dark-500 border-dark-600/30',
+  active:  'bg-amber-700/30 text-amber-200 border-amber-600/50 animate-pulse',
+  ok:      'bg-emerald-700/30 text-emerald-200 border-emerald-600/50',
+  fail:    'bg-red-700/30 text-red-200 border-red-600/50',
+  skip:    'bg-dark-800/60 text-dark-600 border-dark-700/30',
+}
+
+function effectivePhase(t: RotationTarget): RotationPhase {
+  // Server emits both phase + status; phase is the source of truth.
+  // Older rotation rows pre-000027 only have status; back-fill here so
+  // the stepper renders sensibly (mostly the on_new_psk / failed_b
+  // collapses).
+  if (t.phase) return t.phase
+  switch (t.status) {
+    case 'acked':
+      return 'on_new_psk'
+    case 'failed':
+      return 'failed_b'
+    case 'in-flight':
+      return 'phase_b_pushing'
+    default:
+      return 'pending'
+  }
 }
 
 export default function RotationProgressDrawer({
@@ -121,24 +188,41 @@ export default function RotationProgressDrawer({
           </div>
 
           <div className="space-y-1 max-h-72 overflow-y-auto">
-            {data.targets.map((t) => (
-              <div
-                key={t.nodeNum}
-                className={`flex items-center justify-between px-3 py-1.5 rounded border text-xs ${statusStyles[t.status]}`}
-              >
-                <span className="font-mono">!{t.nodeNum.toString(16).padStart(8, '0')}</span>
-                <span className="flex items-center gap-2">
-                  {t.attempts > 0 && (
-                    <span className="text-[10px] opacity-70">
-                      attempt {t.attempts}
+            {data.targets.map((t) => {
+              const phase = effectivePhase(t)
+              return (
+                <div
+                  key={t.nodeNum}
+                  className={`flex items-center justify-between gap-3 px-3 py-1.5 rounded border text-xs ${statusStyles[t.status]}`}
+                >
+                  <span className="font-mono shrink-0">!{t.nodeNum.toString(16).padStart(8, '0')}</span>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    {stepLabels.map((step) => {
+                      const state = stepStateFor(phase, step.id)
+                      return (
+                        <span
+                          key={step.id}
+                          title={`${step.label}: ${step.helpText}`}
+                          className={`px-1.5 py-0.5 rounded border text-[9px] uppercase tracking-wider ${stepColors[state]}`}
+                        >
+                          {step.id}
+                        </span>
+                      )
+                    })}
+                  </div>
+                  <span className="flex items-center gap-2 ml-auto">
+                    {t.attempts > 0 && (
+                      <span className="text-[10px] opacity-70">
+                        attempt {t.attempts}
+                      </span>
+                    )}
+                    <span className="uppercase tracking-wider text-[10px]">
+                      {phase.replace(/_/g, ' ')}
                     </span>
-                  )}
-                  <span className="uppercase tracking-wider text-[10px]">
-                    {t.status}
                   </span>
-                </span>
-              </div>
-            ))}
+                </div>
+              )
+            })}
           </div>
 
           {failed.length > 0 && (
@@ -146,11 +230,17 @@ export default function RotationProgressDrawer({
               <div className="text-xs text-amber-200 font-semibold">
                 {failed.length} failed target{failed.length === 1 ? '' : 's'}
               </div>
-              {failed.map((t) => (
-                <div key={t.nodeNum} className="text-[11px] text-red-300/80 font-mono">
-                  !{t.nodeNum.toString(16).padStart(8, '0')}: {t.lastError}
-                </div>
-              ))}
+              {failed.map((t) => {
+                const phase = effectivePhase(t)
+                const tag =
+                  phase === 'failed_b' ? 'phase B' :
+                  phase === 'failed_c' ? 'phase C' : 'phase ?'
+                return (
+                  <div key={t.nodeNum} className="text-[11px] text-red-300/80 font-mono">
+                    !{t.nodeNum.toString(16).padStart(8, '0')} ({tag}): {t.lastError}
+                  </div>
+                )
+              })}
               <Field label="Override PSK (optional, base64 — 16 or 32 bytes)">
                 <input
                   type="text"

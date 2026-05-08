@@ -1,16 +1,29 @@
 // TrustHealthPill renders the per-node trust-roster status as a colored
-// chip. Combines two backend signals:
+// chip. Combines three backend signals:
 //   - DriftStatus: in-policy / drift / unreachable / unknown
+//   - currentPskFp vs the channel's current fingerprint: drives the
+//     "old psk" / "migration lagging" amber pill during a staged
+//     rotation; takes precedence over age but yields to drift /
+//     unreachable.
 //   - lastVerifiedAt age: green ≤1h, yellow ≤24h, orange >24h
 //
-// Drift > age: a known-drifted node always pills as drift even if
-// recently verified, because that's the more actionable signal.
+// Priority: drift > unreachable > unverified > old-psk > age-based.
+// A node that's known-drifted always pills as drift even if recently
+// verified; a node mid-migration takes the amber "old psk" pill so the
+// operator sees at-a-glance which fleet members still need Phase B/C
+// to push them forward.
 
 import type { DriftStatus } from '../api/fleetSecurity'
 
 interface TrustHealthPillProps {
   driftStatus: DriftStatus
   lastVerifiedAt?: string
+  // currentPskFp + fleetPrimaryFp drive the migration-lagging
+  // detection. Both optional -- when either is missing (no rotation
+  // ever ran, or the node is unverified post-000028) the pill falls
+  // back to age-based status.
+  currentPskFp?: string
+  fleetPrimaryFp?: string
 }
 
 interface PillStyle {
@@ -22,6 +35,8 @@ interface PillStyle {
 function pillFor(
   driftStatus: DriftStatus,
   lastVerifiedAt?: string,
+  currentPskFp?: string,
+  fleetPrimaryFp?: string,
 ): PillStyle {
   if (driftStatus === 'drift') {
     return {
@@ -42,6 +57,20 @@ function pillFor(
       cls: 'bg-dark-700/40 text-dark-400 border-dark-600/40',
       label: 'unverified',
       title: 'Trust state has never been verified for this node',
+    }
+  }
+
+  // Migration lagging: the node was last verified on a different PSK
+  // than the channel's current PRIMARY. Indicates a staged rotation
+  // landed on the rest of the fleet but missed this node. Operator
+  // action: Retry the Phase B/C against this target. Takes precedence
+  // over age-based stale because the fix here is rotation-specific,
+  // not "click Verify."
+  if (currentPskFp && fleetPrimaryFp && currentPskFp !== fleetPrimaryFp) {
+    return {
+      cls: 'bg-amber-600/20 text-amber-300 border-amber-600/40',
+      label: 'old psk',
+      title: `Last verified on PSK ${currentPskFp.slice(0, 14)}… while fleet PRIMARY is ${fleetPrimaryFp.slice(0, 14)}… -- run Retry on this node to push the new PSK`,
     }
   }
 
@@ -83,8 +112,10 @@ function formatAge(ms: number): string {
 export default function TrustHealthPill({
   driftStatus,
   lastVerifiedAt,
+  currentPskFp,
+  fleetPrimaryFp,
 }: TrustHealthPillProps) {
-  const { cls, label, title } = pillFor(driftStatus, lastVerifiedAt)
+  const { cls, label, title } = pillFor(driftStatus, lastVerifiedAt, currentPskFp, fleetPrimaryFp)
   return (
     <span
       title={title}

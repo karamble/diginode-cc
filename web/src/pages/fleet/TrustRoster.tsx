@@ -30,6 +30,15 @@ export default function TrustRoster() {
     queryFn: () => fleetSecurityApi.listIdentities(),
   })
 
+  // Fleet PRIMARY fingerprint -- used by TrustHealthPill to detect a
+  // node still on a stale PSK after a staged rotation. listChannels is
+  // already cached in ChannelsCard so this is usually a free lookup.
+  const { data: channels } = useQuery<Awaited<ReturnType<typeof fleetSecurityApi.listChannels>>>({
+    queryKey: ['fleet-security', 'channels'],
+    queryFn: () => fleetSecurityApi.listChannels(),
+  })
+  const fleetPrimaryFp = channels?.find((c) => c.index === 0)?.pskFingerprint
+
   const labelByFp = new Map<string, IdentityRecord>()
   for (const r of registry ?? []) labelByFp.set(r.fingerprint, r)
 
@@ -107,6 +116,8 @@ export default function TrustRoster() {
                     <TrustHealthPill
                       driftStatus={n.driftStatus}
                       lastVerifiedAt={n.lastVerifiedAt}
+                      currentPskFp={n.currentPskFp}
+                      fleetPrimaryFp={fleetPrimaryFp}
                     />
                   </td>
                   <td className="py-2 pr-3">

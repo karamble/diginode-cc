@@ -129,6 +129,7 @@ func (s *Store) ListNodeTrust(ctx context.Context) ([]NodeTrustRecord, error) {
 		       COALESCE(t.last_verify_method, ''),
 		       t.last_drift_check_at,
 		       COALESCE(t.drift_status, 'unknown'),
+		       COALESCE(t.current_psk_fp, ''),
 		       COALESCE(t.notes, '')
 		  FROM nodes n
 		  LEFT JOIN fleet_node_trust t ON t.node_num = n.node_num
@@ -146,7 +147,7 @@ func (s *Store) ListNodeTrust(ctx context.Context) ([]NodeTrustRecord, error) {
 		if err := rows.Scan(&nodeNum, &r.NodeID, &r.LongName, &r.ShortName,
 			&r.SensorShortID, &r.LastHeard, &r.IsOnline, &fpsJSON,
 			&r.IsManaged, &r.LastVerifiedAt, &r.LastVerifyMethod,
-			&r.LastDriftCheckAt, &r.DriftStatus, &r.Notes); err != nil {
+			&r.LastDriftCheckAt, &r.DriftStatus, &r.CurrentPSKFP, &r.Notes); err != nil {
 			return nil, fmt.Errorf("scan node trust: %w", err)
 		}
 		r.NodeNum = uint32(nodeNum)
@@ -178,6 +179,7 @@ func (s *Store) GetNodeTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRec
 		       COALESCE(t.last_verify_method, ''),
 		       t.last_drift_check_at,
 		       COALESCE(t.drift_status, 'unknown'),
+		       COALESCE(t.current_psk_fp, ''),
 		       COALESCE(t.notes, '')
 		  FROM nodes n
 		  LEFT JOIN fleet_node_trust t ON t.node_num = n.node_num
@@ -185,7 +187,7 @@ func (s *Store) GetNodeTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRec
 		Scan(&nn, &r.NodeID, &r.LongName, &r.ShortName, &r.SensorShortID,
 			&r.LastHeard, &r.IsOnline, &fpsJSON, &r.IsManaged,
 			&r.LastVerifiedAt, &r.LastVerifyMethod, &r.LastDriftCheckAt,
-			&r.DriftStatus, &r.Notes)
+			&r.DriftStatus, &r.CurrentPSKFP, &r.Notes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
