@@ -166,6 +166,7 @@ type Dispatcher struct {
 	chatHandler          ChatHandler
 	posHandler           PositionHandler
 	statusRequestHandler StatusRequestHandler
+	adminReplyHandler    AdminReplyHandler
 	onDeviceTime         func(t time.Time)
 	onAlertEval          func(ctx context.Context, evt alerts.DetectionEvent)
 	onWebhookFire        func(eventType string, payload interface{})
@@ -241,6 +242,23 @@ type StatusRequestHandler interface {
 // PositionHandler processes position updates.
 type PositionHandler interface {
 	HandlePosition(from uint32, pos *serial.PositionData)
+}
+
+// AdminReplyHandler receives inbound AdminMessage payloads (PortNum_ADMIN_APP)
+// and Routing acks (PortNum_ROUTING) and matches them to in-flight admin
+// transactions. Implemented by fleetsec.Service. The dispatcher only routes;
+// fleetsec does the protobuf decoding via meshpb so the dispatcher stays free
+// of Curve25519 / AdminMessage variant logic.
+type AdminReplyHandler interface {
+	// HandleAdminReply is called for every PortNum_ADMIN_APP packet from any
+	// node (including the local Heltec). Payload is the marshalled
+	// meshpb.AdminMessage; requestID is Data.request_id (the originating
+	// packet ID this is a reply to, or 0 for unsolicited admin packets).
+	HandleAdminReply(from uint32, requestID uint32, payload []byte)
+	// HandleRoutingAck is called for every PortNum_ROUTING packet — Routing
+	// protobuf carries Routing.error_reason; requestID identifies which of
+	// our outbound packets is being acked.
+	HandleRoutingAck(from uint32, requestID uint32, payload []byte)
 }
 
 // NewDispatcher creates a new packet dispatcher.
@@ -331,6 +349,12 @@ func (d *Dispatcher) SetChatHandler(h ChatHandler) { d.chatHandler = h }
 // set, every inbound TEXTMSG is forwarded so the handler can decide whether
 // the payload is a "@<us> STATUS" request and reply accordingly.
 func (d *Dispatcher) SetStatusRequestHandler(h StatusRequestHandler) { d.statusRequestHandler = h }
+
+// SetAdminReplyHandler wires fleetsec.Service into the dispatch loop so it
+// can receive AdminMessage replies and Routing acks. May be nil — when nil,
+// PortNum_ADMIN_APP and PortNum_ROUTING packets are still handled (logged)
+// but no in-flight transaction state is updated.
+func (d *Dispatcher) SetAdminReplyHandler(h AdminReplyHandler) { d.adminReplyHandler = h }
 
 // SetDeviceTimeCallback sets a callback invoked when a device time is received.
 func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
@@ -582,8 +606,22 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		}
 
 	case PortNumRouting:
-		// Routing ACKs, error codes
-		slog.Debug("routing packet", "from", mp.From)
+		// Routing acks: error codes for an outbound packet identified by
+		// Data.request_id. Forward to fleetsec so it can resolve in-flight
+		// admin transactions.
+		slog.Debug("routing ack", "from", mp.From, "request_id", mp.RequestID)
+		if d.adminReplyHandler != nil {
+			d.adminReplyHandler.HandleRoutingAck(mp.From, mp.RequestID, mp.Payload)
+		}
+
+	case PortNumAdmin:
+		// AdminMessage replies (get_channel_response, get_config_response,
+		// remote-admin command echoes). fleetsec decodes via meshpb to
+		// extract the response variant and match it to a pending request.
+		slog.Debug("admin packet", "from", mp.From, "request_id", mp.RequestID, "len", len(mp.Payload))
+		if d.adminReplyHandler != nil {
+			d.adminReplyHandler.HandleAdminReply(mp.From, mp.RequestID, mp.Payload)
+		}
 
 	case PortNumTraceroute:
 		slog.Debug("traceroute packet", "from", mp.From)
