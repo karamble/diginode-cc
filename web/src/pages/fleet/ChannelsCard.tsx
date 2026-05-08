@@ -113,6 +113,10 @@ export default function ChannelsCard() {
                 const r = pendingRetirements?.[ch.index]
                 if (r) setRetireRotation(r)
               }}
+              onReopenStatus={() => {
+                const r = pendingRetirements?.[ch.index]
+                if (r) setActiveRotation({ id: r.id, pskB64: '' })
+              }}
             />
           ))}
         </div>
@@ -169,9 +173,14 @@ interface ChannelPanelProps {
   // channel.
   pendingRetirement?: Rotation
   onRetire: () => void
+  // onReopenStatus reopens the rotation progress drawer for this
+  // channel's pending rotation. Lets operators get back to the Retry
+  // button after they've closed the modal but the rotation still has
+  // failed targets that need to catch up.
+  onReopenStatus: () => void
 }
 
-function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire }: ChannelPanelProps) {
+function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire, onReopenStatus }: ChannelPanelProps) {
   const ageStr = channel.lastRotatedAt
     ? formatRelative(channel.lastRotatedAt)
     : '—'
@@ -231,16 +240,26 @@ function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire 
 
       {pendingRetirement && retireSummary && (
         <div className="mb-3 rounded border border-amber-700/30 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-100/90">
-          <div className="flex items-center justify-between">
+          <div className="flex items-center justify-between gap-3">
             <span>
               Migration in progress -- both PSKs alive on Pi
               {retireSummary.gateOpen
                 ? ' (ready to retire)'
                 : ` (${retireSummary.total - retireSummary.onNew} node${retireSummary.total - retireSummary.onNew === 1 ? '' : 's'} still on old PSK)`}
             </span>
-            <span className="font-mono text-[10px] opacity-70">
-              {retireSummary.onNew}/{retireSummary.total} on new
-            </span>
+            <div className="flex items-center gap-2 shrink-0">
+              <span className="font-mono text-[10px] opacity-70">
+                {retireSummary.onNew}/{retireSummary.total} on new
+              </span>
+              <button
+                type="button"
+                onClick={onReopenStatus}
+                title="Reopen the rotation status drawer to see failed targets and retry"
+                className="px-2 py-0.5 rounded border border-amber-600/40 bg-amber-700/20 hover:bg-amber-700/40 text-[10px] text-amber-100"
+              >
+                Open status
+              </button>
+            </div>
           </div>
         </div>
       )}
