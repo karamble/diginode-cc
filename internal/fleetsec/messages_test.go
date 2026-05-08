@@ -25,9 +25,17 @@ func roundTripAdmin(t *testing.T, m *pb.AdminMessage) *pb.AdminMessage {
 }
 
 func TestAdminGetChannel(t *testing.T) {
+	// Wire encoding is (idx+1) per the proto comment about avoiding
+	// the protobuf-zero-value-is-absent gotcha; AdminGetChannel(2)
+	// must serialise as get_channel_request=3, AdminGetChannel(0) as
+	// get_channel_request=1 (the firmware refuses 0 as BAD_REQUEST).
 	m := roundTripAdmin(t, AdminGetChannel(2))
-	if m.GetGetChannelRequest() != 2 {
-		t.Errorf("get_channel_request = %d, want 2", m.GetGetChannelRequest())
+	if m.GetGetChannelRequest() != 3 {
+		t.Errorf("get_channel_request = %d, want 3 (slot 2 wire-encoded as +1)", m.GetGetChannelRequest())
+	}
+	m = roundTripAdmin(t, AdminGetChannel(0))
+	if m.GetGetChannelRequest() != 1 {
+		t.Errorf("AdminGetChannel(0) wire = %d, want 1 (must NOT be 0)", m.GetGetChannelRequest())
 	}
 }
 

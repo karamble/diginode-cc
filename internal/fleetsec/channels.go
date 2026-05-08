@@ -1,6 +1,7 @@
 package fleetsec
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -177,22 +178,228 @@ func (s *Service) RotatePSK(
 	return rotID, nil
 }
 
-// chooseStagingSlot picks the channel index where the new PSK lives
-// during the rotation. For now: always use slot 1 unless the operator
-// has rotated PRIMARY there for some reason. Future: scan
-// fleet_channels for the lowest unused slot in [1..7] and avoid
-// PRIMARY/SECONDARY collisions. The chosen slot is pinned on the
-// rotation row so retries find the same definition on the remotes.
-func (s *Service) chooseStagingSlot(currentPrimary int32) (int32, error) {
-	const defaultStaging int32 = 1
-	if currentPrimary == defaultStaging {
-		// Edge case: PRIMARY is on slot 1 already; punt to slot 2 so we
-		// don't overwrite the active channel. A more sophisticated picker
-		// would scan all 8 slots; for the documented "rotate channel 0"
-		// flow this branch never fires.
-		return 2, nil
+// probeSlotsLocal scans slots 0..7 on the local Heltec via
+// AdminGetChannel. Returns the set of DISABLED slot indices and the
+// PRIMARY slot. Slots that fail to probe are treated as "unknown" --
+// excluded from the empty set so the picker won't write to them.
+func (s *Service) probeSlotsLocal(ctx context.Context) (empty map[int32]bool, primary int32, err error) {
+	empty = make(map[int32]bool)
+	primary = -1
+	for idx := int32(0); idx < 8; idx++ {
+		s.adminMu.Lock()
+		reply, perr := s.runLocalAdmin(ctx, AdminGetChannel(uint32(idx)), "local-probe-channel")
+		s.adminMu.Unlock()
+		if perr != nil {
+			continue
+		}
+		ch, cerr := extractChannel(reply)
+		if cerr != nil {
+			continue
+		}
+		switch ch.GetRole() {
+		case pb.Channel_PRIMARY:
+			primary = idx
+		case pb.Channel_DISABLED:
+			empty[idx] = true
+		}
 	}
-	return defaultStaging, nil
+	if primary < 0 {
+		return empty, primary, fmt.Errorf("no PRIMARY channel found on local Heltec")
+	}
+	return empty, primary, nil
+}
+
+// remoteSlotIsDisabled probes a single slot on one remote via PKC and
+// returns true iff the slot reports role=DISABLED. Used by the staging
+// picker to verify a candidate slot per-remote without walking all 8
+// slots (the bulk-probe was the dominant cost in early rotations,
+// pushing pre-flight wall to ~80s for a 2-remote fleet). A probe error
+// is treated as "remote unreachable" and reported via the bool/err
+// pair so the picker can exclude that remote from consensus rather
+// than abort.
+func (s *Service) remoteSlotIsDisabled(ctx context.Context, nodeNum uint32, idx int32) (disabled bool, reachable bool, err error) {
+	s.adminMu.Lock()
+	reply, perr := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(idx)), "remote-probe-channel")
+	s.adminMu.Unlock()
+	if perr != nil {
+		return false, false, perr
+	}
+	ch, cerr := extractChannel(reply)
+	if cerr != nil {
+		return false, true, cerr
+	}
+	return ch.GetRole() == pb.Channel_DISABLED, true, nil
+}
+
+// chooseStagingSlot picks a slot index that's DISABLED on the local
+// Heltec AND DISABLED on every reachable remote target.
+//
+// Cost-aware probing: walks candidates from the local probe (8 fast
+// local admin calls) and only probes each REMOTE for the SPECIFIC
+// candidate, not all 8 slots. On a healthy fleet that's been Phase-0
+// reconciled, the first candidate (lowest empty != local PRIMARY) is
+// usable and we issue exactly len(remotes) PKC admin calls. Worst
+// case (every candidate collides with some remote) degrades to 8 *
+// len(remotes) -- same as the old bulk-probe but only when actually
+// needed.
+//
+// Reachable-remote skew detection: if a candidate slot is reported as
+// non-DISABLED on a remote, that slot is rejected and we walk to the
+// next candidate. Result: rotation lands on a slot that's safe
+// everywhere; post-Phase-D the whole fleet sits on that slot.
+//
+// Unreachable remotes don't gate slot selection -- they're excluded
+// from the per-candidate probe and will fail Phase B normally with a
+// "remote unreachable" error, leaving the rest of the fleet to rotate
+// successfully.
+func (s *Service) chooseStagingSlot(ctx context.Context, channelIndex int32, remoteTargets []uint32) (int32, error) {
+	localEmpty, localPrimary, err := s.probeSlotsLocal(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("local slot probe: %w", err)
+	}
+	if len(localEmpty) == 0 {
+		return 0, fmt.Errorf("all 8 channel slots in use on local Heltec; cannot stage new PSK -- retire an old slot first")
+	}
+	for idx := int32(0); idx < 8; idx++ {
+		if idx == localPrimary {
+			continue
+		}
+		if !localEmpty[idx] {
+			continue
+		}
+		ok := true
+		for _, n := range remoteTargets {
+			disabled, reachable, perr := s.remoteSlotIsDisabled(ctx, n, idx)
+			if !reachable {
+				slog.Info("staging-slot probe: remote unreachable, excluded from consensus",
+					"node_num", n, "candidate_slot", idx, "error", perr)
+				continue
+			}
+			if !disabled {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return idx, nil
+		}
+	}
+	return 0, fmt.Errorf("no slot is DISABLED across local Heltec + %d remote target(s); fleet slot layout is too skewed for automated picking -- compact remote slots via USB", len(remoteTargets))
+}
+
+// readLocalChannel reads slot idx on the local Heltec via local admin.
+// Returns the full Channel proto (role + settings.psk + settings.name).
+func (s *Service) readLocalChannel(ctx context.Context, idx int32) (*pb.Channel, error) {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	reply, err := s.runLocalAdmin(ctx, AdminGetChannel(uint32(idx)), "local-read-channel")
+	if err != nil {
+		return nil, err
+	}
+	return extractChannel(reply)
+}
+
+// readRemoteChannel reads slot idx on the named remote via PKC.
+func (s *Service) readRemoteChannel(ctx context.Context, nodeNum uint32, idx int32) (*pb.Channel, error) {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	reply, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(idx)), "remote-read-channel")
+	if err != nil {
+		return nil, err
+	}
+	return extractChannel(reply)
+}
+
+// channelStateMatches returns true when two Channel rows represent the
+// same role + PSK material. Name + uplink/downlink flags are not
+// reconciled by Phase 0 -- those are operator-owned cosmetics.
+func channelStateMatches(a, b *pb.Channel) bool {
+	if a.GetRole() != b.GetRole() {
+		return false
+	}
+	var pskA, pskB []byte
+	if a.GetSettings() != nil {
+		pskA = a.GetSettings().GetPsk()
+	}
+	if b.GetSettings() != nil {
+		pskB = b.GetSettings().GetPsk()
+	}
+	return bytes.Equal(pskA, pskB)
+}
+
+// reconcileRemoteSlots is Phase 0: it makes a remote's slot 0 and slot
+// 1 match the Pi's slot 0 and slot 1. The convention "diginode-cc owns
+// slots 0 and 1" means these slots ARE the staged-rotation working
+// area; if a remote drifted out of lockstep (partial-failure carryover,
+// USB-side intervention, missed retire), Phase 0 brings it back into
+// canonical alignment before the rotation runner picks a staging slot.
+//
+// Slots 2-7 are operator-owned and NEVER touched -- the remote can run
+// any ham/test/named channels there without interference.
+//
+// Order: write whichever slot Pi has as PRIMARY first. Firmware
+// auto-demotes the previous PRIMARY when a new PRIMARY is set, so this
+// avoids a transient no-PRIMARY window on the remote (which would
+// brick its radio mid-reconcile). Then write the other slot to its
+// canonical state (typically DISABLED post-retire).
+//
+// Returns nil if remote already matched (no writes issued). Returns
+// error on unreachable remote -- caller logs and proceeds; that
+// remote will surface as failed_b in the normal rotation flow.
+func (s *Service) reconcileRemoteSlots(ctx context.Context, nodeNum uint32) error {
+	piSlot0, err := s.readLocalChannel(ctx, 0)
+	if err != nil {
+		return fmt.Errorf("read local slot 0: %w", err)
+	}
+	piSlot1, err := s.readLocalChannel(ctx, 1)
+	if err != nil {
+		return fmt.Errorf("read local slot 1: %w", err)
+	}
+	remoteSlot0, err := s.readRemoteChannel(ctx, nodeNum, 0)
+	if err != nil {
+		return fmt.Errorf("read remote slot 0: %w", err)
+	}
+	remoteSlot1, err := s.readRemoteChannel(ctx, nodeNum, 1)
+	if err != nil {
+		return fmt.Errorf("read remote slot 1: %w", err)
+	}
+
+	piSlots := [2]*pb.Channel{piSlot0, piSlot1}
+	remoteSlots := [2]*pb.Channel{remoteSlot0, remoteSlot1}
+
+	// Order: PRIMARY-first when Pi has PRIMARY at slot 1, otherwise
+	// natural slot-0-first order. This sequencing ensures the remote
+	// always has at least one PRIMARY slot mid-reconcile -- never goes
+	// dark.
+	order := []int32{0, 1}
+	if piSlots[1].GetRole() == pb.Channel_PRIMARY && piSlots[0].GetRole() != pb.Channel_PRIMARY {
+		order = []int32{1, 0}
+	}
+	wrote := 0
+	for _, idx := range order {
+		pi := piSlots[idx]
+		rem := remoteSlots[idx]
+		if channelStateMatches(pi, rem) {
+			continue
+		}
+		var psk []byte
+		if pi.GetSettings() != nil {
+			psk = pi.GetSettings().GetPsk()
+		}
+		msg := AdminSetChannel(idx, "", pi.GetRole(), psk)
+		s.adminMu.Lock()
+		_, err := s.runRemoteAdmin(ctx, nodeNum, msg, fmt.Sprintf("phase0-mirror-slot%d", idx))
+		s.adminMu.Unlock()
+		if err != nil {
+			return fmt.Errorf("mirror slot %d (role=%s): %w", idx, pi.GetRole().String(), err)
+		}
+		wrote++
+	}
+	if wrote > 0 {
+		slog.Info("phase 0: reconciled remote slots to pi state",
+			"node_num", nodeNum, "writes", wrote)
+	}
+	return nil
 }
 
 // applyLocalStagingChannel runs Phase A: write the new PSK into a
@@ -219,13 +426,25 @@ func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32
 // ride the unchanged PRIMARY (old PSK) so the routing-layer round-trip
 // is fully decryptable. The worker wraps this in the per-target retry
 // loop and broadcasts phase transitions via transitionTarget.
+//
+// Cross-fleet safety: AdminGetChannel(stagingIdx) is issued FIRST. If
+// the slot already holds a PRIMARY/SECONDARY role on the remote, abort
+// without writing -- proceeding would overwrite an active channel and
+// leave the remote with a broken slot layout (worst case: no PRIMARY =
+// no radio = stranded). This guards against the slot-skew class of
+// bug where the Pi-local picker chose a slot index that's empty on Pi
+// but live on a remote (out-of-lockstep state from a prior partial
+// rotation or manual USB intervention). The probe doubles as the
+// session_passkey establishment that the SetChannel call below needs.
 func (s *Service) pushStagingToRemote(ctx context.Context, nodeNum uint32, stagingIdx int32, newPSK []byte) error {
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()
-	// Establish session_passkey via GetConfig SECURITY first; the
-	// SetChannel that follows requires the firmware-emitted passkey.
-	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session"); err != nil {
+	probeReply, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(stagingIdx)), "remote-probe-staging-slot")
+	if err != nil {
 		return fmt.Errorf("session establish: %w", err)
+	}
+	if ch, perr := extractChannel(probeReply); perr == nil && ch.GetRole() != pb.Channel_DISABLED {
+		return fmt.Errorf("staging slot %d already in use on remote (role=%s) -- refusing to overwrite; reset the remote slot via USB or pick a different staging index", stagingIdx, ch.GetRole().String())
 	}
 	setMsg := AdminSetChannel(stagingIdx, "", pb.Channel_SECONDARY, newPSK)
 	if _, err := s.runRemoteAdmin(ctx, nodeNum, setMsg, "remote-stage-secondary"); err != nil {
@@ -330,11 +549,34 @@ func (s *Service) runPSKRotation(
 	localNum := s.localNode.LocalNodeNum()
 	pskFP := Fingerprint(newPSK)
 
-	// Pick a staging slot and pin it on the rotation row so retries find
-	// the same definition on the remotes. For the documented "rotate
-	// channel 0" flow this picks slot 1; chooseStagingSlot handles the
-	// edge case where slot 1 is the operator's PRIMARY.
-	stagingIdx, sErr := s.chooseStagingSlot(channelIndex)
+	// Build remote-target list once for Phase 0 + Phase A.
+	remoteNodeNums := make([]uint32, 0, len(targets))
+	for _, t := range targets {
+		if t.NodeNum != localNum {
+			remoteNodeNums = append(remoteNodeNums, t.NodeNum)
+		}
+	}
+
+	// Phase 0: reconcile each reachable remote's slots 0/1 to mirror
+	// Pi's slots 0/1 (Pi is the source of truth). Brings out-of-lockstep
+	// remotes back to canonical alignment so the cross-fleet picker
+	// below has a clean fleet to choose from. Unreachable remotes are
+	// logged + skipped -- they'll fail Phase B with a "remote
+	// unreachable" error in the normal flow.
+	for _, n := range remoteNodeNums {
+		if rErr := s.reconcileRemoteSlots(ctx, n); rErr != nil {
+			slog.Warn("phase 0: reconcile remote slots failed -- proceeding without alignment",
+				"rotation_id", rotID, "node_num", n, "error", rErr)
+		}
+	}
+
+	// Phase A: pick a staging slot via cross-fleet probe (pi-local +
+	// every reachable remote target). Post-Phase-0 the fleet should be
+	// aligned so the picker picks deterministically; the cross-probe is
+	// belt-and-suspenders against any remote that didn't reconcile
+	// (e.g., admin-key drift, PKC failure). Pin the chosen index on
+	// the rotation row so retries land at the same slot on every node.
+	stagingIdx, sErr := s.chooseStagingSlot(ctx, channelIndex, remoteNodeNums)
 	if sErr != nil {
 		slog.Error("choose staging slot",
 			"rotation_id", rotID, "error", sErr)
@@ -462,6 +704,26 @@ func (s *Service) runPSKRotation(
 			"rotation_id", rotID, "error", err)
 	}
 
+	// Update the channel snapshot with the new PSK fingerprint FIRST --
+	// the trust-refresh loop below calls GetTrust, which stamps each
+	// remote's current_psk_fp from localPrimaryPSKFP(), which reads from
+	// this row. If we updated the snapshot after the refresh loop, every
+	// node would get stamped with the OLD fingerprint and the retirement
+	// gate would stay closed forever.
+	if err := s.store.UpsertChannel(ctx, ChannelRecord{
+		Index:           channelIndex,
+		Name:            "", // preserved via COALESCE in store
+		Role:            "",
+		PSKFingerprint:  Fingerprint(newPSK),
+		PSKLength:       len(newPSK),
+		LastRotatedAt:   timeNowPtr(),
+		LastRotatedBy:   userID,
+		LastRotationID:  rotID,
+	}); err != nil {
+		slog.Error("update channel after rotation",
+			"rotation_id", rotID, "error", err)
+	}
+
 	// Refresh current_psk_fp for every member that landed on the new PSK
 	// -- a successful Phase C / D doesn't itself prove channel-layer
 	// alignment (the Pi could be on the new PRIMARY while a remote is
@@ -477,21 +739,6 @@ func (s *Service) runPSKRotation(
 			slog.Warn("post-rotation trust refresh",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
 		}
-	}
-
-	// Update the channel snapshot with the new PSK fingerprint.
-	if err := s.store.UpsertChannel(ctx, ChannelRecord{
-		Index:           channelIndex,
-		Name:            "", // preserved via COALESCE in store
-		Role:            "",
-		PSKFingerprint:  Fingerprint(newPSK),
-		PSKLength:       len(newPSK),
-		LastRotatedAt:   timeNowPtr(),
-		LastRotatedBy:   userID,
-		LastRotationID:  rotID,
-	}); err != nil {
-		slog.Error("update channel after rotation",
-			"rotation_id", rotID, "error", err)
 	}
 
 	// Final broadcast: done flag set; UI's progress drawer transitions
@@ -564,6 +811,19 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	if rec.Kind != RotationKindPSK {
 		return nil, fmt.Errorf("rotation %s is not a PSK rotation", rotID)
 	}
+
+	// Detach from the caller's deadline so the per-remote PKC round
+	// (DefaultRemoteAdminTimeout = 30s, GetConfig + SetChannel each)
+	// can finish even when the inbound HTTP request times out. A
+	// 2-remote fleet needs ~2*60s wall worst-case; without this
+	// detach the second remote's first transaction starts on an
+	// already-expired context and aborts immediately. Audit + DB row
+	// state still record the outcome, so the UI can re-trigger Retire
+	// if the operator gives up waiting.
+	deadline := 2*time.Minute + time.Duration(2*len(rec.Targets))*DefaultRemoteAdminTimeout
+	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
+	defer cancel()
+	ctx = bgCtx
 	if rec.PiLocalPhase != PiPhasePhaseDPromoted {
 		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want phase_d_promoted)", rec.PiLocalPhase)
 	}

@@ -387,8 +387,11 @@ func (s *Server) setupRoutes() chi.Router {
 					r.Put("/trust/{nodeNum}/admin-keys", s.handleFleetSecSetAdminKeys)
 					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
 					r.Post("/channels/{idx}/rotate", s.handleFleetSecRotatePSK)
-					r.Post("/rotations/{id}/retry", s.handleFleetSecRetryRotation)
-					r.Post("/rotations/{id}/retire-old-psk", s.handleFleetSecRetireOldPSK)
+					// Retry + retire walk every fleet member sequentially over PKC,
+					// each transaction up to DefaultRemoteAdminTimeout = 30s. The
+					// global 30s router timeout is far too short -- override per-route.
+					r.With(middleware.Timeout(5 * time.Minute)).Post("/rotations/{id}/retry", s.handleFleetSecRetryRotation)
+					r.With(middleware.Timeout(5 * time.Minute)).Post("/rotations/{id}/retire-old-psk", s.handleFleetSecRetireOldPSK)
 					r.Post("/recovery", s.handleFleetSecStartRecovery)
 					r.Get("/recovery/{id}", s.handleFleetSecGetRecovery)
 				})

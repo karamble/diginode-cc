@@ -17,10 +17,17 @@ import pb "github.com/karamble/diginode-cc/internal/meshpb"
 // current settings (name, role, PSK). Used as the first half of the
 // "patch one PSK without clobbering name/role" pattern that PSK
 // rotation uses.
+//
+// Wire encoding: the firmware's get_channel_request field is sent as
+// (channel_index + 1) -- per the upstream proto comment, this avoids
+// the protobuf-zero-value-is-absent gotcha that would otherwise make
+// idx=0 indistinguishable from "field not set". Sending raw idx=0
+// produces routing error BAD_REQUEST. The GetChannelResponse Channel
+// proto's Index field is still 0-indexed (the actual slot).
 func AdminGetChannel(idx uint32) *pb.AdminMessage {
 	return &pb.AdminMessage{
 		PayloadVariant: &pb.AdminMessage_GetChannelRequest{
-			GetChannelRequest: idx,
+			GetChannelRequest: idx + 1,
 		},
 	}
 }
