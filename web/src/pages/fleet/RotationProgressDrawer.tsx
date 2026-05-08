@@ -78,8 +78,8 @@ export default function RotationProgressDrawer({
   }, [rotationId, qc])
 
   const retryM = useMutation({
-    mutationFn: ({ targets, pskB64 }: { targets: number[]; pskB64: string }) =>
-      fleetSecurityApi.retryRotation(rotationId, pskB64, targets),
+    mutationFn: ({ targets, pskB64 }: { targets: number[]; pskB64?: string }) =>
+      fleetSecurityApi.retryRotation(rotationId, targets, pskB64),
     onSuccess: () => {
       refetch()
     },
@@ -151,26 +151,29 @@ export default function RotationProgressDrawer({
                   !{t.nodeNum.toString(16).padStart(8, '0')}: {t.lastError}
                 </div>
               ))}
-              <Field label="Re-paste PSK to retry (32-byte base64)">
+              <Field label="Override PSK (optional, base64 — 16 or 32 bytes)">
                 <input
                   type="text"
                   value={retryPSK}
                   onChange={(e) => setRetryPSK(e.target.value)}
                   spellCheck={false}
+                  placeholder="leave blank to use the rotation's stored PSK"
                   className="w-full px-3 py-1.5 rounded bg-dark-900 border border-dark-600 text-xs font-mono text-dark-200 focus:border-primary-500 focus:outline-none"
                 />
                 <p className="mt-1 text-[10px] text-dark-500">
-                  Required because diginode-cc never persists PSK plaintext.
-                  Must match this rotation's recorded fingerprint.
+                  Backend stashes the new PSK on rotation-start and clears it once every
+                  target acks; while any target is failed the retry uses the stored value
+                  automatically. Override only for fully-acked rotations or to send a
+                  different PSK.
                 </p>
               </Field>
               <button
                 type="button"
-                disabled={!retryPSK.trim() || retryM.isPending}
+                disabled={retryM.isPending}
                 onClick={() =>
                   retryM.mutate({
                     targets: failed.map((t) => t.nodeNum),
-                    pskB64: retryPSK.trim(),
+                    pskB64: retryPSK.trim() || undefined,
                   })
                 }
                 className="px-3 py-1.5 rounded bg-amber-600 hover:bg-amber-500 disabled:bg-dark-700 disabled:text-dark-500 text-xs text-white"

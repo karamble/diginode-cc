@@ -289,22 +289,80 @@ func (s *Store) UpsertChannel(ctx context.Context, r ChannelRecord) error {
 // InsertRotation creates a new rotation row and returns its UUID. Targets
 // are typically all in 'pending' status at insert time; UpdateRotation
 // transitions them as the orchestrator processes them.
-func (s *Store) InsertRotation(ctx context.Context, r RotationRecord) (string, error) {
+//
+// rawPSK is stored on fleet_rotations.new_psk so RetryRotation can resume
+// the same rotation without the operator having to re-supply 16 random
+// bytes they never saw. ClearRotationPSK nulls the column once every
+// target has reached acked. Pass nil for non-PSK rotations.
+func (s *Store) InsertRotation(ctx context.Context, r RotationRecord, rawPSK []byte) (string, error) {
 	targets, err := json.Marshal(r.Targets)
 	if err != nil {
 		return "", fmt.Errorf("encode targets: %w", err)
 	}
 	var id string
 	err = s.db.Pool.QueryRow(ctx, `
-		INSERT INTO fleet_rotations (kind, channel_index, started_by, targets, new_psk_fp, notes)
-		VALUES ($1, $2, NULLIF($3, '')::uuid, $4, NULLIF($5, ''), NULLIF($6, ''))
+		INSERT INTO fleet_rotations (kind, channel_index, started_by, targets, new_psk_fp, notes, new_psk)
+		VALUES ($1, $2, NULLIF($3, '')::uuid, $4, NULLIF($5, ''), NULLIF($6, ''), $7)
 		RETURNING id::text`,
-		string(r.Kind), r.ChannelIndex, r.StartedBy, targets, r.NewPSKFP, r.Notes).
+		string(r.Kind), r.ChannelIndex, r.StartedBy, targets, r.NewPSKFP, r.Notes, rawPSK).
 		Scan(&id)
 	if err != nil {
 		return "", fmt.Errorf("insert rotation: %w", err)
 	}
 	return id, nil
+}
+
+// GetRotationPSK fetches the persisted raw PSK for an in-flight rotation.
+// Returns (nil, nil) when the column is NULL -- either the rotation has
+// fully completed (PSK cleared by ClearRotationPSK) or the rotation
+// pre-dates migration 000026. Caller treats nil as "operator must supply".
+func (s *Store) GetRotationPSK(ctx context.Context, id string) ([]byte, error) {
+	var psk []byte
+	err := s.db.Pool.QueryRow(ctx,
+		`SELECT new_psk FROM fleet_rotations WHERE id = $1`, id).Scan(&psk)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get rotation psk: %w", err)
+	}
+	return psk, nil
+}
+
+// MarkTrustVerifiedNow refreshes only the verification timestamps on a
+// trust row, without re-reading SecurityConfig. Called when a successful
+// admin operation (PSK rotation ack, etc) proves the node is reachable
+// and accepting our admin packets -- weaker evidence than a full
+// GetConfig readback, but enough to displace the "stale" pill the
+// frontend would otherwise show on a node that just rotated.
+//
+// admin_key_fps + is_managed are deliberately left untouched: they
+// reflect what we last actually read from the node, and a SetChannel ack
+// doesn't tell us anything new about them.
+func (s *Store) MarkTrustVerifiedNow(ctx context.Context, nodeNum uint32, method VerifyMethod) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		UPDATE fleet_node_trust
+		   SET last_verified_at = now(),
+		       last_verify_method = $2,
+		       last_drift_check_at = now()
+		 WHERE node_num = $1`, nodeNum, string(method))
+	if err != nil {
+		return fmt.Errorf("mark trust verified: %w", err)
+	}
+	return nil
+}
+
+// ClearRotationPSK NULLs fleet_rotations.new_psk. Called by the rotation
+// runner once every target reaches acked, so a fully-successful rotation
+// doesn't leave the raw PSK at rest in the DB longer than necessary.
+// Failed-target rotations keep the PSK so RetryRotation works.
+func (s *Store) ClearRotationPSK(ctx context.Context, id string) error {
+	_, err := s.db.Pool.Exec(ctx,
+		`UPDATE fleet_rotations SET new_psk = NULL WHERE id = $1`, id)
+	if err != nil {
+		return fmt.Errorf("clear rotation psk: %w", err)
+	}
+	return nil
 }
 
 // UpdateRotationTargets replaces the targets JSONB. Set completedAt non-nil

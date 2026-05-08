@@ -148,6 +148,27 @@ func DecodePubkeyB64(s string) ([]byte, error) {
 	return dec, nil
 }
 
+// DecodePSKB64 parses a Meshtastic channel PSK from base64. Accepts the
+// PSK lengths Meshtastic supports for an encrypted channel (16 or 32
+// bytes) and rejects anything else with a length error. Use this rather
+// than DecodePubkeyB64 on PSK paths -- the latter requires exactly 32
+// bytes and rejects the 16-byte AES-128 case the rotation worker uses
+// by default ("Random 16 bytes").
+func DecodePSKB64(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	dec, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		dec, err = base64.RawStdEncoding.DecodeString(s)
+		if err != nil {
+			return nil, fmt.Errorf("decode PSK: %w", err)
+		}
+	}
+	if err := ValidatePSK(dec); err != nil {
+		return nil, err
+	}
+	return dec, nil
+}
+
 // DecodePrivkeyB64 is the privkey equivalent of DecodePubkeyB64. Used
 // only on the inbound edge of ImportIdentity / RecoveryStart; the bytes
 // are then handed to the Heltec via SetSecurityConfig and zeroed.

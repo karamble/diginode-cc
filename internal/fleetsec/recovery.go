@@ -158,7 +158,7 @@ func (s *Service) StartRecovery(
 		Targets:      rotTargets,
 		NewPSKFP:     Fingerprint(newPub),
 		Notes:        opts.Notes,
-	})
+	}, nil) // recovery isn't a PSK rotation; no raw PSK to stash
 	if err != nil {
 		return "", fmt.Errorf("create recovery row: %w", err)
 	}

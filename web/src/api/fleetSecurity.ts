@@ -128,10 +128,14 @@ export const fleetSecurityApi = {
     ),
   getRotation: (id: string) =>
     api.get<Rotation>(`/fleet-security/rotations/${id}`),
-  retryRotation: (id: string, pskB64: string, targets: number[]) =>
+  // pskB64 is optional. The backend stashes the new PSK on rotation-start
+  // and clears it once every target is acked, so retries against a still-
+  // failed rotation work without an operator-supplied paste. Pass a value
+  // only for fully-acked rotations (rare) or to override.
+  retryRotation: (id: string, targets: number[], pskB64?: string) =>
     api.post<{ queued: boolean }>(
       `/fleet-security/rotations/${id}/retry`,
-      { pskB64, targets },
+      pskB64 ? { pskB64, targets } : { targets },
     ),
 
   // Recovery

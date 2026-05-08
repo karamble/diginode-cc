@@ -153,7 +153,7 @@ func (s *Service) RotatePSK(
 		Targets:      rotTargets,
 		NewPSKFP:     Fingerprint(pskCopy),
 		Notes:        opts.Notes,
-	})
+	}, pskCopy)
 	if err != nil {
 		return "", fmt.Errorf("create rotation: %w", err)
 	}
@@ -217,6 +217,18 @@ func (s *Service) runPSKRotation(
 		} else {
 			t.Status = TargetStatusAcked
 			t.LastError = ""
+			// A SetChannel ack proves the node is admin-reachable, which is
+			// what the trust roster's "verified" pill cares about. Refresh
+			// last_verified_at here so a freshly-rotated node doesn't keep
+			// showing as "stale" until the operator clicks Verify.
+			method := VerifyMethodRemotePKC
+			if t.NodeNum == localNum {
+				method = VerifyMethodLocalUSB
+			}
+			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, method); mErr != nil {
+				slog.Warn("mark trust verified after rotation ack",
+					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
+			}
 			slog.Info("PSK rotation target acked",
 				"rotation_id", rotID, "node_num", t.NodeNum)
 		}
@@ -267,6 +279,16 @@ func (s *Service) runPSKRotation(
 			"failures":    failures,
 			"new_psk_fp":  Fingerprint(newPSK),
 		})
+
+	// Drop the stashed raw PSK once every target reached acked. A failed
+	// target keeps the row populated so RetryRotation can resume the same
+	// PSK without the operator re-supplying it. The deferred zero of
+	// newPSK above clears the in-memory copy regardless.
+	if failures == 0 {
+		if err := s.store.ClearRotationPSK(ctx, rotID); err != nil {
+			slog.Warn("clear rotation psk", "rotation_id", rotID, "error", err)
+		}
+	}
 }
 
 // rotateOneTarget runs the get_channel + set_channel pair against one
@@ -401,11 +423,26 @@ func (s *Service) RetryRotation(
 	newPSK []byte,
 	targetNodeNums []uint32,
 ) error {
-	if err := ValidatePSK(newPSK); err != nil {
-		return err
-	}
 	rec, err := s.store.GetRotation(ctx, id)
 	if err != nil {
+		return err
+	}
+	// If the caller didn't supply a PSK, try to pick up the one we
+	// stashed when the rotation was originally launched. The column is
+	// NULLed only after every target reached acked, so any rotation
+	// with failed targets still has its PSK on hand.
+	if len(newPSK) == 0 {
+		stored, err := s.store.GetRotationPSK(ctx, id)
+		if err != nil {
+			return fmt.Errorf("fetch stored psk: %w", err)
+		}
+		if len(stored) == 0 {
+			return errors.New("no PSK supplied and none stored for this rotation (already fully acked, or pre-dates migration 000026)")
+		}
+		newPSK = stored
+		defer NewSecret(newPSK).Clear()
+	}
+	if err := ValidatePSK(newPSK); err != nil {
 		return err
 	}
 	if Fingerprint(newPSK) != rec.NewPSKFP {

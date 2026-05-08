@@ -398,12 +398,21 @@ func (s *Server) handleFleetSecRetryRotation(w http.ResponseWriter, r *http.Requ
 		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	psk, err := fleetsec.DecodePubkeyB64(body.PSKBase64)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "PSK decode: "+err.Error())
-		return
+	// pskB64 is optional. When empty the service picks up the PSK
+	// stashed at rotation-start (cleared once all targets reach
+	// acked), which is the common case from the UI's Retry button.
+	// When supplied it must decode to a valid Meshtastic PSK length
+	// (16 or 32 bytes) -- DecodePSKB64 enforces that.
+	var psk []byte
+	if body.PSKBase64 != "" {
+		var err error
+		psk, err = fleetsec.DecodePSKB64(body.PSKBase64)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "PSK decode: "+err.Error())
+			return
+		}
+		defer fleetsec.NewSecret(psk).Clear()
 	}
-	defer fleetsec.NewSecret(psk).Clear()
 
 	if err := s.svc.FleetSec.RetryRotation(r.Context(), userIDFromCtx(r), id, psk, body.Targets); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
