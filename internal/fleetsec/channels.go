@@ -570,21 +570,36 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// Phase A: pick a staging slot via cross-fleet probe (pi-local +
-	// every reachable remote target). Post-Phase-0 the fleet should be
-	// aligned so the picker picks deterministically; the cross-probe is
-	// belt-and-suspenders against any remote that didn't reconcile
-	// (e.g., admin-key drift, PKC failure). Pin the chosen index on
-	// the rotation row so retries land at the same slot on every node.
-	stagingIdx, sErr := s.chooseStagingSlot(ctx, channelIndex, remoteNodeNums)
-	if sErr != nil {
-		slog.Error("choose staging slot",
-			"rotation_id", rotID, "error", sErr)
-		return
-	}
-	if err := s.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
-		slog.Warn("persist staging_channel_index",
-			"rotation_id", rotID, "error", err)
+	// Phase A: pick a staging slot. On retry the staging slot was
+	// already pinned on the rotation row by the original run -- reuse
+	// it so the failed target lands on the SAME physical slot as the
+	// rest of the fleet (otherwise the cross-fleet picker would walk
+	// past Pi's now-occupied previous staging slot and land the
+	// retried target on a different slot, breaking fleet-wide slot
+	// alignment).
+	//
+	// Fresh rotation: probe Pi-local + every reachable remote target.
+	// Post-Phase-0 the fleet should be aligned so the picker picks
+	// deterministically; the cross-probe is belt-and-suspenders
+	// against any remote that didn't reconcile (e.g., admin-key drift,
+	// PKC failure).
+	var stagingIdx int32
+	if rec, gErr := s.store.GetRotation(ctx, rotID); gErr == nil && rec.StagingChannelIndex != nil {
+		stagingIdx = *rec.StagingChannelIndex
+		slog.Info("reusing pinned staging slot from rotation row",
+			"rotation_id", rotID, "staging_idx", stagingIdx)
+	} else {
+		var sErr error
+		stagingIdx, sErr = s.chooseStagingSlot(ctx, channelIndex, remoteNodeNums)
+		if sErr != nil {
+			slog.Error("choose staging slot",
+				"rotation_id", rotID, "error", sErr)
+			return
+		}
+		if err := s.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
+			slog.Warn("persist staging_channel_index",
+				"rotation_id", rotID, "error", err)
+		}
 	}
 
 	// Split target list: remotes go through Phase B + C; local goes
@@ -833,8 +848,42 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	if rec.ChannelIndex == nil {
 		return nil, errors.New("rotation has no channel_index")
 	}
-	oldChannelIdx := *rec.ChannelIndex
 	newPSKFP := rec.NewPSKFP
+
+	// Probe Pi-local for the SECONDARY slot that currently holds the
+	// OLD PSK. After Phase D the firmware auto-demoted the previous
+	// PRIMARY to SECONDARY at its prior slot index; that slot is what
+	// Phase E targets, NOT the rotation row's logical channel_index.
+	// If the rotation went through a Retry the staging slot (and thus
+	// the new PRIMARY slot post-Phase-D) may differ from
+	// rec.ChannelIndex, leaving rec.ChannelIndex pointing at the LIVE
+	// PRIMARY slot. Disabling that would brick the local Heltec.
+	oldChannelIdx := int32(-1)
+	for idx := int32(0); idx < 8; idx++ {
+		ch, perr := s.readLocalChannel(ctx, idx)
+		if perr != nil {
+			continue
+		}
+		if ch.GetRole() != pb.Channel_SECONDARY {
+			continue
+		}
+		var psk []byte
+		if ch.GetSettings() != nil {
+			psk = ch.GetSettings().GetPsk()
+		}
+		if Fingerprint(psk) != newPSKFP {
+			oldChannelIdx = idx
+			break
+		}
+	}
+	if oldChannelIdx < 0 {
+		// Nothing matches the OLD PSK pattern. Fall back to the rotation
+		// row's logical channel_index for backward compatibility, but
+		// log the unexpected case.
+		oldChannelIdx = *rec.ChannelIndex
+		slog.Info("retire: no SECONDARY slot with non-new PSK found; falling back to rotation channel_index",
+			"rotation_id", rotID, "channel_index", oldChannelIdx)
+	}
 
 	// Gate: every managed fleet member must show current_psk_fp == newPSKFP.
 	allMigrated, laggards, err := s.store.AllManagedNodesOnPSK(ctx, newPSKFP)
