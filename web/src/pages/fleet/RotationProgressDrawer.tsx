@@ -114,14 +114,29 @@ export default function RotationProgressDrawer({
     refetchInterval: (q) => (q.state.data?.completedAt ? false : 5000),
   })
 
+  // notices is a rolling buffer of recent status lines emitted by the
+  // backend rotation worker (Phase 0/A/B/C/D milestones, picker
+  // decisions, retry hints). Bottom-left status rail renders these.
+  // Newest at index 0; capped at 8 entries to bound re-renders.
+  const [notices, setNotices] = useState<{ ts: number; msg: string }[]>([])
+
   // Subscribe to WS progress events for THIS rotation -- updates land
   // immediately rather than waiting for the 5s poll.
   useEffect(() => {
     const handler = (payload: unknown) => {
       const evt = payload as RotationProgressEvent
       if (evt.rotationId !== rotationId) return
+      // Notice-only event: backend emits these at phase boundaries.
+      if (evt.notice) {
+        setNotices((prev) => {
+          const next = [{ ts: Date.now(), msg: evt.notice as string }, ...prev]
+          return next.slice(0, 8)
+        })
+      }
       // Patch the cached rotation in place so the UI updates without
-      // a network round-trip.
+      // a network round-trip. Notice-only events still carry targets
+      // (a snapshot at notice time), so this is safe to apply
+      // unconditionally.
       qc.setQueryData<Rotation | undefined>(
         ['fleet-security', 'rotation', rotationId],
         (prev) => {
@@ -279,6 +294,29 @@ export default function RotationProgressDrawer({
           )}
         </>
       )}
+
+      {/* Status rail · live worker notices in newest-first order. The
+          most recent line is rendered prominently; older lines fade
+          to muted text. Empty until the first notice arrives. Fixed
+          height keeps the modal layout stable across rotations. */}
+      <div className="mt-4 pt-3 border-t border-dark-700/40 min-h-[3.5rem]">
+        {notices.length === 0 ? (
+          <div className="text-[10px] uppercase tracking-wider text-dark-600">
+            waiting for worker…
+          </div>
+        ) : (
+          <div className="space-y-0.5">
+            <div className="text-[11px] text-emerald-300/90 font-mono">
+              ▶ {notices[0].msg}
+            </div>
+            {notices.slice(1, 4).map((n) => (
+              <div key={n.ts} className="text-[10px] text-dark-500 font-mono opacity-70">
+                · {n.msg}
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
 
       <ModalActions
         onCancel={onClose}

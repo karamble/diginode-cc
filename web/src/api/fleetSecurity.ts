@@ -256,6 +256,10 @@ export interface RotationProgressEvent {
   targets: RotationTarget[]
   done: boolean
   newPskFingerprint?: string
+  // Optional human-readable status line emitted at key rotation
+  // milestones. The drawer's status rail shows the most recent notice
+  // so operators see what the worker is doing without tailing logs.
+  notice?: string
 }
 
 export const FLEET_SEC_ROTATION_EVENT = 'fleet-security.rotation.progress'

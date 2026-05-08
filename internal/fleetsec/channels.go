@@ -24,6 +24,13 @@ type RotationProgressEvent struct {
 	Targets    []RotationTarget `json:"targets"`
 	Done       bool             `json:"done"`
 	NewPSKFP   string           `json:"newPskFingerprint,omitempty"`
+	// Notice is a short human-readable status line emitted at key
+	// rotation milestones ("Phase 0 reconcile on HB55", "Picked
+	// staging slot 1", etc). The drawer's status rail shows the
+	// most recent notice so operators see what the worker is doing
+	// without tailing logs. Empty when this event is a pure
+	// target-state delta with no narrative to add.
+	Notice string `json:"notice,omitempty"`
 }
 
 // EventFleetSecRotation is the WS event type fleetsec emits for
@@ -557,6 +564,8 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
+	s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Rotation started · %d targets, mapping fleet slot state…", len(targets)))
+
 	// Phase 0: reconcile each reachable remote's slots 0/1 to mirror
 	// Pi's slots 0/1 (Pi is the source of truth). Brings out-of-lockstep
 	// remotes back to canonical alignment so the cross-fleet picker
@@ -564,9 +573,11 @@ func (s *Service) runPSKRotation(
 	// logged + skipped -- they'll fail Phase B with a "remote
 	// unreachable" error in the normal flow.
 	for _, n := range remoteNodeNums {
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase 0 · reconciling slots on !%08x", n))
 		if rErr := s.reconcileRemoteSlots(ctx, n); rErr != nil {
 			slog.Warn("phase 0: reconcile remote slots failed -- proceeding without alignment",
 				"rotation_id", rotID, "node_num", n, "error", rErr)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase 0 · !%08x unreachable, will likely fail Phase B", n))
 		}
 	}
 
@@ -588,18 +599,21 @@ func (s *Service) runPSKRotation(
 		stagingIdx = *rec.StagingChannelIndex
 		slog.Info("reusing pinned staging slot from rotation row",
 			"rotation_id", rotID, "staging_idx", stagingIdx)
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Retry · resuming on staging slot %d", stagingIdx))
 	} else {
 		var sErr error
 		stagingIdx, sErr = s.chooseStagingSlot(ctx, channelIndex, remoteNodeNums)
 		if sErr != nil {
 			slog.Error("choose staging slot",
 				"rotation_id", rotID, "error", sErr)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Aborted · no safe staging slot: %s", sErr.Error()))
 			return
 		}
 		if err := s.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
 			slog.Warn("persist staging_channel_index",
 				"rotation_id", rotID, "error", err)
 		}
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Picked staging slot %d (free across fleet)", stagingIdx))
 	}
 
 	// Split target list: remotes go through Phase B + C; local goes
@@ -634,6 +648,7 @@ func (s *Service) runPSKRotation(
 
 	// ---- Phase A: Pi adds the new PSK as a SECONDARY channel slot ----
 	if !skipPhaseA {
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase A · staging new PSK on Pi at slot %d", stagingIdx))
 		if err := s.applyLocalStagingChannel(ctx, stagingIdx, newPSK); err != nil {
 			// Hard abort -- without staging on Pi, Phase B acks would be
 			// undecryptable in any subsequent channel transition. Mark every
@@ -672,14 +687,17 @@ func (s *Service) runPSKRotation(
 		}
 		_ = s.store.IncrementTargetAttempts(ctx, rotID, t.NodeNum)
 		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePushingB, "", pskFP)
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B · pushing staging to !%08x", t.NodeNum))
 
 		err := s.pushStagingToRemote(ctx, t.NodeNum, stagingIdx, newPSK)
 		if err != nil {
 			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, err.Error(), pskFP)
 			slog.Warn("PSK rotation phase B failed",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B failed for !%08x", t.NodeNum))
 		} else {
 			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseHasNewPSK, "", pskFP)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B ack · !%08x has staging", t.NodeNum))
 		}
 
 		if opts.InterTargetDelay > 0 && i+1 < len(remoteTargets) {
@@ -699,14 +717,17 @@ func (s *Service) runPSKRotation(
 			continue
 		}
 		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePromotingC, "", pskFP)
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C · promoting !%08x to new PRIMARY", t.NodeNum))
 
 		err := s.promoteRemoteToNewPrimary(ctx, t.NodeNum, stagingIdx, newPSK)
 		if err != nil {
 			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedC, err.Error(), pskFP)
 			slog.Warn("PSK rotation phase C failed",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C failed for !%08x", t.NodeNum))
 		} else {
 			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseOnNewPSK, "", pskFP)
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C ack · !%08x on new PSK", t.NodeNum))
 			// MarkTrustVerifiedNow stamps last_verified_at; the remote's
 			// current_psk_fp gets updated on the next GetTrust round-trip.
 			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, VerifyMethodRemotePKC); mErr != nil {
@@ -720,6 +741,7 @@ func (s *Service) runPSKRotation(
 	if localTarget != nil && !skipPhaseD {
 		_ = s.store.IncrementTargetAttempts(ctx, rotID, localNum)
 		s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhasePromotingC, "", pskFP)
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase D · Pi promoting locally to slot %d", stagingIdx))
 
 		err := s.promotePiToNewPrimary(ctx, stagingIdx, newPSK)
 		if err != nil {
@@ -781,10 +803,6 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// Final broadcast: done flag set; UI's progress drawer transitions
-	// to its "complete" state.
-	s.persistAndBroadcast(ctx, rotID, channelIndex, current, true, Fingerprint(newPSK))
-
 	// Audit summary.
 	successes := 0
 	failures := 0
@@ -795,6 +813,15 @@ func (s *Service) runPSKRotation(
 			failures++
 		}
 	}
+
+	// Notice + final broadcast (done=true). UI's progress drawer transitions
+	// to its "complete" state on the done flag.
+	if failures == 0 {
+		s.broadcastNotice(rotID, current, Fingerprint(newPSK), fmt.Sprintf("Done · %d/%d on new PSK · ready to retire old", successes, len(current)))
+	} else {
+		s.broadcastNotice(rotID, current, Fingerprint(newPSK), fmt.Sprintf("Done with %d failure(s) · retry the failed targets when reachable", failures))
+	}
+	s.persistAndBroadcast(ctx, rotID, channelIndex, current, true, Fingerprint(newPSK))
 	s.auditFleet(ctx, userID, "rotate_psk_complete", "channel",
 		fmt.Sprintf("%d", channelIndex), map[string]any{
 			"rotation_id": rotID,
@@ -972,6 +999,27 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 		})
 
 	return &RetireOldPSKResult{OK: true, OldChannelIndex: oldChannelIdx, NewPSKFP: newPSKFP}, nil
+}
+
+// broadcastNotice emits a status-line WS event without touching the
+// DB. The drawer's status rail picks these up and shows what the
+// worker is doing in real time ("Phase 0 reconcile on HB55", "Picked
+// staging slot 1", etc). Cheap fire-and-forget; never blocks the
+// rotation flow on broadcast errors.
+func (s *Service) broadcastNotice(rotID string, targets []RotationTarget, pskFP, msg string) {
+	if msg == "" {
+		return
+	}
+	s.hubRef.broadcast(ws.Event{
+		Type: EventFleetSecRotation,
+		Payload: RotationProgressEvent{
+			RotationID: rotID,
+			Kind:       RotationKindPSK,
+			Targets:    targets,
+			NewPSKFP:   pskFP,
+			Notice:     msg,
+		},
+	})
 }
 
 // persistAndBroadcast writes the current rotation target snapshot back
