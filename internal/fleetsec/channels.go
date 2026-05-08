@@ -878,6 +878,16 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	if rec.Kind != RotationKindPSK {
 		return nil, fmt.Errorf("rotation %s is not a PSK rotation", rotID)
 	}
+	// Already-retired check FIRST -- both pi_local_phase=retired and
+	// retired_at are set by MarkRotationRetired, and a stale UI tab
+	// re-clicking Retire would otherwise hit the phase check below
+	// and surface a misleading "want phase_d_promoted" error.
+	if rec.RetiredAt != nil || rec.PiLocalPhase == PiPhaseRetired {
+		return nil, errors.New("rotation already retired")
+	}
+	if rec.PiLocalPhase != PiPhasePhaseDPromoted {
+		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want phase_d_promoted -- the rotation must reach Phase D before retirement)", rec.PiLocalPhase)
+	}
 
 	// Detach from the caller's deadline so the per-remote PKC round
 	// (DefaultRemoteAdminTimeout = 30s, GetConfig + SetChannel each)
@@ -891,12 +901,6 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
 	defer cancel()
 	ctx = bgCtx
-	if rec.PiLocalPhase != PiPhasePhaseDPromoted {
-		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want phase_d_promoted)", rec.PiLocalPhase)
-	}
-	if rec.RetiredAt != nil {
-		return nil, errors.New("rotation already retired")
-	}
 	if rec.ChannelIndex == nil {
 		return nil, errors.New("rotation has no channel_index")
 	}

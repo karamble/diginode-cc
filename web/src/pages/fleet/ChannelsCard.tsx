@@ -7,7 +7,7 @@
 // fleet_channels table). On a fresh install the table is empty -- the
 // card surfaces guidance pointing at the first rotation flow.
 
-import { useQuery } from '@tanstack/react-query'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 
 import fleetSecurityApi, { type Channel, type Rotation } from '../../api/fleetSecurity'
@@ -19,6 +19,7 @@ import RetireOldPSKModal from './RetireOldPSKModal'
 export default function ChannelsCard() {
   const { user } = useAuthStore()
   const isAdmin = user?.role === 'ADMIN'
+  const qc = useQueryClient()
 
   const { data: channels, isLoading, error } = useQuery<Channel[]>({
     queryKey: ['fleet-security', 'channels'],
@@ -140,9 +141,16 @@ export default function ChannelsCard() {
           onClose={() => setRetireRotation(null)}
           onRetired={() => {
             setRetireRotation(null)
-            // Trigger a refetch of channels + pending-retirements; the
-            // server stamps retired_at + retired phase, and the next
-            // listChannels read picks up the cleared state.
+            // Server stamped retired_at + pi_local_phase=retired. Force
+            // refetch of pending-retirements (drives the Retire button
+            // visibility) and channels (so the card re-renders without
+            // the migration progress strip). Without the explicit
+            // invalidate the button hangs around for up to the
+            // refetchInterval (30s) and a re-click hits "rotation
+            // already retired".
+            qc.invalidateQueries({ queryKey: ['fleet-security', 'pending-retirements'] })
+            qc.invalidateQueries({ queryKey: ['fleet-security', 'channels'] })
+            qc.invalidateQueries({ queryKey: ['fleet-security', 'trust'] })
           }}
         />
       )}
