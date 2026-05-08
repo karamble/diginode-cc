@@ -355,6 +355,22 @@ func (s *Service) tryRotateOnce(
 	role := pb.Channel_PRIMARY
 	name := ""
 
+	// For remote targets, ensure we have a fresh admin session passkey
+	// before sending SetChannel. Meshtastic firmware requires the passkey
+	// on every set_* admin and rejects with ADMIN_BAD_SESSION_KEY
+	// otherwise (TTL 300s, reset on remote reboot). GetConfig SECURITY
+	// is the cheapest Get that gives us a passkey -- the firmware
+	// includes it in the response AdminMessage and runRemoteAdmin caches
+	// it for the SetChannel that follows. Local admin doesn't enforce
+	// session passkeys (different firmware code path) so we skip the
+	// pre-step there.
+	if !isLocal {
+		_, gErr := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session")
+		if gErr != nil {
+			return fmt.Errorf("session establish: %w", gErr)
+		}
+	}
+
 	setMsg := AdminSetChannel(channelIndex, name, role, newPSK)
 	var err error
 	if isLocal {

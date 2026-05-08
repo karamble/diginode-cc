@@ -43,15 +43,27 @@ type LocalNodeProvider interface {
 // held only across the single admin round-trip; long-running operations
 // (e.g. fleet-wide PSK rotation) take the lock once per target.
 type Service struct {
-	store      *Store
-	tracker    *Tracker
-	audit      *audit.Service
-	serial     SerialSender
-	localNode  LocalNodeProvider
+	store     *Store
+	tracker   *Tracker
+	audit     *audit.Service
+	serial    SerialSender
+	localNode LocalNodeProvider
 
 	hubRef hubRef // optional WS broadcaster, set via WireHub
 
 	adminMu sync.Mutex // serializes admin transactions
+
+	// sessionPasskeys caches per-remote AdminMessage.session_passkey values.
+	// Meshtastic firmware emits a fresh passkey in every get_*_response
+	// AdminMessage and REQUIRES it on subsequent set_* admins (300s TTL,
+	// per-(local_pubkey, remote_pubkey) pair). Without it remote Set*
+	// returns routing-error ADMIN_BAD_SESSION_KEY, even when the sender's
+	// admin_key is otherwise authorized. Captured in send() on every
+	// admin reply, looked up in runRemoteAdmin before each outbound,
+	// invalidated on BAD_SESSION_KEY (lets the next attempt re-establish
+	// via a fresh Get).
+	sessionPasskeys   map[uint32][]byte
+	sessionPasskeysMu sync.Mutex
 }
 
 // NewService wires up the storage layer, transaction tracker, audit
@@ -60,12 +72,50 @@ type Service struct {
 // the service receives Routing acks and AdminMessage replies.
 func NewService(db *database.DB, audit *audit.Service, ser SerialSender, local LocalNodeProvider) *Service {
 	return &Service{
-		store:     NewStore(db),
-		tracker:   NewTracker(),
-		audit:     audit,
-		serial:    ser,
-		localNode: local,
+		store:           NewStore(db),
+		tracker:         NewTracker(),
+		audit:           audit,
+		serial:          ser,
+		localNode:       local,
+		sessionPasskeys: make(map[uint32][]byte),
 	}
+}
+
+// cacheSessionPasskey stores a remote-emitted admin session passkey for
+// future set_* admin calls. Called from send() whenever an inbound admin
+// reply carries a non-empty SessionPasskey. The firmware-side TTL is
+// 300s; we don't TTL on our side because BAD_SESSION_KEY on the next Set
+// will trigger invalidateSessionPasskey + re-establish on the retry.
+func (s *Service) cacheSessionPasskey(nodeNum uint32, passkey []byte) {
+	if nodeNum == 0 || len(passkey) == 0 {
+		return
+	}
+	s.sessionPasskeysMu.Lock()
+	if s.sessionPasskeys == nil {
+		s.sessionPasskeys = make(map[uint32][]byte)
+	}
+	s.sessionPasskeys[nodeNum] = append([]byte(nil), passkey...)
+	s.sessionPasskeysMu.Unlock()
+}
+
+// getSessionPasskey returns the cached passkey for nodeNum, or nil.
+func (s *Service) getSessionPasskey(nodeNum uint32) []byte {
+	s.sessionPasskeysMu.Lock()
+	defer s.sessionPasskeysMu.Unlock()
+	if pk, ok := s.sessionPasskeys[nodeNum]; ok {
+		return append([]byte(nil), pk...)
+	}
+	return nil
+}
+
+// invalidateSessionPasskey drops the cached passkey for nodeNum. Used
+// when a remote returns ADMIN_BAD_SESSION_KEY: the cached value has
+// either expired or the remote rebooted; the next Get round-trip will
+// install a fresh one.
+func (s *Service) invalidateSessionPasskey(nodeNum uint32) {
+	s.sessionPasskeysMu.Lock()
+	delete(s.sessionPasskeys, nodeNum)
+	s.sessionPasskeysMu.Unlock()
 }
 
 // Tracker exposes the underlying transaction tracker so the dispatcher
@@ -126,6 +176,18 @@ func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind 
 func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg *pb.AdminMessage, kind string) (*pb.AdminMessage, error) {
 	if remoteNodeNum == 0 {
 		return nil, errors.New("remote node number must be non-zero")
+	}
+	// Inject the cached admin session passkey for this remote, if any.
+	// Required for set_* admin packets; ignored by the firmware on Get*.
+	// If we have nothing cached, we send with an empty passkey -- the
+	// firmware accepts that as the start of a session for Get*, then
+	// includes a fresh passkey in its reply that we'll cache via send().
+	// For Set* without a cached passkey, the firmware will reject with
+	// ADMIN_BAD_SESSION_KEY; tryRotateOnce sequences a Get-before-Set
+	// for remotes specifically to populate the cache before the Set
+	// goes out.
+	if pk := s.getSessionPasskey(remoteNodeNum); len(pk) > 0 {
+		msg.SessionPasskey = pk
 	}
 	frame, packetID, err := serial.BuildAdminPacketPKC(remoteNodeNum, msg)
 	if err != nil {
@@ -208,12 +270,23 @@ func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind 
 	case ReplyCancelled:
 		return nil, fmt.Errorf("%s: %w", kind, r.Err)
 	case ReplyAdminMsg:
+		// Capture the firmware-emitted session passkey for this remote.
+		// Set* admin against this remote later will pick it up via
+		// runRemoteAdmin's getSessionPasskey lookup.
+		if r.Admin != nil && len(r.Admin.GetSessionPasskey()) > 0 && expectedFrom != 0 {
+			s.cacheSessionPasskey(expectedFrom, r.Admin.GetSessionPasskey())
+		}
 		return r.Admin, nil
 	case ReplyRoutingAck:
 		if !r.Successful() {
 			reason := pb.Routing_NONE
 			if r.Routing != nil {
 				reason = r.Routing.GetErrorReason()
+			}
+			// Stale or expired session passkey -- drop the cached
+			// value so the next attempt re-establishes via Get.
+			if reason == pb.Routing_ADMIN_BAD_SESSION_KEY && expectedFrom != 0 {
+				s.invalidateSessionPasskey(expectedFrom)
 			}
 			return nil, fmt.Errorf("%s: routing error %v", kind, reason)
 		}

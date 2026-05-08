@@ -48,18 +48,22 @@ func (f *fakeSerial) SendToRadio(data []byte) error {
 		return errors.New("no packet variant in fake send")
 	}
 	pid := pkt.GetId()
-	go func(id uint32, r Reply) {
-		// Deliver a ROUTING ack with the packet's id as request_id.
-		// Marshal the canned reply payload.
+	// Echo the canned reply as if it came FROM the packet's destination.
+	// runRemoteAdmin builds a packet with MeshPacket.to=remoteNodeNum;
+	// runLocalAdmin builds with MeshPacket.to=localNodeNum. After the
+	// expectedFrom filter on the tracker, the ack must claim to come from
+	// that destination or it gets dropped as a loopback.
+	from := pkt.GetTo()
+	go func(id uint32, fromNum uint32, r Reply) {
 		var payload []byte
 		if r.Routing != nil {
 			payload, _ = proto.Marshal(r.Routing)
-			f.tracker.HandleRoutingAck(0xa1b2c3d4, id, payload)
+			f.tracker.HandleRoutingAck(fromNum, id, payload)
 		} else if r.Admin != nil {
 			payload, _ = proto.Marshal(r.Admin)
-			f.tracker.HandleAdminReply(0xa1b2c3d4, id, payload)
+			f.tracker.HandleAdminReply(fromNum, id, payload)
 		}
-	}(pid, *reply)
+	}(pid, from, *reply)
 	return nil
 }
 
@@ -159,6 +163,82 @@ func TestService_RunRemoteAdmin_AdminReplyDelivered(t *testing.T) {
 	if !sec.GetIsManaged() {
 		t.Error("expected IsManaged=true after round-trip")
 	}
+}
+
+// TestService_SessionPasskey_LifecycleAcrossAdmins pins the session-passkey
+// handling: a Get* admin reply with session_passkey populated must be
+// cached for the same remote, and the next Set* admin against that
+// remote must include it. A subsequent BAD_SESSION_KEY routing failure
+// must invalidate the cache so a third attempt re-establishes via Get.
+func TestService_SessionPasskey_LifecycleAcrossAdmins(t *testing.T) {
+	s, _, fs := makeTestService(t)
+	const remote uint32 = 0xa1b2c3d4
+	wantPasskey := []byte{0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08}
+
+	// Step 1: Get returns an admin reply carrying the session_passkey.
+	fs.reply = &Reply{
+		Kind: ReplyAdminMsg,
+		Admin: &pb.AdminMessage{
+			SessionPasskey: wantPasskey,
+			PayloadVariant: &pb.AdminMessage_GetConfigResponse{
+				GetConfigResponse: &pb.Config{
+					PayloadVariant: &pb.Config_Security{
+						Security: &pb.Config_SecurityConfig{IsManaged: false},
+					},
+				},
+			},
+		},
+	}
+	if _, err := s.runRemoteAdmin(context.Background(), remote, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "get1"); err != nil {
+		t.Fatalf("get1: %v", err)
+	}
+
+	// Cache must now hold the firmware-emitted passkey.
+	got := s.getSessionPasskey(remote)
+	if !bytesEq(got, wantPasskey) {
+		t.Fatalf("cached passkey = %x, want %x", got, wantPasskey)
+	}
+
+	// Step 2: a Set carries the cached passkey on the wire. Inspect the
+	// outgoing frame to confirm runRemoteAdmin injected it.
+	fs.reply = &Reply{
+		Kind:    ReplyRoutingAck,
+		Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}},
+	}
+	setMsg := AdminBeginEditSettings()
+	if _, err := s.runRemoteAdmin(context.Background(), remote, setMsg, "set1"); err != nil {
+		t.Fatalf("set1: %v", err)
+	}
+	// runRemoteAdmin mutates the supplied msg in place to attach the
+	// cached passkey; assert the field landed on the value the cache
+	// held.
+	if !bytesEq(setMsg.GetSessionPasskey(), wantPasskey) {
+		t.Errorf("Set's session_passkey = %x, want %x (runRemoteAdmin should inject from cache)", setMsg.GetSessionPasskey(), wantPasskey)
+	}
+
+	// Step 3: BAD_SESSION_KEY routing failure must drop the cache.
+	fs.reply = &Reply{
+		Kind:    ReplyRoutingAck,
+		Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_ADMIN_BAD_SESSION_KEY}},
+	}
+	if _, err := s.runRemoteAdmin(context.Background(), remote, AdminBeginEditSettings(), "set2-stale"); err == nil {
+		t.Error("expected routing error to surface as Go error")
+	}
+	if got := s.getSessionPasskey(remote); got != nil {
+		t.Errorf("cache after BAD_SESSION_KEY = %x, want nil (should be invalidated)", got)
+	}
+}
+
+func bytesEq(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 func TestRedactSecrets(t *testing.T) {
