@@ -16,7 +16,7 @@ BINARY := diginode-cc
 # To bump the pin: change PROTO_SHA below, run `make proto`, test, commit
 # the Makefile change.
 PROTO_REPO   := meshtastic/protobufs
-PROTO_SHA    := 97ea65a10d31f24d84c8510342f2cd2d213c35a5
+PROTO_SHA    := 1d6f1a71ff329fa52ad8bb7899951e96f8280a1f
 PROTO_OUT    := internal/meshpb
 PROTO_MODULE := github.com/karamble/diginode-cc
 PROTO_FILES := \
