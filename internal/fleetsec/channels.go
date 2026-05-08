@@ -382,7 +382,17 @@ func (s *Service) runPSKRotation(
 	}
 
 	// ---- Phase B: push staging slot to each remote ----
+	// A retry that resumes from has_new_psk (target was failed_c) skips
+	// this loop -- staging is already on the remote, only the promote
+	// step needs replay.
 	for i, t := range remoteTargets {
+		// Targets already past Phase B keep their phase. Phase C loop
+		// picks them up.
+		if t.Phase == PhaseHasNewPSK || t.Phase == PhasePromotingC ||
+			t.Phase == PhaseOnNewPSK || t.Phase == PhaseFailedC ||
+			t.Phase == PhaseRetired {
+			continue
+		}
 		_ = s.store.IncrementTargetAttempts(ctx, rotID, t.NodeNum)
 		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePushingB, "", pskFP)
 
@@ -406,10 +416,9 @@ func (s *Service) runPSKRotation(
 
 	// ---- Phase C: promote staging to PRIMARY on each remote ----
 	for _, t := range remoteTargets {
-		// Skip remotes that failed Phase B; they don't have the new PSK
-		// yet so promoting would just fail again. Operator's Retry will
-		// re-run Phase B for them.
-		if t.Phase == PhaseFailedB {
+		// Skip remotes that failed Phase B (no staging on them yet)
+		// or that already finished Phase C in a previous run.
+		if t.Phase == PhaseFailedB || t.Phase == PhaseOnNewPSK || t.Phase == PhaseRetired {
 			continue
 		}
 		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePromotingC, "", pskFP)
@@ -715,7 +724,20 @@ func (s *Service) RetryRotation(
 		return errors.New("rotation has no channel index (not a PSK rotation?)")
 	}
 
-	// Mark targeted entries pending again for the runner.
+	// Phase-aware retry: resume each requested target from the right
+	// resting state so the worker doesn't redo work that already
+	// succeeded.
+	//
+	//   failed_b      -> reset to pending; worker runs Phase B + C.
+	//   failed_c      -> reset to has_new_psk; worker skips Phase B
+	//                    and runs only Phase C.
+	//   phase_b_*     -> mid-flight from a crashed worker; reset to
+	//                    pending.
+	//   phase_c_*     -> mid-flight; staging already on the remote
+	//                    from the prior Phase B success; reset to
+	//                    has_new_psk so we don't re-push.
+	//   on_new_psk /  -> already done; skip.
+	//   pending       -> hadn't started; worker picks it up naturally.
 	want := map[uint32]bool{}
 	for _, t := range targetNodeNums {
 		want[t] = true
@@ -723,14 +745,36 @@ func (s *Service) RetryRotation(
 	current := append([]RotationTarget(nil), rec.Targets...)
 	any := false
 	for i := range current {
-		if want[current[i].NodeNum] && current[i].Status == TargetStatusFailed {
-			current[i].Status = TargetStatusPending
+		if !want[current[i].NodeNum] {
+			continue
+		}
+		switch current[i].Phase {
+		case PhaseFailedB, PhasePushingB:
+			current[i].Phase = PhasePending
+			current[i].Status = statusForPhase(PhasePending)
 			current[i].LastError = ""
+			any = true
+		case PhaseFailedC, PhasePromotingC:
+			current[i].Phase = PhaseHasNewPSK
+			current[i].Status = statusForPhase(PhaseHasNewPSK)
+			current[i].LastError = ""
+			any = true
+		case PhasePending:
+			// Already pending -- worker will pick it up; counts as
+			// a retry request even though no reset was needed.
+			any = true
+		case PhaseOnNewPSK, PhaseRetired:
+			// Already done; nothing to retry. Skip silently.
+			continue
+		case PhaseHasNewPSK:
+			// In an unusual mid-rotation snapshot: B succeeded but
+			// the worker hadn't reached this target's C yet. Worker
+			// will pick it up.
 			any = true
 		}
 	}
 	if !any {
-		return errors.New("no failed targets matched the retry list")
+		return errors.New("no eligible targets matched the retry list (already done or unknown node-num)")
 	}
 
 	pskCopy := append([]byte(nil), newPSK...)
