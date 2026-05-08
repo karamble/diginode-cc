@@ -36,12 +36,27 @@ export default function PubkeyChip({
 
   const handleCopy = async (e: React.MouseEvent) => {
     e.stopPropagation()
+    // navigator.clipboard.writeText requires a secure context (HTTPS
+    // or localhost). On plain-http LAN the secure context check fails
+    // and the clipboard call silently rejects. Try the API first; fall
+    // back to the legacy execCommand path which still works on http://.
     try {
-      await navigator.clipboard.writeText(fingerprint)
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(fingerprint)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = fingerprint
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
       setCopied(true)
       setTimeout(() => setCopied(false), 1500)
     } catch {
-      // Clipboard access denied (insecure context, etc.) -- silent.
+      // Both paths failed; leave silent so the chip doesn't grow noise.
     }
   }
 

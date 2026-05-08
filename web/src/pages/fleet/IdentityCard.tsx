@@ -24,6 +24,35 @@ export default function IdentityCard() {
   const [importOpen, setImportOpen] = useState(false)
   const [registryOpen, setRegistryOpen] = useState(false)
   const [exported, setExported] = useState<string | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  // Copy with HTTP-fallback. navigator.clipboard.writeText silently
+  // fails on plain-http LAN deployments (the clipboard API requires
+  // a secure context); try it first, then fall back to a hidden
+  // textarea + document.execCommand('copy') which still works on
+  // http://. "copied!" feedback flashes for 1500ms either way so
+  // the operator gets a confirmation regardless of which path took.
+  const copyToClipboard = async (text: string) => {
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text)
+      } else {
+        const ta = document.createElement('textarea')
+        ta.value = text
+        ta.style.position = 'fixed'
+        ta.style.opacity = '0'
+        document.body.appendChild(ta)
+        ta.select()
+        document.execCommand('copy')
+        document.body.removeChild(ta)
+      }
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    } catch {
+      // If both paths fail, leave the text selectable for manual Ctrl+C.
+      setCopied(false)
+    }
+  }
 
   const { data, isLoading, error } = useQuery<Identity>({
     queryKey: ['fleet-security', 'identity'],
@@ -129,17 +158,29 @@ export default function IdentityCard() {
             <div className="bg-dark-900/60 border border-dark-700/50 rounded p-3">
               <div className="flex items-center justify-between mb-1.5">
                 <span className="text-[10px] uppercase tracking-wider text-dark-400">
-                  Public key (base64)
+                  Public key (base64) — paste into Meshtastic app's Admin Keys
                 </span>
                 <button
                   type="button"
-                  onClick={() => navigator.clipboard.writeText(exported)}
-                  className="text-[10px] text-primary-400 hover:text-primary-300"
+                  onClick={() => copyToClipboard(exported)}
+                  className={`text-[10px] ${copied ? 'text-emerald-400' : 'text-primary-400 hover:text-primary-300'}`}
                 >
-                  copy
+                  {copied ? '✓ copied!' : 'copy'}
                 </button>
               </div>
-              <code className="block text-xs text-dark-200 font-mono break-all">
+              {/* onClick selectAll lets the operator manually Ctrl+C
+                  if both clipboard paths failed (eg sandboxed browser). */}
+              <code
+                onClick={(e) => {
+                  const range = document.createRange()
+                  range.selectNodeContents(e.currentTarget)
+                  const sel = window.getSelection()
+                  sel?.removeAllRanges()
+                  sel?.addRange(range)
+                }}
+                className="block text-xs text-dark-200 font-mono break-all cursor-text select-all"
+                title="Click to select all, then Ctrl+C"
+              >
                 {exported}
               </code>
               <button
