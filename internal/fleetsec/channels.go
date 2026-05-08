@@ -10,6 +10,7 @@ import (
 	"time"
 
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
+	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
@@ -202,45 +203,131 @@ func (s *Service) runPSKRotation(
 	current := append([]RotationTarget(nil), targets...)
 	localNum := s.localNode.LocalNodeNum()
 
+	// Four-phase rotation:
+	//  1. PUSH    -- Get-establish-session + send SetChannel to each remote.
+	//                Don't wait for the SetChannel routing ack: the remote
+	//                applies SetChannel and immediately switches to the new
+	//                channel PSK; its ack rides the new channel which our
+	//                local Heltec can't decrypt yet (we rotate last). The
+	//                ack would arrive as port=UNKNOWN payloadLen=0 on our
+	//                side. Treat the optimistic push as succeeded if the
+	//                Get-session step succeeded (proves the remote was
+	//                reachable on the OLD PSK at push time).
+	//  2. WAIT    -- brief sleep so remotes have time to commit the new PSK
+	//                before the local Heltec rotates and the channel layer
+	//                breaks for any remote that didn't apply.
+	//  3. LOCAL   -- self-rotate the local Heltec via runLocalAdmin (no PSK
+	//                gap on the local side; admin uses the same in-process
+	//                serial path).
+	//  4. VERIFY  -- after local moved to the new PSK, GetTrust each remote
+	//                via PKC. If GetConfig SECURITY round-trips on the new
+	//                PSK channel, the remote successfully applied the
+	//                rotation. Failure here = remote did not apply (still
+	//                stranded on old PSK) or was unreachable.
+	//
+	// Why we don't trust the SetChannel routing ack: tested 2026-05-08, a
+	// remote running through SetChannel applies new PSK before its ack
+	// frame leaves the radio. The ack is encrypted with the new PSK; the
+	// sender (still on old PSK) sees only undecryptable bytes. So per-
+	// target ack inspection has zero correlation with rotation success.
+	// Verify-after-rotation tests the only signal that matters: can we
+	// PKC-admin the remote on the post-rotation channel.
+
+	// Split target list: remotes get phases 1 + 4; local gets phase 3.
+	var localTarget *RotationTarget
+	remoteTargets := make([]*RotationTarget, 0, len(current))
 	for i := range current {
 		t := &current[i]
+		if t.NodeNum == localNum {
+			localTarget = t
+		} else {
+			remoteTargets = append(remoteTargets, t)
+		}
+	}
+
+	// ---- Phase 1: optimistic push to each remote ----
+	for i, t := range remoteTargets {
 		t.Status = TargetStatusInFlight
 		t.Attempts++
 		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
 
-		err := s.rotateOneTarget(ctx, t.NodeNum, channelIndex, newPSK, t.NodeNum == localNum)
+		err := s.pushRemoteRotation(ctx, t.NodeNum, channelIndex, newPSK)
 		if err != nil {
 			t.Status = TargetStatusFailed
 			t.LastError = err.Error()
-			slog.Warn("PSK rotation target failed",
+			slog.Warn("PSK rotation push failed",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
-		} else {
-			t.Status = TargetStatusAcked
-			t.LastError = ""
-			// A SetChannel ack proves the node is admin-reachable, which is
-			// what the trust roster's "verified" pill cares about. Refresh
-			// last_verified_at here so a freshly-rotated node doesn't keep
-			// showing as "stale" until the operator clicks Verify.
-			method := VerifyMethodRemotePKC
-			if t.NodeNum == localNum {
-				method = VerifyMethodLocalUSB
-			}
-			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, method); mErr != nil {
-				slog.Warn("mark trust verified after rotation ack",
-					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
-			}
-			slog.Info("PSK rotation target acked",
-				"rotation_id", rotID, "node_num", t.NodeNum)
+			s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
 		}
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
+		// Status remains in-flight on push success; phase 4 promotes to
+		// acked or marks failed based on post-rotation reachability.
 
-		if opts.InterTargetDelay > 0 && i+1 < len(current) {
+		if opts.InterTargetDelay > 0 && i+1 < len(remoteTargets) {
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(opts.InterTargetDelay):
 			}
 		}
+	}
+
+	// ---- Phase 2: brief settle so remotes commit before local rotates ----
+	// 5s is plenty for ESP32 to apply SetChannel + persist to NVS. Any
+	// shorter and we risk rotating local before slow remotes finished;
+	// then we'd verify them on the new channel before they're listening.
+	select {
+	case <-ctx.Done():
+		return
+	case <-time.After(5 * time.Second):
+	}
+
+	// ---- Phase 3: local self-rotate ----
+	if localTarget != nil {
+		localTarget.Status = TargetStatusInFlight
+		localTarget.Attempts++
+		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
+		err := s.rotateOneTarget(ctx, localNum, channelIndex, newPSK, true)
+		if err != nil {
+			localTarget.Status = TargetStatusFailed
+			localTarget.LastError = err.Error()
+			slog.Warn("PSK rotation local failed",
+				"rotation_id", rotID, "node_num", localNum, "error", err)
+		} else {
+			localTarget.Status = TargetStatusAcked
+			localTarget.LastError = ""
+			if mErr := s.store.MarkTrustVerifiedNow(ctx, localNum, VerifyMethodLocalUSB); mErr != nil {
+				slog.Warn("mark local trust verified", "rotation_id", rotID, "error", mErr)
+			}
+			slog.Info("PSK rotation local acked", "rotation_id", rotID)
+		}
+		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
+	}
+
+	// ---- Phase 4: verify each remote on the post-rotation channel ----
+	for _, t := range remoteTargets {
+		// Don't re-test entries we already failed in push; their session
+		// or transport was demonstrably broken before we even rotated.
+		if t.Status == TargetStatusFailed {
+			continue
+		}
+		// GetTrust does a fresh PKC GetConfig SECURITY round-trip and
+		// stamps last_verified_at on success. Round-tripping post-
+		// rotation proves the remote is on the new PSK == it applied
+		// our SetChannel. Failure means stranded on old PSK or
+		// otherwise unreachable.
+		_, err := s.GetTrust(ctx, t.NodeNum)
+		if err != nil {
+			t.Status = TargetStatusFailed
+			t.LastError = fmt.Sprintf("post-rotation verify: %v", err)
+			slog.Warn("PSK rotation verify failed",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+		} else {
+			t.Status = TargetStatusAcked
+			t.LastError = ""
+			slog.Info("PSK rotation verified",
+				"rotation_id", rotID, "node_num", t.NodeNum)
+		}
+		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
 	}
 
 	// Update the channel snapshot with the new PSK fingerprint.
@@ -289,6 +376,53 @@ func (s *Service) runPSKRotation(
 			slog.Warn("clear rotation psk", "rotation_id", rotID, "error", err)
 		}
 	}
+}
+
+// pushRemoteRotation runs the phase-1 push for one remote target.
+// First does GetConfig SECURITY to (a) confirm the remote is reachable
+// on the current channel and (b) install the firmware-emitted session
+// passkey in our cache. Then sends SetChannel optimistically -- doesn't
+// wait for the ack because the remote applies the new PSK before its
+// ack frame leaves the radio, and the ack rides the new channel which
+// the local Heltec won't decrypt until phase 3. Phase 4's GetTrust is
+// the actual confirmation.
+//
+// Returns nil on push success (Get round-tripped, Set frame queued).
+// Returns an error only if the Get establish-session step itself
+// failed (remote unreachable on current channel) or the SendToRadio
+// call failed (local serial broken).
+func (s *Service) pushRemoteRotation(ctx context.Context, nodeNum uint32, channelIndex int32, newPSK []byte) error {
+	if channelIndex != 0 {
+		return fmt.Errorf("non-primary channel rotation (index %d) not supported", channelIndex)
+	}
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+
+	// Phase 1a: establish session. The Get reply populates our session
+	// passkey cache via send() -> cacheSessionPasskey. Required so the
+	// SetChannel below carries a valid passkey on the wire (firmware
+	// rejects Set without it after the post-reboot grace window).
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session"); err != nil {
+		return fmt.Errorf("session establish: %w", err)
+	}
+
+	// Phase 1b: optimistic SetChannel push. Inject the cached passkey,
+	// build the PKC frame, hand it to the serial layer. We don't track
+	// or wait for the response: the ack would be undecryptable across
+	// the about-to-open PSK gap (we rotate local last). Phase 4 verifies
+	// via a fresh GetConfig round-trip on the post-rotation channel.
+	setMsg := AdminSetChannel(channelIndex, "", pb.Channel_PRIMARY, newPSK)
+	if pk := s.getSessionPasskey(nodeNum); len(pk) > 0 {
+		setMsg.SessionPasskey = pk
+	}
+	frame, _, err := serial.BuildAdminPacketPKC(nodeNum, setMsg)
+	if err != nil {
+		return fmt.Errorf("build set_channel: %w", err)
+	}
+	if err := s.serial.SendToRadio(frame); err != nil {
+		return fmt.Errorf("push set_channel: %w", err)
+	}
+	return nil
 }
 
 // rotateOneTarget runs the get_channel + set_channel pair against one
