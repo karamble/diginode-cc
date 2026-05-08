@@ -82,6 +82,13 @@ type pendingTx struct {
 	kind   string
 	reply  chan Reply
 	cancel context.CancelFunc
+	// expectsAdminReply is true when the outbound request will produce
+	// an AdminMessage payload reply (Get*Request variants) in addition
+	// to the transport-level Routing ack. When set, a successful
+	// Routing ack does NOT resolve the tx -- HandleAdminReply does.
+	// Routing failures still resolve immediately (no AdminMessage will
+	// follow if firmware refused the request).
+	expectsAdminReply bool
 }
 
 // NewTracker constructs an empty Tracker.
@@ -96,8 +103,16 @@ func NewTracker() *Tracker {
 // kind is purely diagnostic (e.g. "local-admin" / "remote-pkc-set-channel");
 // it shows up in tests and audit logs but doesn't affect routing.
 //
+// expectsAdminReply tells the tracker whether the outbound request will
+// produce a get_*_response AdminMessage in addition to the transport
+// Routing ack. Pass true for Get*Request AdminMessages, false for Set*
+// and command messages. When true, a successful Routing ack does not
+// resolve the tx -- the AdminMessage does. Without this distinction the
+// Routing ack races the AdminMessage on Get* paths and the AdminMessage
+// gets dropped (manifests as `nil admin reply` from extract* helpers).
+//
 // If id is already pending, returns an error and does not overwrite.
-func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout time.Duration) (<-chan Reply, error) {
+func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout time.Duration, expectsAdminReply bool) (<-chan Reply, error) {
 	if id == 0 {
 		return nil, errors.New("transaction id must be non-zero")
 	}
@@ -108,10 +123,11 @@ func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout tim
 	}
 	txCtx, cancel := context.WithTimeout(ctx, timeout)
 	tx := &pendingTx{
-		id:     id,
-		kind:   kind,
-		reply:  make(chan Reply, 1),
-		cancel: cancel,
+		id:                id,
+		kind:              kind,
+		reply:             make(chan Reply, 1),
+		cancel:            cancel,
+		expectsAdminReply: expectsAdminReply,
 	}
 	t.transactions[id] = tx
 	t.mu.Unlock()
@@ -161,19 +177,41 @@ func (t *Tracker) removeAndClose(id uint32) *pendingTx {
 // Routing payload via meshpb and delivers it to whichever transaction
 // matches request_id, if any. Unmatched acks (request_id=0 or unknown)
 // are dropped silently -- they may belong to a transaction that already
-// timed out.
+// timed out or already resolved via an AdminMessage.
+//
+// If the matched tx was registered with expectsAdminReply=true and the
+// ack carries error_reason=NONE, the tx is left open so HandleAdminReply
+// can resolve it with the actual data payload. A routing failure (or a
+// payload that fails to decode) still resolves the tx immediately --
+// there will be no AdminMessage to wait for if the firmware refused.
 func (t *Tracker) HandleRoutingAck(from, requestID uint32, payload []byte) {
 	if requestID == 0 {
 		return
 	}
-	tx := t.removeAndClose(requestID)
-	if tx == nil {
+
+	var routing pb.Routing
+	parseErr := proto.Unmarshal(payload, &routing)
+	routingFailed := parseErr != nil || routing.GetErrorReason() != pb.Routing_NONE
+
+	t.mu.Lock()
+	tx, ok := t.transactions[requestID]
+	if !ok {
+		t.mu.Unlock()
 		return
 	}
+	if tx.expectsAdminReply && !routingFailed {
+		// Transport delivery confirmed; keep the tx open and let the
+		// AdminMessage carrying the actual response resolve it.
+		t.mu.Unlock()
+		return
+	}
+	delete(t.transactions, requestID)
+	t.mu.Unlock()
+	tx.cancel()
+
 	r := Reply{Kind: ReplyRoutingAck, From: from}
-	var routing pb.Routing
-	if err := proto.Unmarshal(payload, &routing); err != nil {
-		r.Err = err
+	if parseErr != nil {
+		r.Err = parseErr
 	} else {
 		r.Routing = &routing
 	}

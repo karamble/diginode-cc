@@ -11,7 +11,7 @@ import (
 
 func TestTracker_RoutingAckDelivery(t *testing.T) {
 	tr := NewTracker()
-	ch, err := tr.Begin(context.Background(), 0xdeadbeef, "test-routing", time.Second)
+	ch, err := tr.Begin(context.Background(), 0xdeadbeef, "test-routing", time.Second, false)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestTracker_RoutingAckDelivery(t *testing.T) {
 
 func TestTracker_AdminReplyDelivery(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0xfeedface, "test-admin", time.Second)
+	ch, _ := tr.Begin(context.Background(), 0xfeedface, "test-admin", time.Second, true)
 
 	// AdminMessage with a get_channel_response inside.
 	admin := &pb.AdminMessage{
@@ -88,7 +88,7 @@ func TestTracker_AdminReplyDelivery(t *testing.T) {
 
 func TestTracker_Timeout(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0x12345678, "timeout-test", 50*time.Millisecond)
+	ch, _ := tr.Begin(context.Background(), 0x12345678, "timeout-test", 50*time.Millisecond, false)
 
 	select {
 	case r := <-ch:
@@ -110,7 +110,7 @@ func TestTracker_Timeout(t *testing.T) {
 func TestTracker_ContextCancel(t *testing.T) {
 	tr := NewTracker()
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, _ := tr.Begin(ctx, 0x11111111, "cancel-test", time.Hour)
+	ch, _ := tr.Begin(ctx, 0x11111111, "cancel-test", time.Hour, false)
 
 	cancel()
 
@@ -126,17 +126,17 @@ func TestTracker_ContextCancel(t *testing.T) {
 
 func TestTracker_RejectsZeroID(t *testing.T) {
 	tr := NewTracker()
-	if _, err := tr.Begin(context.Background(), 0, "test", time.Second); err == nil {
+	if _, err := tr.Begin(context.Background(), 0, "test", time.Second, false); err == nil {
 		t.Error("Begin(0) accepted")
 	}
 }
 
 func TestTracker_RejectsDuplicate(t *testing.T) {
 	tr := NewTracker()
-	if _, err := tr.Begin(context.Background(), 42, "test", time.Second); err != nil {
+	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tr.Begin(context.Background(), 42, "test", time.Second); err == nil {
+	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false); err == nil {
 		t.Error("duplicate Begin accepted")
 	}
 }
@@ -151,9 +151,95 @@ func TestTracker_DropUnknownAck(t *testing.T) {
 	}
 }
 
+// TestTracker_GetRequest_RoutingAckIgnoredOnSuccess pins the fix for
+// the "nil admin reply" race: when expectsAdminReply=true, a successful
+// Routing ack must NOT resolve the tx -- the AdminMessage that follows
+// is what carries the data and what the caller is waiting for.
+func TestTracker_GetRequest_RoutingAckIgnoredOnSuccess(t *testing.T) {
+	tr := NewTracker()
+	ch, _ := tr.Begin(context.Background(), 0xcafef00d, "get-config", time.Second, true)
+
+	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}
+	rPayload, _ := proto.Marshal(routing)
+	tr.HandleRoutingAck(0xa1b2, 0xcafef00d, rPayload)
+
+	// Successful ack on a Get-style tx must leave it pending.
+	if got := tr.Pending(); got != 1 {
+		t.Fatalf("Pending after success ack = %d, want 1 (tx should still wait for AdminMessage)", got)
+	}
+	select {
+	case r := <-ch:
+		t.Fatalf("unexpected early reply: kind=%v admin=%v", r.Kind, r.Admin)
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	// AdminMessage arrives second; that's what should resolve the tx.
+	admin := &pb.AdminMessage{
+		PayloadVariant: &pb.AdminMessage_GetConfigResponse{
+			GetConfigResponse: &pb.Config{
+				PayloadVariant: &pb.Config_Security{
+					Security: &pb.Config_SecurityConfig{
+						PublicKey: []byte{0x01, 0x02, 0x03},
+					},
+				},
+			},
+		},
+	}
+	aPayload, _ := proto.Marshal(admin)
+	tr.HandleAdminReply(0xa1b2, 0xcafef00d, aPayload)
+
+	select {
+	case r := <-ch:
+		if r.Kind != ReplyAdminMsg {
+			t.Errorf("Kind = %v, want ReplyAdminMsg", r.Kind)
+		}
+		if r.Admin == nil {
+			t.Fatal("Admin nil")
+		}
+		sec := r.Admin.GetGetConfigResponse().GetSecurity()
+		if sec == nil || len(sec.GetPublicKey()) != 3 {
+			t.Errorf("payload didn't survive: %+v", r.Admin)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("AdminMessage didn't resolve the tx")
+	}
+
+	if got := tr.Pending(); got != 0 {
+		t.Errorf("Pending after admin reply = %d, want 0", got)
+	}
+}
+
+// TestTracker_GetRequest_RoutingAckResolvesOnFailure: even on a Get-style
+// tx, a routing ack with a non-NONE error_reason must resolve the tx
+// immediately. No AdminMessage will follow if the firmware refused.
+func TestTracker_GetRequest_RoutingAckResolvesOnFailure(t *testing.T) {
+	tr := NewTracker()
+	ch, _ := tr.Begin(context.Background(), 0xbadbad01, "get-config-fail", time.Second, true)
+
+	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NO_ROUTE}}
+	payload, _ := proto.Marshal(routing)
+	tr.HandleRoutingAck(0xa1b2, 0xbadbad01, payload)
+
+	select {
+	case r := <-ch:
+		if r.Kind != ReplyRoutingAck {
+			t.Errorf("Kind = %v, want ReplyRoutingAck", r.Kind)
+		}
+		if r.Successful() {
+			t.Error("Successful() = true on NO_ROUTE")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("routing failure didn't resolve the tx")
+	}
+
+	if got := tr.Pending(); got != 0 {
+		t.Errorf("Pending after failure ack = %d, want 0", got)
+	}
+}
+
 func TestTracker_DropZeroRequestID(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 1, "test", 200*time.Millisecond)
+	ch, _ := tr.Begin(context.Background(), 1, "test", 200*time.Millisecond, false)
 
 	// Acks with request_id=0 should NOT match anything (broadcast/unsolicited).
 	tr.HandleRoutingAck(1, 0, nil)

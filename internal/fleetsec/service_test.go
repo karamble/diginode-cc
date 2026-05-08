@@ -104,7 +104,9 @@ func TestService_RunLocalAdmin_RoutingAckSuccess(t *testing.T) {
 		Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}},
 	}
 
-	reply, err := s.runLocalAdmin(context.Background(), AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "test-ack")
+	// Set/command messages legitimately resolve on the routing ack
+	// alone -- firmware doesn't follow with an AdminMessage payload.
+	reply, err := s.runLocalAdmin(context.Background(), AdminBeginEditSettings(), "test-ack")
 	if err != nil {
 		t.Fatalf("runLocalAdmin: %v", err)
 	}
@@ -123,6 +125,8 @@ func TestService_RunLocalAdmin_RoutingAckError(t *testing.T) {
 		Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NO_RESPONSE}},
 	}
 
+	// Routing failures must resolve a Get-style tx immediately -- no
+	// AdminMessage will follow if firmware refused the request.
 	_, err := s.runLocalAdmin(context.Background(), AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "test-err")
 	if err == nil {
 		t.Error("expected routing-error to surface as Go error")

@@ -116,7 +116,7 @@ func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind 
 	if err != nil {
 		return nil, fmt.Errorf("build local admin packet: %w", err)
 	}
-	return s.send(ctx, frame, packetID, kind, DefaultLocalAdminTimeout)
+	return s.send(ctx, frame, packetID, kind, DefaultLocalAdminTimeout, adminMessageExpectsReply(msg))
 }
 
 // runRemoteAdmin sends an AdminMessage to a REMOTE node via PKC. Same
@@ -129,18 +129,55 @@ func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg 
 	if err != nil {
 		return nil, fmt.Errorf("build remote admin packet: %w", err)
 	}
-	return s.send(ctx, frame, packetID, kind, DefaultRemoteAdminTimeout)
+	return s.send(ctx, frame, packetID, kind, DefaultRemoteAdminTimeout, adminMessageExpectsReply(msg))
+}
+
+// adminMessageExpectsReply reports whether the firmware will follow up
+// the transport-level Routing ack with a get_*_response AdminMessage
+// payload. Get*Request variants expect such a reply; Set* and command
+// variants do not.
+//
+// The Tracker uses this to disambiguate: Set messages resolve on the
+// Routing ack, Get messages resolve on the AdminMessage (the ack only
+// confirms transport). Without the distinction the Routing ack races
+// the AdminMessage on Get paths and the AdminMessage gets dropped --
+// the symptom is "nil admin reply" 502s on /api/fleet-security/identity
+// and the other Get*-backed read endpoints.
+func adminMessageExpectsReply(msg *pb.AdminMessage) bool {
+	if msg == nil {
+		return false
+	}
+	switch msg.GetPayloadVariant().(type) {
+	case *pb.AdminMessage_GetChannelRequest,
+		*pb.AdminMessage_GetOwnerRequest,
+		*pb.AdminMessage_GetConfigRequest,
+		*pb.AdminMessage_GetModuleConfigRequest,
+		*pb.AdminMessage_GetCannedMessageModuleMessagesRequest,
+		*pb.AdminMessage_GetDeviceMetadataRequest,
+		*pb.AdminMessage_GetRingtoneRequest,
+		*pb.AdminMessage_GetDeviceConnectionStatusRequest,
+		*pb.AdminMessage_GetNodeRemoteHardwarePinsRequest,
+		*pb.AdminMessage_GetUiConfigRequest:
+		return true
+	default:
+		return false
+	}
 }
 
 // send is the shared transmit + await loop. Registers the transaction,
 // writes the frame, blocks on the reply channel until either an
 // AdminMessage reply arrives, a Routing ack arrives, or the timeout/
 // caller-cancel fires.
-func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind string, timeout time.Duration) (*pb.AdminMessage, error) {
+//
+// expectsAdminReply must match the outbound message shape: true for
+// Get*Request AdminMessages (firmware follows the Routing ack with a
+// get_*_response), false for Set* and command variants. See
+// adminMessageExpectsReply.
+func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind string, timeout time.Duration, expectsAdminReply bool) (*pb.AdminMessage, error) {
 	if s.serial == nil {
 		return nil, ErrSerialNotReady
 	}
-	reply, err := s.tracker.Begin(ctx, packetID, kind, timeout)
+	reply, err := s.tracker.Begin(ctx, packetID, kind, timeout, expectsAdminReply)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}
