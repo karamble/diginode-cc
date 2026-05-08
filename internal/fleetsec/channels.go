@@ -617,25 +617,45 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// ---- Phase A: Pi adds the new PSK as a SECONDARY channel slot ----
-	if err := s.applyLocalStagingChannel(ctx, stagingIdx, newPSK); err != nil {
-		// Hard abort -- without staging on Pi, Phase B acks would be
-		// undecryptable in any subsequent channel transition. Mark every
-		// target failed_b so the operator knows nothing happened.
-		slog.Error("phase A staging failed",
-			"rotation_id", rotID, "error", err)
-		for _, t := range remoteTargets {
-			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
-		}
-		if localTarget != nil {
-			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
-		}
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, true, pskFP)
-		return
+	// Read pi_local_phase to decide whether Phase A and Phase D need to
+	// run. On a Retry against a rotation that already reached
+	// staging_added or phase_d_promoted, those Pi-side writes have
+	// already happened; re-running them would either re-write the
+	// staging slot redundantly (harmless but slow) OR re-write a slot
+	// that's now PRIMARY and demote the live PRIMARY in the process
+	// (BRICK). Phase B/C per-target loops have their own idempotency
+	// checks; this is the rotation-level equivalent for A and D.
+	currentPiPhase := PiPhasePending
+	if rec, gErr := s.store.GetRotation(ctx, rotID); gErr == nil {
+		currentPiPhase = rec.PiLocalPhase
 	}
-	if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhaseStagingAdded); err != nil {
-		slog.Warn("persist pi_local_phase=staging_added",
-			"rotation_id", rotID, "error", err)
+	skipPhaseA := currentPiPhase != PiPhasePending
+	skipPhaseD := currentPiPhase == PiPhasePhaseDPromoted || currentPiPhase == PiPhaseRetired
+
+	// ---- Phase A: Pi adds the new PSK as a SECONDARY channel slot ----
+	if !skipPhaseA {
+		if err := s.applyLocalStagingChannel(ctx, stagingIdx, newPSK); err != nil {
+			// Hard abort -- without staging on Pi, Phase B acks would be
+			// undecryptable in any subsequent channel transition. Mark every
+			// target failed_b so the operator knows nothing happened.
+			slog.Error("phase A staging failed",
+				"rotation_id", rotID, "error", err)
+			for _, t := range remoteTargets {
+				s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
+			}
+			if localTarget != nil {
+				s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
+			}
+			s.persistAndBroadcast(ctx, rotID, channelIndex, current, true, pskFP)
+			return
+		}
+		if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhaseStagingAdded); err != nil {
+			slog.Warn("persist pi_local_phase=staging_added",
+				"rotation_id", rotID, "error", err)
+		}
+	} else {
+		slog.Info("retry: skipping Phase A (Pi already past pending)",
+			"rotation_id", rotID, "pi_local_phase", currentPiPhase)
 	}
 
 	// ---- Phase B: push staging slot to each remote ----
@@ -697,7 +717,7 @@ func (s *Service) runPSKRotation(
 	}
 
 	// ---- Phase D: Pi promotes locally ----
-	if localTarget != nil {
+	if localTarget != nil && !skipPhaseD {
 		_ = s.store.IncrementTargetAttempts(ctx, rotID, localNum)
 		s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhasePromotingC, "", pskFP)
 
@@ -712,11 +732,16 @@ func (s *Service) runPSKRotation(
 				slog.Warn("mark local trust verified", "rotation_id", rotID, "error", mErr)
 			}
 		}
+	} else if skipPhaseD {
+		slog.Info("retry: skipping Phase D (Pi already at phase_d_promoted)",
+			"rotation_id", rotID, "pi_local_phase", currentPiPhase)
 	}
 
-	if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhasePhaseDPromoted); err != nil {
-		slog.Warn("persist pi_local_phase=phase_d_promoted",
-			"rotation_id", rotID, "error", err)
+	if !skipPhaseD {
+		if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhasePhaseDPromoted); err != nil {
+			slog.Warn("persist pi_local_phase=phase_d_promoted",
+				"rotation_id", rotID, "error", err)
+		}
 	}
 
 	// Update the channel snapshot with the new PSK fingerprint FIRST --
