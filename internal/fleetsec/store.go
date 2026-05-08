@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 
@@ -308,8 +309,14 @@ func (s *Store) InsertRotation(ctx context.Context, r RotationRecord) (string, e
 
 // UpdateRotationTargets replaces the targets JSONB. Set completedAt non-nil
 // when the rotation is fully resolved (every target is acked or failed and
-// no retries remain pending).
-func (s *Store) UpdateRotationTargets(ctx context.Context, id string, targets []RotationTarget, completedAt *interface{}) error {
+// no retries remain pending). Pass nil during in-progress updates -- the
+// COALESCE preserves the existing completed_at column value.
+//
+// Use a typed *time.Time rather than *interface{}: pgx cannot encode a
+// pointer-to-interface (it can't infer the wire type from the dereferenced
+// interface{} value) and falls over with "cannot find encode plan for
+// timestamptz".
+func (s *Store) UpdateRotationTargets(ctx context.Context, id string, targets []RotationTarget, completedAt *time.Time) error {
 	targetsJSON, err := json.Marshal(targets)
 	if err != nil {
 		return fmt.Errorf("encode targets: %w", err)

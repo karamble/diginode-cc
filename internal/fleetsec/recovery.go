@@ -202,12 +202,12 @@ func (s *Service) runRecovery(
 	current := append([]RotationTarget(nil), targets...)
 
 	emit := func(stage RecoveryStage, done bool, errMsg string) {
-		var completedAt interface{}
+		var completedAt *time.Time
 		if done {
 			t := time.Now().UTC()
-			completedAt = t
+			completedAt = &t
 		}
-		_ = s.store.UpdateRotationTargets(ctx, id, current, &completedAt)
+		_ = s.store.UpdateRotationTargets(ctx, id, current, completedAt)
 		s.hubRef.broadcast(ws.Event{
 			Type: EventFleetSecRecovery,
 			Payload: RecoveryProgressEvent{

@@ -357,12 +357,12 @@ func (s *Service) persistAndBroadcast(
 	done bool,
 	pskFP string,
 ) {
-	var completedAt interface{}
+	var completedAt *time.Time
 	if done {
 		t := time.Now().UTC()
-		completedAt = t
+		completedAt = &t
 	}
-	if err := s.store.UpdateRotationTargets(ctx, rotID, targets, &completedAt); err != nil {
+	if err := s.store.UpdateRotationTargets(ctx, rotID, targets, completedAt); err != nil {
 		slog.Error("persist rotation progress",
 			"rotation_id", rotID, "error", err)
 	}
