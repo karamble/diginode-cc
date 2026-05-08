@@ -352,6 +352,142 @@ func (s *Store) MarkTrustVerifiedNow(ctx context.Context, nodeNum uint32, method
 	return nil
 }
 
+// UpdateTargetPhase rewrites a single target's phase + lastError inside
+// fleet_rotations.targets. Reads the current JSONB, finds the matching
+// node entry, mutates it, writes back. Smaller wire footprint than a full
+// UpdateRotationTargets when the worker just transitions one target.
+//
+// Sets the legacy `status` field in the JSONB to match (statusForPhase) so
+// older frontend clients keep rendering correctly.
+func (s *Store) UpdateTargetPhase(ctx context.Context, rotID string, nodeNum uint32, phase RotationPhase, errMsg string) error {
+	rec, err := s.GetRotation(ctx, rotID)
+	if err != nil {
+		return err
+	}
+	found := false
+	for i := range rec.Targets {
+		if rec.Targets[i].NodeNum != nodeNum {
+			continue
+		}
+		rec.Targets[i].Phase = phase
+		rec.Targets[i].Status = statusForPhase(phase)
+		rec.Targets[i].LastError = errMsg
+		found = true
+		break
+	}
+	if !found {
+		return fmt.Errorf("target node_num %d not in rotation %s", nodeNum, rotID)
+	}
+	return s.UpdateRotationTargets(ctx, rotID, rec.Targets, nil)
+}
+
+// IncrementTargetAttempts adds 1 to attempts on a target. Used when entering
+// an in-flight phase (PhasePushingB, PhasePromotingC) so the UI can show
+// retry counts without conflating phase transitions and attempt counts.
+func (s *Store) IncrementTargetAttempts(ctx context.Context, rotID string, nodeNum uint32) error {
+	rec, err := s.GetRotation(ctx, rotID)
+	if err != nil {
+		return err
+	}
+	for i := range rec.Targets {
+		if rec.Targets[i].NodeNum == nodeNum {
+			rec.Targets[i].Attempts++
+			return s.UpdateRotationTargets(ctx, rotID, rec.Targets, nil)
+		}
+	}
+	return fmt.Errorf("target node_num %d not in rotation %s", nodeNum, rotID)
+}
+
+// UpsertPiLocalPhase records the Pi-Heltec's lifecycle position in this
+// rotation. The check constraint on fleet_rotations.pi_local_phase rejects
+// any value outside the {pending, staging_added, phase_d_promoted, retired}
+// set, so a typo-fix-it-in-prod scenario is impossible.
+func (s *Store) UpsertPiLocalPhase(ctx context.Context, rotID string, phase PiLocalPhase) error {
+	_, err := s.db.Pool.Exec(ctx,
+		`UPDATE fleet_rotations SET pi_local_phase = $2 WHERE id = $1`,
+		rotID, string(phase))
+	if err != nil {
+		return fmt.Errorf("upsert pi_local_phase: %w", err)
+	}
+	return nil
+}
+
+// SetStagingChannelIndex pins which slot the staged-rotation worker chose
+// for the new PSK during this rotation. RetryRotation reads it back so it
+// knows where the existing staging definition lives on the remotes.
+func (s *Store) SetStagingChannelIndex(ctx context.Context, rotID string, idx int32) error {
+	_, err := s.db.Pool.Exec(ctx,
+		`UPDATE fleet_rotations SET staging_channel_index = $2 WHERE id = $1`,
+		rotID, idx)
+	if err != nil {
+		return fmt.Errorf("set staging_channel_index: %w", err)
+	}
+	return nil
+}
+
+// MarkRotationRetired stamps fleet_rotations.retired_at and flips
+// pi_local_phase to retired. Only called by the operator-paced retirement
+// flow after every fleet member is confirmed on the new PSK.
+func (s *Store) MarkRotationRetired(ctx context.Context, rotID string) error {
+	_, err := s.db.Pool.Exec(ctx,
+		`UPDATE fleet_rotations
+		    SET retired_at = now(),
+		        pi_local_phase = 'retired'
+		  WHERE id = $1`,
+		rotID)
+	if err != nil {
+		return fmt.Errorf("mark rotation retired: %w", err)
+	}
+	return nil
+}
+
+// SetNodeCurrentPSKFP records the PSK fingerprint a node was last
+// confirmed on (= Pi-Heltec's PRIMARY fp at the time of a successful
+// GetTrust round-trip). Called from GetTrust on success.
+//
+// The retirement gate ANDs this across every managed-trust row: every
+// member must equal the Pi's current PRIMARY fp. nil/empty means "never
+// successfully verified since this column was added" -- treated as not-
+// yet-migrated by the gate (operator must run a fresh Verify first).
+func (s *Store) SetNodeCurrentPSKFP(ctx context.Context, nodeNum uint32, fp string) error {
+	if fp == "" {
+		return nil
+	}
+	_, err := s.db.Pool.Exec(ctx,
+		`UPDATE fleet_node_trust SET current_psk_fp = $2 WHERE node_num = $1`,
+		nodeNum, fp)
+	if err != nil {
+		return fmt.Errorf("set node current_psk_fp: %w", err)
+	}
+	return nil
+}
+
+// AllManagedNodesOnPSK reports whether every fleet_node_trust row whose
+// node has at least one admin_key fingerprint set (== "managed by us")
+// has current_psk_fp matching the supplied fp. Used as the gate for the
+// retirement endpoint; returns the list of laggards on failure so the
+// operator UI can surface "still pending: HB55, HB99" before the retire
+// button enables.
+func (s *Store) AllManagedNodesOnPSK(ctx context.Context, fp string) (allMigrated bool, laggards []uint32, err error) {
+	rows, qErr := s.db.Pool.Query(ctx, `
+		SELECT node_num
+		  FROM fleet_node_trust
+		 WHERE jsonb_array_length(admin_key_fps) > 0
+		   AND (current_psk_fp IS NULL OR current_psk_fp <> $1)`, fp)
+	if qErr != nil {
+		return false, nil, fmt.Errorf("scan laggards: %w", qErr)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var n uint32
+		if err := rows.Scan(&n); err != nil {
+			return false, nil, fmt.Errorf("scan laggard: %w", err)
+		}
+		laggards = append(laggards, n)
+	}
+	return len(laggards) == 0, laggards, nil
+}
+
 // ClearRotationPSK NULLs fleet_rotations.new_psk. Called by the rotation
 // runner once every target reaches acked, so a fully-successful rotation
 // doesn't leave the raw PSK at rest in the DB longer than necessary.
@@ -394,16 +530,19 @@ func (s *Store) UpdateRotationTargets(ctx context.Context, id string, targets []
 func (s *Store) GetRotation(ctx context.Context, id string) (*RotationRecord, error) {
 	var r RotationRecord
 	var targetsJSON []byte
-	var ci *int32
+	var ci, sci *int32
+	var piPhase string
 	err := s.db.Pool.QueryRow(ctx, `
-		SELECT id::text, kind, channel_index,
+		SELECT id::text, kind, channel_index, staging_channel_index,
 		       COALESCE(started_by::text, ''),
-		       started_at, completed_at, targets,
+		       started_at, completed_at, retired_at,
+		       COALESCE(pi_local_phase, 'pending'),
+		       targets,
 		       COALESCE(new_psk_fp, ''), COALESCE(notes, '')
 		  FROM fleet_rotations
 		 WHERE id = $1`, id).
-		Scan(&r.ID, &r.Kind, &ci, &r.StartedBy, &r.StartedAt, &r.CompletedAt,
-			&targetsJSON, &r.NewPSKFP, &r.Notes)
+		Scan(&r.ID, &r.Kind, &ci, &sci, &r.StartedBy, &r.StartedAt, &r.CompletedAt,
+			&r.RetiredAt, &piPhase, &targetsJSON, &r.NewPSKFP, &r.Notes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -411,10 +550,38 @@ func (s *Store) GetRotation(ctx context.Context, id string) (*RotationRecord, er
 		return nil, fmt.Errorf("get rotation: %w", err)
 	}
 	r.ChannelIndex = ci
+	r.StagingChannelIndex = sci
+	r.PiLocalPhase = PiLocalPhase(piPhase)
 	if err := json.Unmarshal(targetsJSON, &r.Targets); err != nil {
 		return nil, fmt.Errorf("decode targets: %w", err)
 	}
+	// Back-fill Phase from legacy Status for rotations that pre-date the
+	// 5-phase schema (000027). Lets the new worker / UI read old rows
+	// uniformly without a separate code path.
+	for i := range r.Targets {
+		if r.Targets[i].Phase == "" {
+			r.Targets[i].Phase = phaseForLegacyStatus(r.Targets[i].Status)
+		}
+	}
 	return &r, nil
+}
+
+// phaseForLegacyStatus maps a pre-staging rotation's TargetStatus into the
+// 5-phase enum so reads of historical rotations don't surface empty phase
+// strings to the worker / UI.
+func phaseForLegacyStatus(s TargetStatus) RotationPhase {
+	switch s {
+	case TargetStatusPending:
+		return PhasePending
+	case TargetStatusInFlight:
+		return PhasePushingB
+	case TargetStatusAcked:
+		return PhaseOnNewPSK
+	case TargetStatusFailed:
+		return PhaseFailedB
+	default:
+		return PhasePending
+	}
 }
 
 // --- Policy ---

@@ -123,6 +123,9 @@ const (
 )
 
 // TargetStatus is the per-node status pill in a rotation's progress drawer.
+// Retained for back-compat with frontend clients that read the legacy
+// `status` field; new code uses RotationPhase via RotationTarget.Phase.
+// statusForPhase() derives the right legacy status from a phase value.
 type TargetStatus string
 
 const (
@@ -132,27 +135,89 @@ const (
 	TargetStatusFailed   TargetStatus = "failed"
 )
 
-// RotationTarget is one entry in fleet_rotations.targets JSONB. Status
-// transitions: pending → in-flight → acked|failed. Last_error is set on
-// failed only; cleared on retry success.
+// RotationPhase is the per-target phase for a staged 5-phase PSK rotation
+// (project_psk_rotation_secondary_channel_staging.md).
+//
+// Phase B = Pi pushes new PSK to the remote on a SECONDARY channel slot.
+// Phase C = remote promotes the SECONDARY to PRIMARY.
+//
+// failed_b: Phase B push failed; remote stays on PSK_OLD only and is
+// fully reachable -- safe to retry from PhasePending.
+// failed_c: Phase B succeeded but Phase C didn't; remote has the new PSK
+// on a SECONDARY slot but never promoted -- still reachable on either
+// channel; safe to retry from PhaseHasNewPSK.
+type RotationPhase string
+
+const (
+	PhasePending      RotationPhase = "pending"
+	PhasePushingB     RotationPhase = "phase_b_pushing"
+	PhaseHasNewPSK    RotationPhase = "has_new_psk"
+	PhasePromotingC   RotationPhase = "phase_c_promoting"
+	PhaseOnNewPSK     RotationPhase = "on_new_psk"
+	PhaseRetired      RotationPhase = "retired"
+	PhaseFailedB      RotationPhase = "failed_b"
+	PhaseFailedC      RotationPhase = "failed_c"
+)
+
+// statusForPhase maps the new phase enum back to the legacy 4-value status
+// for backward-compatible clients (UI versions that haven't been updated to
+// render the 5-phase stepper). The mapping collapses both failure modes to
+// "failed" and both terminal-success states (on_new_psk, retired) to
+// "acked".
+func statusForPhase(p RotationPhase) TargetStatus {
+	switch p {
+	case PhasePending:
+		return TargetStatusPending
+	case PhaseOnNewPSK, PhaseRetired:
+		return TargetStatusAcked
+	case PhaseFailedB, PhaseFailedC:
+		return TargetStatusFailed
+	default:
+		return TargetStatusInFlight
+	}
+}
+
+// PiLocalPhase tracks the Pi-Heltec's place in a staged rotation. Persisted
+// on fleet_rotations.pi_local_phase.
+//
+//	pending           -- worker hasn't started or hasn't yet added staging
+//	staging_added     -- Phase A done; Pi has the new PSK on a SECONDARY slot
+//	phase_d_promoted  -- Phase D done; Pi PRIMARY = new PSK; old PSK kept as SECONDARY
+//	retired           -- Phase E done; old slot DISABLED
+type PiLocalPhase string
+
+const (
+	PiPhasePending         PiLocalPhase = "pending"
+	PiPhaseStagingAdded    PiLocalPhase = "staging_added"
+	PiPhasePhaseDPromoted  PiLocalPhase = "phase_d_promoted"
+	PiPhaseRetired         PiLocalPhase = "retired"
+)
+
+// RotationTarget is one entry in fleet_rotations.targets JSONB. Phase is
+// the new per-target lifecycle marker; Status is the legacy mirror kept in
+// sync via statusForPhase() for back-compat with older clients.
 type RotationTarget struct {
-	NodeNum   uint32       `json:"nodeNum"`
-	Status    TargetStatus `json:"status"`
-	Attempts  int          `json:"attempts"`
-	LastError string       `json:"lastError,omitempty"`
+	NodeNum   uint32        `json:"nodeNum"`
+	Phase     RotationPhase `json:"phase,omitempty"`
+	Status    TargetStatus  `json:"status"`
+	Attempts  int           `json:"attempts"`
+	LastError string        `json:"lastError,omitempty"`
 }
 
 // RotationRecord mirrors a row in fleet_rotations.
 type RotationRecord struct {
-	ID            string           `json:"id"`
-	Kind          RotationKind     `json:"kind"`
-	ChannelIndex  *int32           `json:"channelIndex,omitempty"`
-	StartedBy     string           `json:"startedBy,omitempty"`
-	StartedAt     time.Time        `json:"startedAt"`
-	CompletedAt   *time.Time       `json:"completedAt,omitempty"`
-	Targets       []RotationTarget `json:"targets"`
-	NewPSKFP      string           `json:"newPskFingerprint,omitempty"`
-	Notes         string           `json:"notes,omitempty"`
+	ID                   string           `json:"id"`
+	Kind                 RotationKind     `json:"kind"`
+	ChannelIndex         *int32           `json:"channelIndex,omitempty"`
+	StagingChannelIndex  *int32           `json:"stagingChannelIndex,omitempty"`
+	PiLocalPhase         PiLocalPhase     `json:"piLocalPhase,omitempty"`
+	StartedBy            string           `json:"startedBy,omitempty"`
+	StartedAt            time.Time        `json:"startedAt"`
+	CompletedAt          *time.Time       `json:"completedAt,omitempty"`
+	RetiredAt            *time.Time       `json:"retiredAt,omitempty"`
+	Targets              []RotationTarget `json:"targets"`
+	NewPSKFP             string           `json:"newPskFingerprint,omitempty"`
+	Notes                string           `json:"notes,omitempty"`
 }
 
 // FleetPolicy mirrors the singleton row in fleet_policy. Display-only in

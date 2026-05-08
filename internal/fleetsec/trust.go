@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"time"
 
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
@@ -100,7 +101,37 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 	if err := s.store.UpsertNodeTrust(ctx, rec); err != nil {
 		return nil, fmt.Errorf("upsert trust: %w", err)
 	}
+	// Channel-layer PSK match is implicit in a successful PKC GetConfig
+	// round-trip: the request would not have decoded at the remote
+	// otherwise. Stamp current_psk_fp with the Pi-Heltec's PRIMARY-channel
+	// fingerprint at this moment so the staged-rotation retirement gate
+	// can see "fleet member is on the same PSK as us".
+	if piFP := s.localPrimaryPSKFP(ctx); piFP != "" {
+		if err := s.store.SetNodeCurrentPSKFP(ctx, nodeNum, piFP); err != nil {
+			slog.Warn("set node current_psk_fp",
+				"node_num", nodeNum, "error", err)
+		}
+	}
 	return s.store.GetNodeTrust(ctx, nodeNum)
+}
+
+// localPrimaryPSKFP fetches the Pi-Heltec's current PRIMARY channel
+// fingerprint from fleet_channels (channel index 0 row). Returns "" if
+// no row is recorded yet (pre-rotation install) or on error -- the
+// caller treats "" as "skip stamping current_psk_fp this round," which
+// keeps the retirement gate's "every node confirmed" semantics correct
+// even with intermittent DB errors.
+func (s *Service) localPrimaryPSKFP(ctx context.Context) string {
+	chs, err := s.store.ListChannels(ctx)
+	if err != nil {
+		return ""
+	}
+	for _, c := range chs {
+		if c.Index == 0 {
+			return c.PSKFingerprint
+		}
+	}
+	return ""
 }
 
 // VerifyTrust is the lightweight equivalent of GetTrust used by the UI's
