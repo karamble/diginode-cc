@@ -11,7 +11,7 @@ import (
 
 func TestTracker_RoutingAckDelivery(t *testing.T) {
 	tr := NewTracker()
-	ch, err := tr.Begin(context.Background(), 0xdeadbeef, "test-routing", time.Second, false)
+	ch, err := tr.Begin(context.Background(), 0xdeadbeef, "test-routing", time.Second, false, 0)
 	if err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestTracker_RoutingAckDelivery(t *testing.T) {
 
 func TestTracker_AdminReplyDelivery(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0xfeedface, "test-admin", time.Second, true)
+	ch, _ := tr.Begin(context.Background(), 0xfeedface, "test-admin", time.Second, true, 0)
 
 	// AdminMessage with a get_channel_response inside.
 	admin := &pb.AdminMessage{
@@ -88,7 +88,7 @@ func TestTracker_AdminReplyDelivery(t *testing.T) {
 
 func TestTracker_Timeout(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0x12345678, "timeout-test", 50*time.Millisecond, false)
+	ch, _ := tr.Begin(context.Background(), 0x12345678, "timeout-test", 50*time.Millisecond, false, 0)
 
 	select {
 	case r := <-ch:
@@ -110,7 +110,7 @@ func TestTracker_Timeout(t *testing.T) {
 func TestTracker_ContextCancel(t *testing.T) {
 	tr := NewTracker()
 	ctx, cancel := context.WithCancel(context.Background())
-	ch, _ := tr.Begin(ctx, 0x11111111, "cancel-test", time.Hour, false)
+	ch, _ := tr.Begin(ctx, 0x11111111, "cancel-test", time.Hour, false, 0)
 
 	cancel()
 
@@ -126,17 +126,17 @@ func TestTracker_ContextCancel(t *testing.T) {
 
 func TestTracker_RejectsZeroID(t *testing.T) {
 	tr := NewTracker()
-	if _, err := tr.Begin(context.Background(), 0, "test", time.Second, false); err == nil {
+	if _, err := tr.Begin(context.Background(), 0, "test", time.Second, false, 0); err == nil {
 		t.Error("Begin(0) accepted")
 	}
 }
 
 func TestTracker_RejectsDuplicate(t *testing.T) {
 	tr := NewTracker()
-	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false); err != nil {
+	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false); err == nil {
+	if _, err := tr.Begin(context.Background(), 42, "test", time.Second, false, 0); err == nil {
 		t.Error("duplicate Begin accepted")
 	}
 }
@@ -157,7 +157,7 @@ func TestTracker_DropUnknownAck(t *testing.T) {
 // is what carries the data and what the caller is waiting for.
 func TestTracker_GetRequest_RoutingAckIgnoredOnSuccess(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0xcafef00d, "get-config", time.Second, true)
+	ch, _ := tr.Begin(context.Background(), 0xcafef00d, "get-config", time.Second, true, 0)
 
 	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}
 	rPayload, _ := proto.Marshal(routing)
@@ -214,7 +214,7 @@ func TestTracker_GetRequest_RoutingAckIgnoredOnSuccess(t *testing.T) {
 // immediately. No AdminMessage will follow if the firmware refused.
 func TestTracker_GetRequest_RoutingAckResolvesOnFailure(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 0xbadbad01, "get-config-fail", time.Second, true)
+	ch, _ := tr.Begin(context.Background(), 0xbadbad01, "get-config-fail", time.Second, true, 0)
 
 	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NO_ROUTE}}
 	payload, _ := proto.Marshal(routing)
@@ -237,9 +237,65 @@ func TestTracker_GetRequest_RoutingAckResolvesOnFailure(t *testing.T) {
 	}
 }
 
+// TestTracker_WrongFromIsDropped pins the false-success fix. The
+// Pi-Heltec emits a from=local routing ack ("transmitted it") for every
+// outbound packet -- if the tracker accepted that ack as confirmation
+// for a remote PKC Set*, the rotation worker would falsely succeed
+// against an unpowered remote. Begin with expectedFrom = remote-num and
+// confirm a routing ack from another sender does not resolve the tx.
+func TestTracker_WrongFromIsDropped(t *testing.T) {
+	tr := NewTracker()
+	const target uint32 = 0x0409cf64 // pretend HB35
+	ch, _ := tr.Begin(context.Background(), 0xacef0001, "remote-set", 200*time.Millisecond, false, target)
+
+	// Local-loopback "I sent it" ack (different from).
+	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}
+	payload, _ := proto.Marshal(routing)
+	tr.HandleRoutingAck(0x0409c9d8, 0xacef0001, payload) // local Pi-Heltec, not the target
+
+	// Tx must still be pending.
+	if got := tr.Pending(); got != 1 {
+		t.Fatalf("Pending after wrong-from ack = %d, want 1 (loopback ack must be dropped)", got)
+	}
+
+	// Real ack from the target resolves it.
+	tr.HandleRoutingAck(target, 0xacef0001, payload)
+	select {
+	case r := <-ch:
+		if r.Kind != ReplyRoutingAck {
+			t.Errorf("Kind = %v, want ReplyRoutingAck", r.Kind)
+		}
+		if r.From != target {
+			t.Errorf("From = %x, want %x", r.From, target)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("real target ack didn't resolve tx")
+	}
+}
+
+// TestTracker_ZeroFromAcceptsAny preserves the legacy behavior for
+// existing tests that don't care about source filtering.
+func TestTracker_ZeroFromAcceptsAny(t *testing.T) {
+	tr := NewTracker()
+	ch, _ := tr.Begin(context.Background(), 0xb00bf00d, "any-source", time.Second, false, 0)
+
+	routing := &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}
+	payload, _ := proto.Marshal(routing)
+	tr.HandleRoutingAck(0xdeadbeef, 0xb00bf00d, payload) // any from is fine
+
+	select {
+	case r := <-ch:
+		if r.Kind != ReplyRoutingAck {
+			t.Errorf("Kind = %v, want ReplyRoutingAck", r.Kind)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("ack with expectedFrom=0 didn't resolve")
+	}
+}
+
 func TestTracker_DropZeroRequestID(t *testing.T) {
 	tr := NewTracker()
-	ch, _ := tr.Begin(context.Background(), 1, "test", 200*time.Millisecond, false)
+	ch, _ := tr.Begin(context.Background(), 1, "test", 200*time.Millisecond, false, 0)
 
 	// Acks with request_id=0 should NOT match anything (broadcast/unsolicited).
 	tr.HandleRoutingAck(1, 0, nil)

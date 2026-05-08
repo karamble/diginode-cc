@@ -116,7 +116,9 @@ func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind 
 	if err != nil {
 		return nil, fmt.Errorf("build local admin packet: %w", err)
 	}
-	return s.send(ctx, frame, packetID, kind, DefaultLocalAdminTimeout, adminMessageExpectsReply(msg))
+	// expectedFrom = localNum: routing/admin replies for local admin
+	// legitimately come from the local Heltec.
+	return s.send(ctx, frame, packetID, kind, DefaultLocalAdminTimeout, adminMessageExpectsReply(msg), localNum)
 }
 
 // runRemoteAdmin sends an AdminMessage to a REMOTE node via PKC. Same
@@ -129,7 +131,12 @@ func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg 
 	if err != nil {
 		return nil, fmt.Errorf("build remote admin packet: %w", err)
 	}
-	return s.send(ctx, frame, packetID, kind, DefaultRemoteAdminTimeout, adminMessageExpectsReply(msg))
+	// expectedFrom = remoteNodeNum: only the actual target's reply
+	// counts. The Pi-Heltec emits a from=local "transmitted it" loopback
+	// routing ack for every outbound packet -- without this filter, that
+	// loopback would falsely succeed every PKC Set* even when the remote
+	// is unreachable or unpowered.
+	return s.send(ctx, frame, packetID, kind, DefaultRemoteAdminTimeout, adminMessageExpectsReply(msg), remoteNodeNum)
 }
 
 // adminMessageExpectsReply reports whether the firmware will follow up
@@ -173,11 +180,17 @@ func adminMessageExpectsReply(msg *pb.AdminMessage) bool {
 // Get*Request AdminMessages (firmware follows the Routing ack with a
 // get_*_response), false for Set* and command variants. See
 // adminMessageExpectsReply.
-func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind string, timeout time.Duration, expectsAdminReply bool) (*pb.AdminMessage, error) {
+//
+// expectedFrom is the only node-num whose reply should resolve this
+// transaction. For runLocalAdmin pass the local node-num; for
+// runRemoteAdmin pass the remote target. The loopback "transmitted it"
+// routing ack the Pi-Heltec emits on every outbound packet has
+// from=local_num and would otherwise falsely succeed remote Set*.
+func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind string, timeout time.Duration, expectsAdminReply bool, expectedFrom uint32) (*pb.AdminMessage, error) {
 	if s.serial == nil {
 		return nil, ErrSerialNotReady
 	}
-	reply, err := s.tracker.Begin(ctx, packetID, kind, timeout, expectsAdminReply)
+	reply, err := s.tracker.Begin(ctx, packetID, kind, timeout, expectsAdminReply, expectedFrom)
 	if err != nil {
 		return nil, fmt.Errorf("begin transaction: %w", err)
 	}

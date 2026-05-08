@@ -89,6 +89,16 @@ type pendingTx struct {
 	// Routing failures still resolve immediately (no AdminMessage will
 	// follow if firmware refused the request).
 	expectsAdminReply bool
+	// expectedFrom is the node-num that legitimately sources the reply
+	// for this transaction. For local admin it's the local Heltec; for
+	// remote PKC admin it's the remote target. Routing acks/admin
+	// replies from any other source are dropped: most importantly, the
+	// local Heltec's loopback "I transmitted it" routing ack (which
+	// always carries from=local_num regardless of where the packet was
+	// actually addressed) must NOT be treated as a delivery
+	// confirmation for a remote target. Zero means "accept any from"
+	// (legacy callers / tests that pre-date the field).
+	expectedFrom uint32
 }
 
 // NewTracker constructs an empty Tracker.
@@ -111,8 +121,17 @@ func NewTracker() *Tracker {
 // Routing ack races the AdminMessage on Get* paths and the AdminMessage
 // gets dropped (manifests as `nil admin reply` from extract* helpers).
 //
+// expectedFrom restricts which node-num may legitimately source the
+// reply. The local Heltec emits a loopback Routing ack with from=local
+// for every outbound packet, regardless of the actual recipient -- if
+// the tracker accepts those, every PKC Set* against an unreachable
+// remote node "succeeds" against the local loopback. Pass the target
+// node-num here (local for runLocalAdmin, remote for runRemoteAdmin)
+// and the tracker will silently drop replies from any other source.
+// Zero means "accept any" -- legacy callers / unit tests only.
+//
 // If id is already pending, returns an error and does not overwrite.
-func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout time.Duration, expectsAdminReply bool) (<-chan Reply, error) {
+func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout time.Duration, expectsAdminReply bool, expectedFrom uint32) (<-chan Reply, error) {
 	if id == 0 {
 		return nil, errors.New("transaction id must be non-zero")
 	}
@@ -128,6 +147,7 @@ func (t *Tracker) Begin(ctx context.Context, id uint32, kind string, timeout tim
 		reply:             make(chan Reply, 1),
 		cancel:            cancel,
 		expectsAdminReply: expectsAdminReply,
+		expectedFrom:      expectedFrom,
 	}
 	t.transactions[id] = tx
 	t.mu.Unlock()
@@ -199,6 +219,15 @@ func (t *Tracker) HandleRoutingAck(from, requestID uint32, payload []byte) {
 		t.mu.Unlock()
 		return
 	}
+	// Loopback filter: when expectedFrom is set, drop routing acks
+	// from any other source. The local Heltec emits a from=local_num
+	// "transmitted it" ack for every outbound packet -- consuming
+	// that as the target's delivery ack lets PKC Set* against an
+	// unpowered remote node falsely succeed.
+	if tx.expectedFrom != 0 && from != tx.expectedFrom {
+		t.mu.Unlock()
+		return
+	}
 	if tx.expectsAdminReply && !routingFailed {
 		// Transport delivery confirmed; keep the tx open and let the
 		// AdminMessage carrying the actual response resolve it.
@@ -224,14 +253,29 @@ func (t *Tracker) HandleRoutingAck(from, requestID uint32, payload []byte) {
 // transaction. AdminMessage replies (get_*_response) carry data the
 // service needs (current channel/config state); the variant is on the
 // returned msg.GetPayloadVariant() switch.
+//
+// Same loopback filter as HandleRoutingAck: when the matched tx has an
+// expectedFrom, replies from any other node are dropped -- the local
+// Heltec doesn't emit admin-reply loopbacks today, but the symmetry
+// keeps the tracker's policy consistent.
 func (t *Tracker) HandleAdminReply(from, requestID uint32, payload []byte) {
 	if requestID == 0 {
 		return
 	}
-	tx := t.removeAndClose(requestID)
-	if tx == nil {
+	t.mu.Lock()
+	tx, ok := t.transactions[requestID]
+	if !ok {
+		t.mu.Unlock()
 		return
 	}
+	if tx.expectedFrom != 0 && from != tx.expectedFrom {
+		t.mu.Unlock()
+		return
+	}
+	delete(t.transactions, requestID)
+	t.mu.Unlock()
+	tx.cancel()
+
 	r := Reply{Kind: ReplyAdminMsg, From: from}
 	var admin pb.AdminMessage
 	if err := proto.Unmarshal(payload, &admin); err != nil {
