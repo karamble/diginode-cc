@@ -49,6 +49,8 @@ type Service struct {
 	serial     SerialSender
 	localNode  LocalNodeProvider
 
+	hubRef hubRef // optional WS broadcaster, set via WireHub
+
 	adminMu sync.Mutex // serializes admin transactions
 }
 

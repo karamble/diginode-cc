@@ -366,9 +366,9 @@ func (s *Server) setupRoutes() chi.Router {
 
 			// Fleet Security: control-center identity, per-node trust roster,
 			// channel PSK rotation. Reads OPERATOR+; mutations ADMIN-only.
-			// PSK rotation, recovery, policy edits land in steps 8/9/10.
+			// Recovery wizard endpoints land in step 9.
 			r.Route("/fleet-security", func(r chi.Router) {
-				// Identity (read)
+				// Identity + Trust + Channels (read)
 				r.With(auth.RequireRole(auth.RoleOperator)).Group(func(r chi.Router) {
 					r.Get("/identity", s.handleFleetSecGetIdentity)
 					r.Get("/identity/pubkey", s.handleFleetSecExportPubkey)
@@ -376,14 +376,18 @@ func (s *Server) setupRoutes() chi.Router {
 					r.Get("/trust", s.handleFleetSecListTrust)
 					r.Get("/trust/{nodeNum}", s.handleFleetSecGetTrust)
 					r.Post("/trust/{nodeNum}/verify", s.handleFleetSecVerifyTrust)
+					r.Get("/channels", s.handleFleetSecListChannels)
+					r.Get("/rotations/{id}", s.handleFleetSecGetRotation)
 				})
-				// Identity + Trust (mutations) -- ADMIN only
+				// Identity + Trust + Channels (mutations) -- ADMIN only
 				r.With(auth.RequireRole(auth.RoleAdmin)).Group(func(r chi.Router) {
 					r.Post("/identity/import", s.handleFleetSecImportIdentity)
 					r.Post("/identities", s.handleFleetSecRegisterIdentity)
 					r.Delete("/identities/{fingerprint}", s.handleFleetSecRevokeIdentity)
 					r.Put("/trust/{nodeNum}/admin-keys", s.handleFleetSecSetAdminKeys)
 					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
+					r.Post("/channels/{idx}/rotate", s.handleFleetSecRotatePSK)
+					r.Post("/rotations/{id}/retry", s.handleFleetSecRetryRotation)
 				})
 			})
 

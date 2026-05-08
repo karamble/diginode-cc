@@ -534,6 +534,7 @@ func main() {
 	// in-flight transaction resolution. See FLEET_SECURITY.md.
 	fleetSecSvc := fleetsec.NewService(db, auditSvc, serialMgr, dispatcher)
 	dispatcher.SetAdminReplyHandler(fleetSecSvc.Tracker())
+	fleetSecSvc.WireHub(hub) // live PSK-rotation progress events
 
 	// Start serial manager (always runs; retries until device appears)
 	go func() {

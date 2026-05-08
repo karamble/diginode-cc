@@ -108,6 +108,79 @@ export const fleetSecurityApi = {
       `/fleet-security/trust/${nodeNum}/is-managed`,
       { value, force: opts?.force ?? false, ack: opts?.ack ?? '' },
     ),
+
+  // Channels + PSK rotation
+  listChannels: () => api.get<Channel[]>('/fleet-security/channels'),
+  rotatePSK: (
+    channelIndex: number,
+    body: {
+      source: 'random' | 'explicit'
+      pskB64?: string
+      targets?: number[]
+      ack: string
+      notes?: string
+      interTargetDelayMs?: number
+    },
+  ) =>
+    api.post<{ rotationId: string }>(
+      `/fleet-security/channels/${channelIndex}/rotate`,
+      body,
+    ),
+  getRotation: (id: string) =>
+    api.get<Rotation>(`/fleet-security/rotations/${id}`),
+  retryRotation: (id: string, pskB64: string, targets: number[]) =>
+    api.post<{ queued: boolean }>(
+      `/fleet-security/rotations/${id}/retry`,
+      { pskB64, targets },
+    ),
 }
+
+// ---- Channels + Rotations types ----
+
+export type ChannelRole = 'PRIMARY' | 'SECONDARY' | 'DISABLED'
+
+export interface Channel {
+  index: number
+  name: string
+  role: ChannelRole
+  pskFingerprint?: string
+  pskLength: number
+  lastRotatedAt?: string
+  lastRotatedBy?: string
+  lastRotationId?: string
+}
+
+export type RotationKind = 'psk' | 'identity' | 'admin-keys' | 'recovery'
+export type TargetStatus = 'pending' | 'in-flight' | 'acked' | 'failed'
+
+export interface RotationTarget {
+  nodeNum: number
+  status: TargetStatus
+  attempts: number
+  lastError?: string
+}
+
+export interface Rotation {
+  id: string
+  kind: RotationKind
+  channelIndex?: number
+  startedBy?: string
+  startedAt: string
+  completedAt?: string
+  targets: RotationTarget[]
+  newPskFingerprint?: string
+  notes?: string
+}
+
+// WebSocket event payload from EventFleetSecRotation.
+export interface RotationProgressEvent {
+  rotationId: string
+  kind: RotationKind
+  targets: RotationTarget[]
+  done: boolean
+  newPskFingerprint?: string
+}
+
+export const FLEET_SEC_ROTATION_EVENT = 'fleet-security.rotation.progress'
 
 export default fleetSecurityApi

@@ -10,6 +10,7 @@ import { Navigate } from 'react-router-dom'
 import { useAuthStore } from '../stores/authStore'
 import IdentityCard from './fleet/IdentityCard'
 import TrustRoster from './fleet/TrustRoster'
+import ChannelsCard from './fleet/ChannelsCard'
 
 export default function FleetSecurityPage() {
   const { user } = useAuthStore()
@@ -33,16 +34,7 @@ export default function FleetSecurityPage() {
 
       <IdentityCard />
       <TrustRoster />
-
-      {/* Channels card lands in step 8 (PSK rotation). */}
-      <section className="bg-dark-800/30 border border-dashed border-dark-700/50 rounded-lg p-5">
-        <h3 className="text-sm font-semibold text-dark-300">Channels</h3>
-        <p className="text-xs text-dark-500 mt-1">
-          PSK rotation lands in a follow-up commit (FLEET_SECURITY.md §11
-          step 8). This card will list each channel with PSK age, coverage
-          gauge, and a Rotate PSK… action.
-        </p>
-      </section>
+      <ChannelsCard />
 
       {/* Recovery wizard lands in step 9. */}
       <section className="bg-dark-800/30 border border-dashed border-dark-700/50 rounded-lg p-5">

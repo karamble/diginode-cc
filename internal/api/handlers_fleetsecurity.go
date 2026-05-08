@@ -3,8 +3,10 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 
@@ -269,6 +271,145 @@ func (s *Server) handleFleetSecSetIsManaged(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"applied": true})
+}
+
+// ---- Channels + PSK rotation ----
+
+func (s *Server) handleFleetSecListChannels(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	out, err := s.svc.FleetSec.ListChannels(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if out == nil {
+		out = []fleetsec.ChannelRecord{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleFleetSecRotatePSK(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	idx, err := strconv.ParseInt(chi.URLParam(r, "idx"), 10, 32)
+	if err != nil || idx < 0 {
+		writeError(w, http.StatusBadRequest, "channel index must be a non-negative integer")
+		return
+	}
+	var body struct {
+		Source           string   `json:"source"`            // "random" | "explicit"
+		PSKBase64        string   `json:"pskB64"`            // when source=explicit
+		Targets          []uint32 `json:"targets"`           // remote node nums
+		Ack              string   `json:"ack"`               // must be "ROTATE"
+		Notes            string   `json:"notes"`
+		InterTargetDelayMs int    `json:"interTargetDelayMs"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	var psk []byte
+	switch body.Source {
+	case "random":
+		psk, err = fleetsec.RandomPSK(16)
+	case "explicit":
+		psk, err = fleetsec.DecodePubkeyB64(body.PSKBase64)
+		// DecodePubkeyB64 enforces 32-byte length; for 16-byte PSKs the
+		// operator must supply via random. (A future iteration could add
+		// a DecodePSKB64 with looser length checks.)
+		if err != nil {
+			err = fmt.Errorf("explicit PSK must be a 32-byte base64 value: %w", err)
+		}
+	default:
+		writeError(w, http.StatusBadRequest, "source must be \"random\" or \"explicit\"")
+		return
+	}
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	defer fleetsec.NewSecret(psk).Clear()
+
+	delay := time.Duration(body.InterTargetDelayMs) * time.Millisecond
+
+	id, err := s.svc.FleetSec.RotatePSK(r.Context(), userIDFromCtx(r),
+		int32(idx), psk, body.Targets, fleetsec.RotatePSKOpts{
+			Ack:              body.Ack,
+			Notes:            body.Notes,
+			InterTargetDelay: delay,
+		})
+	if err != nil {
+		switch {
+		case errors.Is(err, fleetsec.ErrInvalidAck):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{
+		"rotationId": id,
+	})
+}
+
+func (s *Server) handleFleetSecGetRotation(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "rotation id required")
+		return
+	}
+	rec, err := s.svc.FleetSec.GetRotation(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, fleetsec.ErrNotFound) {
+			writeError(w, http.StatusNotFound, "rotation not found")
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (s *Server) handleFleetSecRetryRotation(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "rotation id required")
+		return
+	}
+	var body struct {
+		PSKBase64 string   `json:"pskB64"`
+		Targets   []uint32 `json:"targets"`
+	}
+	if err := readJSON(r, &body); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	psk, err := fleetsec.DecodePubkeyB64(body.PSKBase64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "PSK decode: "+err.Error())
+		return
+	}
+	defer fleetsec.NewSecret(psk).Clear()
+
+	if err := s.svc.FleetSec.RetryRotation(r.Context(), userIDFromCtx(r), id, psk, body.Targets); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
 }
 
 // ---- Helpers ----
