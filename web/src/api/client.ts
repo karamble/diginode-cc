@@ -49,8 +49,10 @@ class ApiClient {
     return this.request<T>(path, { method: 'PUT', body })
   }
 
-  delete<T>(path: string) {
-    return this.request<T>(path, { method: 'DELETE' })
+  // Body is optional but supported -- some endpoints (e.g. fleetsec
+  // identity revoke) carry an explanatory reason in the DELETE body.
+  delete<T>(path: string, body?: unknown) {
+    return this.request<T>(path, { method: 'DELETE', body })
   }
 }
 
