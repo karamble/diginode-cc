@@ -183,9 +183,9 @@ func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg 
 	// firmware accepts that as the start of a session for Get*, then
 	// includes a fresh passkey in its reply that we'll cache via send().
 	// For Set* without a cached passkey, the firmware will reject with
-	// ADMIN_BAD_SESSION_KEY; tryRotateOnce sequences a Get-before-Set
-	// for remotes specifically to populate the cache before the Set
-	// goes out.
+	// ADMIN_BAD_SESSION_KEY; the rotation worker's pushStagingToRemote
+	// + promoteRemoteToNewPrimary helpers do a GetConfig SECURITY first
+	// to populate the cache before the SetChannel goes out.
 	if pk := s.getSessionPasskey(remoteNodeNum); len(pk) > 0 {
 		msg.SessionPasskey = pk
 	}

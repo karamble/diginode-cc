@@ -10,7 +10,6 @@ import (
 	"time"
 
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
-	"github.com/karamble/diginode-cc/internal/serial"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
@@ -132,6 +131,7 @@ func (s *Service) RotatePSK(
 		seen[t] = true
 		rotTargets = append(rotTargets, RotationTarget{
 			NodeNum: t,
+			Phase:   PhasePending,
 			Status:  TargetStatusPending,
 		})
 	}
@@ -139,6 +139,7 @@ func (s *Service) RotatePSK(
 	if local := s.localNode.LocalNodeNum(); local != 0 && !seen[local] {
 		rotTargets = append(rotTargets, RotationTarget{
 			NodeNum: local,
+			Phase:   PhasePending,
 			Status:  TargetStatusPending,
 		})
 	}
@@ -176,15 +177,140 @@ func (s *Service) RotatePSK(
 	return rotID, nil
 }
 
-// runPSKRotation is the long-running background loop. Walks targets
-// sequentially; updates each target's status in fleet_rotations as it
-// goes; broadcasts a RotationProgressEvent after every status change so
-// the UI's progress drawer stays current.
+// chooseStagingSlot picks the channel index where the new PSK lives
+// during the rotation. For now: always use slot 1 unless the operator
+// has rotated PRIMARY there for some reason. Future: scan
+// fleet_channels for the lowest unused slot in [1..7] and avoid
+// PRIMARY/SECONDARY collisions. The chosen slot is pinned on the
+// rotation row so retries find the same definition on the remotes.
+func (s *Service) chooseStagingSlot(currentPrimary int32) (int32, error) {
+	const defaultStaging int32 = 1
+	if currentPrimary == defaultStaging {
+		// Edge case: PRIMARY is on slot 1 already; punt to slot 2 so we
+		// don't overwrite the active channel. A more sophisticated picker
+		// would scan all 8 slots; for the documented "rotate channel 0"
+		// flow this branch never fires.
+		return 2, nil
+	}
+	return defaultStaging, nil
+}
+
+// applyLocalStagingChannel runs Phase A: write the new PSK into a
+// SECONDARY-role channel slot on the local Heltec. After this returns
+// the Pi can decrypt traffic on EITHER the existing PRIMARY (old PSK)
+// or the staging slot (new PSK), so per-target acks during Phase B
+// land on the unchanged PRIMARY and decode cleanly.
 //
-// The local Heltec is the LAST target so we don't risk a self-rotation
-// that locks us out before remaining remotes are done. Failed remote
-// targets retain the old PSK (not the new one); the operator can retry
-// via the failed tray.
+// Local admin path -- no PSK gap, no session_passkey enforcement, just
+// a SetChannel that the firmware applies live (no reboot, per the
+// channel admin exception in feedback_meshtastic_pacing.md).
+func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	msg := AdminSetChannel(stagingIdx, "", pb.Channel_SECONDARY, newPSK)
+	if _, err := s.runLocalAdmin(ctx, msg, "local-stage-secondary"); err != nil {
+		return fmt.Errorf("apply staging channel locally: %w", err)
+	}
+	return nil
+}
+
+// pushStagingToRemote runs Phase B against one remote: send
+// SetChannel(stagingIdx, role=SECONDARY, psk=newPSK) over PKC. Acks
+// ride the unchanged PRIMARY (old PSK) so the routing-layer round-trip
+// is fully decryptable. The worker wraps this in the per-target retry
+// loop and broadcasts phase transitions via transitionTarget.
+func (s *Service) pushStagingToRemote(ctx context.Context, nodeNum uint32, stagingIdx int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	// Establish session_passkey via GetConfig SECURITY first; the
+	// SetChannel that follows requires the firmware-emitted passkey.
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session"); err != nil {
+		return fmt.Errorf("session establish: %w", err)
+	}
+	setMsg := AdminSetChannel(stagingIdx, "", pb.Channel_SECONDARY, newPSK)
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, setMsg, "remote-stage-secondary"); err != nil {
+		return fmt.Errorf("push staging: %w", err)
+	}
+	return nil
+}
+
+// promoteRemoteToNewPrimary runs Phase C against one remote: send
+// SetChannel(stagingIdx, role=PRIMARY, psk=newPSK). Meshtastic firmware
+// auto-demotes the previous PRIMARY (oldChannelIndex) to SECONDARY when
+// a new slot is marked PRIMARY -- per the proto comment on
+// AdminMessage.SetChannel. So one admin per remote does both moves
+// atomically; old PSK stays alive as SECONDARY for graceful migration.
+//
+// Acks during this transition can ride either the old or new channel
+// depending on firmware ordering, but both are alive on the remote
+// AND on Pi (Phase A added staging on Pi already), so the ack is
+// always decryptable. No PSK gap.
+func (s *Service) promoteRemoteToNewPrimary(ctx context.Context, nodeNum uint32, stagingIdx int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	// Refresh the session passkey -- the cached one from Phase B is
+	// likely still valid (300s TTL) but cheap to refresh.
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-promote-establish-session"); err != nil {
+		return fmt.Errorf("session establish: %w", err)
+	}
+	setMsg := AdminSetChannel(stagingIdx, "", pb.Channel_PRIMARY, newPSK)
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, setMsg, "remote-promote-primary"); err != nil {
+		return fmt.Errorf("promote primary: %w", err)
+	}
+	return nil
+}
+
+// promotePiToNewPrimary runs Phase D: local SetChannel(stagingIdx,
+// role=PRIMARY) so the Pi-Heltec also moves to the new PRIMARY.
+// Firmware auto-demotes the old PRIMARY to SECONDARY here too,
+// keeping it alive for laggards still on the old PSK who haven't
+// completed Phase C yet.
+func (s *Service) promotePiToNewPrimary(ctx context.Context, stagingIdx int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	msg := AdminSetChannel(stagingIdx, "", pb.Channel_PRIMARY, newPSK)
+	if _, err := s.runLocalAdmin(ctx, msg, "local-promote-primary"); err != nil {
+		return fmt.Errorf("promote primary locally: %w", err)
+	}
+	return nil
+}
+
+// transitionTarget is the single point of change for a target's phase.
+// Persists the new phase + lastError; bumps the legacy Status field via
+// statusForPhase; broadcasts the WS event so the UI updates live.
+func (s *Service) transitionTarget(ctx context.Context, rotID string, channelIdx int32, current []RotationTarget, t *RotationTarget, phase RotationPhase, errMsg string, newPSKFP string) {
+	t.Phase = phase
+	t.Status = statusForPhase(phase)
+	t.LastError = errMsg
+	if err := s.store.UpdateTargetPhase(ctx, rotID, t.NodeNum, phase, errMsg); err != nil {
+		slog.Warn("persist target phase",
+			"rotation_id", rotID, "node_num", t.NodeNum, "phase", phase, "error", err)
+	}
+	s.persistAndBroadcast(ctx, rotID, channelIdx, current, false, newPSKFP)
+}
+
+// runPSKRotation is the long-running background loop. Implements the
+// 5-phase staged rotation
+// (project_psk_rotation_secondary_channel_staging.md):
+//
+//	A. Pi adds new PSK as a SECONDARY slot (so Pi can decrypt acks on
+//	   either the old PRIMARY or the new SECONDARY going forward).
+//	B. Each remote receives SetChannel(stagingIdx, SECONDARY, newPSK).
+//	   Acks ride the still-shared old PRIMARY -- fully decryptable.
+//	C. Each remote receives SetChannel(stagingIdx, PRIMARY, newPSK).
+//	   Firmware auto-demotes the old PRIMARY to SECONDARY. Both
+//	   channels remain alive on the remote; both are alive on Pi from
+//	   Phase A; acks decode either way.
+//	D. Pi local SetChannel(stagingIdx, PRIMARY) -- same auto-demotion
+//	   gives Pi PRIMARY=newPSK + SECONDARY=oldPSK.
+//	E. Operator-paced retirement (separate endpoint, not part of this
+//	   worker): once every fleet member's current_psk_fp matches the
+//	   new fp, disable the old SECONDARY slot on Pi and remotes.
+//
+// Failure modes are graceful: a target that fails Phase B stays on
+// PSK_OLD only and is fully reachable; a target that fails Phase C has
+// both channels and is reachable on either. Retry resumes from the
+// last good resting state per target.
 func (s *Service) runPSKRotation(
 	ctx context.Context,
 	userID, rotID string,
@@ -202,38 +328,27 @@ func (s *Service) runPSKRotation(
 
 	current := append([]RotationTarget(nil), targets...)
 	localNum := s.localNode.LocalNodeNum()
+	pskFP := Fingerprint(newPSK)
 
-	// Four-phase rotation:
-	//  1. PUSH    -- Get-establish-session + send SetChannel to each remote.
-	//                Don't wait for the SetChannel routing ack: the remote
-	//                applies SetChannel and immediately switches to the new
-	//                channel PSK; its ack rides the new channel which our
-	//                local Heltec can't decrypt yet (we rotate last). The
-	//                ack would arrive as port=UNKNOWN payloadLen=0 on our
-	//                side. Treat the optimistic push as succeeded if the
-	//                Get-session step succeeded (proves the remote was
-	//                reachable on the OLD PSK at push time).
-	//  2. WAIT    -- brief sleep so remotes have time to commit the new PSK
-	//                before the local Heltec rotates and the channel layer
-	//                breaks for any remote that didn't apply.
-	//  3. LOCAL   -- self-rotate the local Heltec via runLocalAdmin (no PSK
-	//                gap on the local side; admin uses the same in-process
-	//                serial path).
-	//  4. VERIFY  -- after local moved to the new PSK, GetTrust each remote
-	//                via PKC. If GetConfig SECURITY round-trips on the new
-	//                PSK channel, the remote successfully applied the
-	//                rotation. Failure here = remote did not apply (still
-	//                stranded on old PSK) or was unreachable.
-	//
-	// Why we don't trust the SetChannel routing ack: tested 2026-05-08, a
-	// remote running through SetChannel applies new PSK before its ack
-	// frame leaves the radio. The ack is encrypted with the new PSK; the
-	// sender (still on old PSK) sees only undecryptable bytes. So per-
-	// target ack inspection has zero correlation with rotation success.
-	// Verify-after-rotation tests the only signal that matters: can we
-	// PKC-admin the remote on the post-rotation channel.
+	// Pick a staging slot and pin it on the rotation row so retries find
+	// the same definition on the remotes. For the documented "rotate
+	// channel 0" flow this picks slot 1; chooseStagingSlot handles the
+	// edge case where slot 1 is the operator's PRIMARY.
+	stagingIdx, sErr := s.chooseStagingSlot(channelIndex)
+	if sErr != nil {
+		slog.Error("choose staging slot",
+			"rotation_id", rotID, "error", sErr)
+		return
+	}
+	if err := s.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
+		slog.Warn("persist staging_channel_index",
+			"rotation_id", rotID, "error", err)
+	}
 
-	// Split target list: remotes get phases 1 + 4; local gets phase 3.
+	// Split target list: remotes go through Phase B + C; local goes
+	// through Phase D. Local is intentionally separate -- its admin path
+	// is in-process and uses different firmware semantics (no session
+	// passkey, no PSK gap).
 	var localTarget *RotationTarget
 	remoteTargets := make([]*RotationTarget, 0, len(current))
 	for i := range current {
@@ -245,22 +360,40 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// ---- Phase 1: optimistic push to each remote ----
-	for i, t := range remoteTargets {
-		t.Status = TargetStatusInFlight
-		t.Attempts++
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
-
-		err := s.pushRemoteRotation(ctx, t.NodeNum, channelIndex, newPSK)
-		if err != nil {
-			t.Status = TargetStatusFailed
-			t.LastError = err.Error()
-			slog.Warn("PSK rotation push failed",
-				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
-			s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
+	// ---- Phase A: Pi adds the new PSK as a SECONDARY channel slot ----
+	if err := s.applyLocalStagingChannel(ctx, stagingIdx, newPSK); err != nil {
+		// Hard abort -- without staging on Pi, Phase B acks would be
+		// undecryptable in any subsequent channel transition. Mark every
+		// target failed_b so the operator knows nothing happened.
+		slog.Error("phase A staging failed",
+			"rotation_id", rotID, "error", err)
+		for _, t := range remoteTargets {
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
 		}
-		// Status remains in-flight on push success; phase 4 promotes to
-		// acked or marks failed based on post-rotation reachability.
+		if localTarget != nil {
+			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseFailedB, "phase A staging failed: "+err.Error(), pskFP)
+		}
+		s.persistAndBroadcast(ctx, rotID, channelIndex, current, true, pskFP)
+		return
+	}
+	if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhaseStagingAdded); err != nil {
+		slog.Warn("persist pi_local_phase=staging_added",
+			"rotation_id", rotID, "error", err)
+	}
+
+	// ---- Phase B: push staging slot to each remote ----
+	for i, t := range remoteTargets {
+		_ = s.store.IncrementTargetAttempts(ctx, rotID, t.NodeNum)
+		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePushingB, "", pskFP)
+
+		err := s.pushStagingToRemote(ctx, t.NodeNum, stagingIdx, newPSK)
+		if err != nil {
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, err.Error(), pskFP)
+			slog.Warn("PSK rotation phase B failed",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+		} else {
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseHasNewPSK, "", pskFP)
+		}
 
 		if opts.InterTargetDelay > 0 && i+1 < len(remoteTargets) {
 			select {
@@ -271,63 +404,70 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// ---- Phase 2: brief settle so remotes commit before local rotates ----
-	// 5s is plenty for ESP32 to apply SetChannel + persist to NVS. Any
-	// shorter and we risk rotating local before slow remotes finished;
-	// then we'd verify them on the new channel before they're listening.
-	select {
-	case <-ctx.Done():
-		return
-	case <-time.After(5 * time.Second):
+	// ---- Phase C: promote staging to PRIMARY on each remote ----
+	for _, t := range remoteTargets {
+		// Skip remotes that failed Phase B; they don't have the new PSK
+		// yet so promoting would just fail again. Operator's Retry will
+		// re-run Phase B for them.
+		if t.Phase == PhaseFailedB {
+			continue
+		}
+		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePromotingC, "", pskFP)
+
+		err := s.promoteRemoteToNewPrimary(ctx, t.NodeNum, stagingIdx, newPSK)
+		if err != nil {
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedC, err.Error(), pskFP)
+			slog.Warn("PSK rotation phase C failed",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+		} else {
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseOnNewPSK, "", pskFP)
+			// MarkTrustVerifiedNow stamps last_verified_at; the remote's
+			// current_psk_fp gets updated on the next GetTrust round-trip.
+			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, VerifyMethodRemotePKC); mErr != nil {
+				slog.Warn("mark trust verified after promote",
+					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
+			}
+		}
 	}
 
-	// ---- Phase 3: local self-rotate ----
+	// ---- Phase D: Pi promotes locally ----
 	if localTarget != nil {
-		localTarget.Status = TargetStatusInFlight
-		localTarget.Attempts++
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
-		err := s.rotateOneTarget(ctx, localNum, channelIndex, newPSK, true)
+		_ = s.store.IncrementTargetAttempts(ctx, rotID, localNum)
+		s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhasePromotingC, "", pskFP)
+
+		err := s.promotePiToNewPrimary(ctx, stagingIdx, newPSK)
 		if err != nil {
-			localTarget.Status = TargetStatusFailed
-			localTarget.LastError = err.Error()
-			slog.Warn("PSK rotation local failed",
-				"rotation_id", rotID, "node_num", localNum, "error", err)
+			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseFailedC, err.Error(), pskFP)
+			slog.Error("PSK rotation phase D (local promote) failed",
+				"rotation_id", rotID, "error", err)
 		} else {
-			localTarget.Status = TargetStatusAcked
-			localTarget.LastError = ""
+			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseOnNewPSK, "", pskFP)
 			if mErr := s.store.MarkTrustVerifiedNow(ctx, localNum, VerifyMethodLocalUSB); mErr != nil {
 				slog.Warn("mark local trust verified", "rotation_id", rotID, "error", mErr)
 			}
-			slog.Info("PSK rotation local acked", "rotation_id", rotID)
 		}
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
 	}
 
-	// ---- Phase 4: verify each remote on the post-rotation channel ----
+	if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhasePhaseDPromoted); err != nil {
+		slog.Warn("persist pi_local_phase=phase_d_promoted",
+			"rotation_id", rotID, "error", err)
+	}
+
+	// Refresh current_psk_fp for every member that landed on the new PSK
+	// -- a successful Phase C / D doesn't itself prove channel-layer
+	// alignment (the Pi could be on the new PRIMARY while a remote is
+	// stalled on phase_c_promoting), but a follow-up GetTrust does.
+	// Operator-driven retirement gates on this, so a fresh stamp here
+	// makes "all migrated" detectable without needing each operator to
+	// click Verify on every node post-rotation.
 	for _, t := range remoteTargets {
-		// Don't re-test entries we already failed in push; their session
-		// or transport was demonstrably broken before we even rotated.
-		if t.Status == TargetStatusFailed {
+		if t.Phase != PhaseOnNewPSK {
 			continue
 		}
-		// GetTrust does a fresh PKC GetConfig SECURITY round-trip and
-		// stamps last_verified_at on success. Round-tripping post-
-		// rotation proves the remote is on the new PSK == it applied
-		// our SetChannel. Failure means stranded on old PSK or
-		// otherwise unreachable.
-		_, err := s.GetTrust(ctx, t.NodeNum)
-		if err != nil {
-			t.Status = TargetStatusFailed
-			t.LastError = fmt.Sprintf("post-rotation verify: %v", err)
-			slog.Warn("PSK rotation verify failed",
+		if _, err := s.GetTrust(ctx, t.NodeNum); err != nil {
+			slog.Warn("post-rotation trust refresh",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
-		} else {
-			t.Status = TargetStatusAcked
-			t.LastError = ""
-			slog.Info("PSK rotation verified",
-				"rotation_id", rotID, "node_num", t.NodeNum)
 		}
-		s.persistAndBroadcast(ctx, rotID, channelIndex, current, false, Fingerprint(newPSK))
 	}
 
 	// Update the channel snapshot with the new PSK fingerprint.
@@ -376,146 +516,6 @@ func (s *Service) runPSKRotation(
 			slog.Warn("clear rotation psk", "rotation_id", rotID, "error", err)
 		}
 	}
-}
-
-// pushRemoteRotation runs the phase-1 push for one remote target.
-// First does GetConfig SECURITY to (a) confirm the remote is reachable
-// on the current channel and (b) install the firmware-emitted session
-// passkey in our cache. Then sends SetChannel optimistically -- doesn't
-// wait for the ack because the remote applies the new PSK before its
-// ack frame leaves the radio, and the ack rides the new channel which
-// the local Heltec won't decrypt until phase 3. Phase 4's GetTrust is
-// the actual confirmation.
-//
-// Returns nil on push success (Get round-tripped, Set frame queued).
-// Returns an error only if the Get establish-session step itself
-// failed (remote unreachable on current channel) or the SendToRadio
-// call failed (local serial broken).
-func (s *Service) pushRemoteRotation(ctx context.Context, nodeNum uint32, channelIndex int32, newPSK []byte) error {
-	if channelIndex != 0 {
-		return fmt.Errorf("non-primary channel rotation (index %d) not supported", channelIndex)
-	}
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
-
-	// Phase 1a: establish session. The Get reply populates our session
-	// passkey cache via send() -> cacheSessionPasskey. Required so the
-	// SetChannel below carries a valid passkey on the wire (firmware
-	// rejects Set without it after the post-reboot grace window).
-	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session"); err != nil {
-		return fmt.Errorf("session establish: %w", err)
-	}
-
-	// Phase 1b: optimistic SetChannel push. Inject the cached passkey,
-	// build the PKC frame, hand it to the serial layer. We don't track
-	// or wait for the response: the ack would be undecryptable across
-	// the about-to-open PSK gap (we rotate local last). Phase 4 verifies
-	// via a fresh GetConfig round-trip on the post-rotation channel.
-	setMsg := AdminSetChannel(channelIndex, "", pb.Channel_PRIMARY, newPSK)
-	if pk := s.getSessionPasskey(nodeNum); len(pk) > 0 {
-		setMsg.SessionPasskey = pk
-	}
-	frame, _, err := serial.BuildAdminPacketPKC(nodeNum, setMsg)
-	if err != nil {
-		return fmt.Errorf("build set_channel: %w", err)
-	}
-	if err := s.serial.SendToRadio(frame); err != nil {
-		return fmt.Errorf("push set_channel: %w", err)
-	}
-	return nil
-}
-
-// rotateOneTarget runs the get_channel + set_channel pair against one
-// node. Reads the existing Channel proto (so we don't clobber name or
-// role), patches PSK, sends back, awaits Routing ack. Up to 3 attempts
-// with linear backoff (1s, 2s, 4s).
-func (s *Service) rotateOneTarget(
-	ctx context.Context,
-	nodeNum uint32,
-	channelIndex int32,
-	newPSK []byte,
-	isLocal bool,
-) error {
-	const maxAttempts = 3
-	var lastErr error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		err := s.tryRotateOnce(ctx, nodeNum, channelIndex, newPSK, isLocal)
-		if err == nil {
-			return nil
-		}
-		lastErr = err
-		if attempt < maxAttempts {
-			backoff := time.Duration(1<<uint(attempt-1)) * time.Second
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(backoff):
-			}
-		}
-	}
-	return lastErr
-}
-
-func (s *Service) tryRotateOnce(
-	ctx context.Context,
-	nodeNum uint32,
-	channelIndex int32,
-	newPSK []byte,
-	isLocal bool,
-) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
-
-	// We previously read the existing channel via AdminGetChannel to
-	// preserve name + role across the rotation, but Meshtastic firmware
-	// (verified through 2.7.23) does not reply to PKC get_channel_request
-	// -- the local Heltec acks transport, the remote node receives the
-	// packet, but no get_channel_response payload is ever emitted. Local
-	// AdminGetChannel against the host firmware also fails with
-	// routing-error BAD_REQUEST. The Meshtastic Python CLI works around
-	// this by silently swallowing those timeouts and sending SetChannel
-	// with defaults; we adopt the same approach.
-	//
-	// For PRIMARY channel rotations (channelIndex 0) the role is always
-	// PRIMARY; the firmware preserves the existing name when SetChannel
-	// is sent with name="" because the protobuf field stays unset on the
-	// wire. Non-primary indices would need either a working GetChannel
-	// or operator-supplied name+role -- callers currently only rotate
-	// channel 0 so we error out for >0 to surface the limitation rather
-	// than silently re-default a secondary channel.
-	if channelIndex != 0 {
-		return fmt.Errorf("non-primary channel rotation (index %d) not supported: firmware get_channel admin path is unresponsive; supply name+role explicitly when this is wired up", channelIndex)
-	}
-	role := pb.Channel_PRIMARY
-	name := ""
-
-	// For remote targets, ensure we have a fresh admin session passkey
-	// before sending SetChannel. Meshtastic firmware requires the passkey
-	// on every set_* admin and rejects with ADMIN_BAD_SESSION_KEY
-	// otherwise (TTL 300s, reset on remote reboot). GetConfig SECURITY
-	// is the cheapest Get that gives us a passkey -- the firmware
-	// includes it in the response AdminMessage and runRemoteAdmin caches
-	// it for the SetChannel that follows. Local admin doesn't enforce
-	// session passkeys (different firmware code path) so we skip the
-	// pre-step there.
-	if !isLocal {
-		_, gErr := s.runRemoteAdmin(ctx, nodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-establish-session")
-		if gErr != nil {
-			return fmt.Errorf("session establish: %w", gErr)
-		}
-	}
-
-	setMsg := AdminSetChannel(channelIndex, name, role, newPSK)
-	var err error
-	if isLocal {
-		_, err = s.runLocalAdmin(ctx, setMsg, "local-set-channel")
-	} else {
-		_, err = s.runRemoteAdmin(ctx, nodeNum, setMsg, "remote-set-channel")
-	}
-	if err != nil {
-		return fmt.Errorf("set_channel: %w", err)
-	}
-	return nil
 }
 
 // persistAndBroadcast writes the current rotation target snapshot back
