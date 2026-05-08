@@ -231,3 +231,197 @@ func TestStore_PolicyRoundTrip(t *testing.T) {
 		t.Errorf("expected_channels = %+v", p.ExpectedChannels)
 	}
 }
+
+// TestStore_StagedRotationLifecycle covers the rotation-row methods
+// added by migration 000027 + 000028. Insert a rotation, transition
+// per-target phases, stamp pi_local_phase, mark retired, and confirm
+// the AllManagedNodesOnPSK retirement gate flips false→true as nodes
+// move to the new fingerprint.
+//
+// DB-gated like the other TestStore_* tests; skips without
+// FLEETSEC_TEST_DB.
+func TestStore_StagedRotationLifecycle(t *testing.T) {
+	db := requireDB(t)
+	ctx := context.Background()
+	resetFleetTables(ctx, t, db)
+	s := NewStore(db)
+
+	const hb35 = uint32(0x0409cf64)
+	const hb55 = uint32(0x02ed5f04)
+	const local = uint32(0x0409c9d8)
+	makeTestNode(ctx, t, db, int64(hb35))
+	makeTestNode(ctx, t, db, int64(hb55))
+	makeTestNode(ctx, t, db, int64(local))
+
+	// Seed a managed-trust row for each remote (admin_key_fps populated
+	// makes the row "managed" per AllManagedNodesOnPSK's filter).
+	_, fp := makePubkey(0xab)
+	for _, n := range []uint32{hb35, hb55} {
+		if err := s.UpsertNodeTrust(ctx, NodeTrustRecord{
+			NodeNum:     n,
+			AdminKeyFPs: []string{fp},
+			DriftStatus: DriftStatusInPolicy,
+		}); err != nil {
+			t.Fatalf("seed trust %x: %v", n, err)
+		}
+	}
+
+	// Insert a fresh staged rotation.
+	chanIdx := int32(0)
+	pskRaw := []byte("0123456789abcdef")
+	pskFP := Fingerprint(pskRaw)
+	rotID, err := s.InsertRotation(ctx, RotationRecord{
+		Kind:         RotationKindPSK,
+		ChannelIndex: &chanIdx,
+		Targets: []RotationTarget{
+			{NodeNum: hb35, Phase: PhasePending, Status: TargetStatusPending},
+			{NodeNum: hb55, Phase: PhasePending, Status: TargetStatusPending},
+			{NodeNum: local, Phase: PhasePending, Status: TargetStatusPending},
+		},
+		NewPSKFP: pskFP,
+		Notes:    "staged-rotation lifecycle test",
+	}, pskRaw)
+	if err != nil {
+		t.Fatalf("InsertRotation: %v", err)
+	}
+
+	// Pin the staging slot.
+	if err := s.SetStagingChannelIndex(ctx, rotID, 1); err != nil {
+		t.Fatalf("SetStagingChannelIndex: %v", err)
+	}
+
+	// Pi finishes Phase A.
+	if err := s.UpsertPiLocalPhase(ctx, rotID, PiPhaseStagingAdded); err != nil {
+		t.Fatalf("UpsertPiLocalPhase=staging_added: %v", err)
+	}
+
+	// Walk HB35 through B → C → on_new_psk; HB55 fails Phase B.
+	if err := s.IncrementTargetAttempts(ctx, rotID, hb35); err != nil {
+		t.Fatalf("IncrementTargetAttempts hb35: %v", err)
+	}
+	if err := s.UpdateTargetPhase(ctx, rotID, hb35, PhasePushingB, ""); err != nil {
+		t.Fatalf("UpdateTargetPhase hb35 -> pushing_b: %v", err)
+	}
+	if err := s.UpdateTargetPhase(ctx, rotID, hb35, PhaseHasNewPSK, ""); err != nil {
+		t.Fatalf("UpdateTargetPhase hb35 -> has_new_psk: %v", err)
+	}
+	if err := s.UpdateTargetPhase(ctx, rotID, hb35, PhasePromotingC, ""); err != nil {
+		t.Fatalf("UpdateTargetPhase hb35 -> promoting_c: %v", err)
+	}
+	if err := s.UpdateTargetPhase(ctx, rotID, hb35, PhaseOnNewPSK, ""); err != nil {
+		t.Fatalf("UpdateTargetPhase hb35 -> on_new_psk: %v", err)
+	}
+	if err := s.IncrementTargetAttempts(ctx, rotID, hb55); err != nil {
+		t.Fatalf("IncrementTargetAttempts hb55: %v", err)
+	}
+	if err := s.UpdateTargetPhase(ctx, rotID, hb55, PhaseFailedB, "session establish: no route"); err != nil {
+		t.Fatalf("UpdateTargetPhase hb55 -> failed_b: %v", err)
+	}
+	// Local goes through promote phase too.
+	if err := s.UpdateTargetPhase(ctx, rotID, local, PhaseOnNewPSK, ""); err != nil {
+		t.Fatalf("UpdateTargetPhase local: %v", err)
+	}
+
+	// Stamp the per-node migration tracking for HB35 + local but NOT
+	// HB55 (it failed Phase B). AllManagedNodesOnPSK should report
+	// HB55 as a laggard.
+	if err := s.SetNodeCurrentPSKFP(ctx, hb35, pskFP); err != nil {
+		t.Fatalf("SetNodeCurrentPSKFP hb35: %v", err)
+	}
+
+	allMigrated, laggards, err := s.AllManagedNodesOnPSK(ctx, pskFP)
+	if err != nil {
+		t.Fatalf("AllManagedNodesOnPSK: %v", err)
+	}
+	if allMigrated {
+		t.Error("expected gate to be CLOSED while HB55 still laggard")
+	}
+	if len(laggards) != 1 || laggards[0] != hb55 {
+		t.Errorf("laggards = %v, want [hb55]", laggards)
+	}
+
+	// Pi finishes Phase D.
+	if err := s.UpsertPiLocalPhase(ctx, rotID, PiPhasePhaseDPromoted); err != nil {
+		t.Fatalf("UpsertPiLocalPhase=phase_d_promoted: %v", err)
+	}
+
+	// Verify GetRotation reads back the new shape correctly.
+	got, err := s.GetRotation(ctx, rotID)
+	if err != nil {
+		t.Fatalf("GetRotation: %v", err)
+	}
+	if got.StagingChannelIndex == nil || *got.StagingChannelIndex != 1 {
+		t.Errorf("StagingChannelIndex = %v, want 1", got.StagingChannelIndex)
+	}
+	if got.PiLocalPhase != PiPhasePhaseDPromoted {
+		t.Errorf("PiLocalPhase = %s, want phase_d_promoted", got.PiLocalPhase)
+	}
+	if got.RetiredAt != nil {
+		t.Errorf("RetiredAt should still be nil before retire; got %v", got.RetiredAt)
+	}
+	for _, target := range got.Targets {
+		switch target.NodeNum {
+		case hb35:
+			if target.Phase != PhaseOnNewPSK {
+				t.Errorf("hb35 phase = %s, want on_new_psk", target.Phase)
+			}
+			if target.Attempts != 1 {
+				t.Errorf("hb35 attempts = %d, want 1", target.Attempts)
+			}
+		case hb55:
+			if target.Phase != PhaseFailedB {
+				t.Errorf("hb55 phase = %s, want failed_b", target.Phase)
+			}
+			if target.LastError == "" {
+				t.Error("hb55 lastError should be populated")
+			}
+		case local:
+			if target.Phase != PhaseOnNewPSK {
+				t.Errorf("local phase = %s, want on_new_psk", target.Phase)
+			}
+		}
+	}
+
+	// Bring HB55 home: stamp its current_psk_fp, gate opens.
+	if err := s.SetNodeCurrentPSKFP(ctx, hb55, pskFP); err != nil {
+		t.Fatalf("SetNodeCurrentPSKFP hb55: %v", err)
+	}
+	allMigrated, laggards, err = s.AllManagedNodesOnPSK(ctx, pskFP)
+	if err != nil {
+		t.Fatalf("AllManagedNodesOnPSK after hb55: %v", err)
+	}
+	if !allMigrated {
+		t.Errorf("expected gate to be OPEN once every node stamped; laggards=%v", laggards)
+	}
+
+	// Retire.
+	if err := s.MarkRotationRetired(ctx, rotID); err != nil {
+		t.Fatalf("MarkRotationRetired: %v", err)
+	}
+	got, err = s.GetRotation(ctx, rotID)
+	if err != nil {
+		t.Fatalf("GetRotation post-retire: %v", err)
+	}
+	if got.PiLocalPhase != PiPhaseRetired {
+		t.Errorf("post-retire PiLocalPhase = %s, want retired", got.PiLocalPhase)
+	}
+	if got.RetiredAt == nil {
+		t.Error("RetiredAt should be populated after retire")
+	}
+
+	// Confirm the trust list surfaces current_psk_fp for both remotes.
+	listed, err := s.ListNodeTrust(ctx)
+	if err != nil {
+		t.Fatalf("ListNodeTrust: %v", err)
+	}
+	seen := map[uint32]string{}
+	for _, r := range listed {
+		seen[r.NodeNum] = r.CurrentPSKFP
+	}
+	if seen[hb35] != pskFP {
+		t.Errorf("hb35 current_psk_fp = %q, want %q", seen[hb35], pskFP)
+	}
+	if seen[hb55] != pskFP {
+		t.Errorf("hb55 current_psk_fp = %q, want %q", seen[hb55], pskFP)
+	}
+}
