@@ -501,6 +501,103 @@ func (s *Service) promotePiToNewPrimary(ctx context.Context, stagingIdx int32, n
 	return nil
 }
 
+// migrateRemoteAtomic is the new-design replacement for the
+// pushStagingToRemote + promoteRemoteToNewPrimary pair. It walks one
+// managed remote from "old PRIMARY at oldSlot" to "new PRIMARY at
+// stagingIdx, oldSlot wiped" inside a single atomic admin transaction
+// (begin_edit_settings → SetChannel(stagingIdx, PRIMARY, newPSK) →
+// SetChannel(oldSlot, DISABLED, empty) → commit_edit_settings).
+//
+// Empirically validated 2026-05-09 over both local USB and PKC mesh
+// against Heltec V3 fw 2.7.23: multi-channel writes inside a single
+// transaction land in one flash cycle (~5s commit-side latency vs
+// ~30s × N for sequential separate SetChannels), and the firmware's
+// auto-demote semantics combined with last-write-wins inside the
+// transaction means slot N=PRIMARY new + slot M=DISABLED empty is the
+// guaranteed end state regardless of intermediate ordering. The
+// DISABLE-with-empty-psk wipes residual PSK material that a plain
+// SetChannel(role=DISABLED) leaves behind.
+//
+// CRITICAL: do NOT issue any read admin frame between begin and
+// commit -- empirical test in begin-commit-empirical.md showed the
+// firmware discards pending writes if any non-set admin frame arrives
+// inside the transaction. Send all 4 frames contiguously.
+//
+// This call assumes Pi has already staged the new PSK locally as
+// SECONDARY at stagingIdx (Phase A) so Pi can decode the post-commit
+// admin reply that rides the remote's now-PRIMARY new PSK channel.
+//
+// Reachability assumption: Pi's outgoing PRIMARY at this moment is
+// still the OLD PSK; the remote also still has OLD PRIMARY (we haven't
+// rotated it yet). The transaction setup phase rides that shared
+// channel. Once the commit lands, the remote is on new-PRIMARY only
+// and Pi-from-the-remote's-perspective becomes one-way (Pi can hear
+// the remote on Pi's SECONDARY=newPSK, but Pi's outgoing default
+// channel-hash still points at oldPSK and the remote no longer has
+// it). That's fine — Phase B is done for that target.
+func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagingIdx, oldSlot int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	// Establish a session_passkey before opening the transaction.
+	// AdminModule rejects state-changing verbs without a valid
+	// session_passkey (verified at AdminModule.cpp:99-141 master
+	// 2026-05-08; see ~/.claude/wiki/meshtastic/firmware-semantics.md).
+	// AdminGetChannel(0) is cheap and returns a passkey-bearing reply.
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(0), "remote-establish-session"); err != nil {
+		return fmt.Errorf("session establish: %w", err)
+	}
+	// Now send the 4-frame transaction back-to-back. NO INTERMEDIATE READS.
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminBeginEditSettings(), "remote-begin-edit"); err != nil {
+		return fmt.Errorf("begin edit: %w", err)
+	}
+	promote := AdminSetChannel(stagingIdx, "", pb.Channel_PRIMARY, newPSK)
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, promote, "remote-set-primary"); err != nil {
+		return fmt.Errorf("set primary: %w", err)
+	}
+	// DISABLE-with-empty-psk: pass an explicitly-empty PSK so the
+	// firmware wipes residual key material (firmware-semantics.md §2
+	// notes that role=DISABLED alone does not wipe).
+	disable := AdminSetChannel(oldSlot, "", pb.Channel_DISABLED, nil)
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, disable, "remote-disable-old"); err != nil {
+		return fmt.Errorf("disable old: %w", err)
+	}
+	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminCommitEditSettings(), "remote-commit-edit"); err != nil {
+		return fmt.Errorf("commit edit: %w", err)
+	}
+	return nil
+}
+
+// migratePiAtomic is the local equivalent of migrateRemoteAtomic. Runs
+// the same atomic transaction on the local Heltec to promote
+// stagingIdx to PRIMARY (auto-demoting old PRIMARY to SECONDARY) and
+// then DISABLE-wipe the old slot in the same flash write. After this
+// returns the Pi-Heltec is on the new PSK only.
+//
+// Called as Phase C of the new design (operator-paced — runs after all
+// reachable managed remotes have completed Phase B and the operator
+// clicks "Promote Pi" / "Retire old PSK"). Local-admin path uses
+// session_passkey too (AdminModule enforces it on local admin since
+// 2.5.x).
+func (s *Service) migratePiAtomic(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte) error {
+	s.adminMu.Lock()
+	defer s.adminMu.Unlock()
+	if _, err := s.runLocalAdmin(ctx, AdminBeginEditSettings(), "local-begin-edit"); err != nil {
+		return fmt.Errorf("begin edit: %w", err)
+	}
+	promote := AdminSetChannel(stagingIdx, "", pb.Channel_PRIMARY, newPSK)
+	if _, err := s.runLocalAdmin(ctx, promote, "local-set-primary"); err != nil {
+		return fmt.Errorf("set primary: %w", err)
+	}
+	disable := AdminSetChannel(oldSlot, "", pb.Channel_DISABLED, nil)
+	if _, err := s.runLocalAdmin(ctx, disable, "local-disable-old"); err != nil {
+		return fmt.Errorf("disable old: %w", err)
+	}
+	if _, err := s.runLocalAdmin(ctx, AdminCommitEditSettings(), "local-commit-edit"); err != nil {
+		return fmt.Errorf("commit edit: %w", err)
+	}
+	return nil
+}
+
 // transitionTarget is the single point of change for a target's phase.
 // Persists the new phase + lastError; bumps the legacy Status field via
 // statusForPhase; broadcasts the WS event so the UI updates live.
@@ -555,71 +652,55 @@ func (s *Service) runPSKRotation(
 	current := append([]RotationTarget(nil), targets...)
 	localNum := s.localNode.LocalNodeNum()
 	pskFP := Fingerprint(newPSK)
+	newPSKFP := pskFP
 
-	// Build remote-target list once for Phase 0 + Phase A.
-	remoteNodeNums := make([]uint32, 0, len(targets))
-	for _, t := range targets {
-		if t.NodeNum != localNum {
-			remoteNodeNums = append(remoteNodeNums, t.NodeNum)
-		}
+	s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Rotation started · %d targets · 3-phase atomic flow", len(targets)))
+
+	// Phase A: Pi adds new PSK as SECONDARY at staging slot.
+	// Staging slot is "the other of {0, 1}" — deterministic, no probing
+	// needed in steady state. ~/.claude/wiki/meshtastic/firmware-semantics.md
+	// confirms the firmware persists slot-positional state across reboots,
+	// so Pi's PRIMARY slot is stable between rotations. We just need to
+	// know which one it's on RIGHT NOW.
+	_, primarySlot, perr := s.probeSlotsLocal(ctx)
+	if perr != nil {
+		slog.Error("rotation: cannot read Pi slot state",
+			"rotation_id", rotID, "error", perr)
+		s.broadcastNotice(rotID, current, pskFP, "Aborted · cannot read Pi slot state")
+		return
 	}
-
-	s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Rotation started · %d targets, mapping fleet slot state…", len(targets)))
-
-	// Phase 0: reconcile each reachable remote's slots 0/1 to mirror
-	// Pi's slots 0/1 (Pi is the source of truth). Brings out-of-lockstep
-	// remotes back to canonical alignment so the cross-fleet picker
-	// below has a clean fleet to choose from. Unreachable remotes are
-	// logged + skipped -- they'll fail Phase B with a "remote
-	// unreachable" error in the normal flow.
-	for _, n := range remoteNodeNums {
-		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase 0 · reconciling slots on !%08x", n))
-		if rErr := s.reconcileRemoteSlots(ctx, n); rErr != nil {
-			slog.Warn("phase 0: reconcile remote slots failed -- proceeding without alignment",
-				"rotation_id", rotID, "node_num", n, "error", rErr)
-			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase 0 · !%08x unreachable, will likely fail Phase B", n))
-		}
-	}
-
-	// Phase A: pick a staging slot. On retry the staging slot was
-	// already pinned on the rotation row by the original run -- reuse
-	// it so the failed target lands on the SAME physical slot as the
-	// rest of the fleet (otherwise the cross-fleet picker would walk
-	// past Pi's now-occupied previous staging slot and land the
-	// retried target on a different slot, breaking fleet-wide slot
-	// alignment).
-	//
-	// Fresh rotation: probe Pi-local + every reachable remote target.
-	// Post-Phase-0 the fleet should be aligned so the picker picks
-	// deterministically; the cross-probe is belt-and-suspenders
-	// against any remote that didn't reconcile (e.g., admin-key drift,
-	// PKC failure).
 	var stagingIdx int32
+	if primarySlot == 0 {
+		stagingIdx = 1
+	} else if primarySlot == 1 {
+		stagingIdx = 0
+	} else {
+		// Pi PRIMARY is at slot 2..7 — drift from a previous bad rotation
+		// or a manual USB write. Refuse rather than risk further drift.
+		slog.Error("rotation: Pi PRIMARY at non-canonical slot",
+			"rotation_id", rotID, "primary_slot", primarySlot)
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Aborted · Pi PRIMARY at slot %d (expected 0 or 1) · run 'Reset node' first", primarySlot))
+		return
+	}
+
+	// Reuse pinned stagingIdx on retry so the catch-up lands at the same
+	// slot as the original rotation.
 	if rec, gErr := s.store.GetRotation(ctx, rotID); gErr == nil && rec.StagingChannelIndex != nil {
 		stagingIdx = *rec.StagingChannelIndex
 		slog.Info("reusing pinned staging slot from rotation row",
 			"rotation_id", rotID, "staging_idx", stagingIdx)
 		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Retry · resuming on staging slot %d", stagingIdx))
 	} else {
-		var sErr error
-		stagingIdx, sErr = s.chooseStagingSlot(ctx, channelIndex, remoteNodeNums)
-		if sErr != nil {
-			slog.Error("choose staging slot",
-				"rotation_id", rotID, "error", sErr)
-			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Aborted · no safe staging slot: %s", sErr.Error()))
-			return
-		}
 		if err := s.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
 			slog.Warn("persist staging_channel_index",
 				"rotation_id", rotID, "error", err)
 		}
-		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Picked staging slot %d (free across fleet)", stagingIdx))
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Picked staging slot %d (Pi PRIMARY at %d)", stagingIdx, primarySlot))
 	}
+	oldSlot := primarySlot
 
-	// Split target list: remotes go through Phase B + C; local goes
-	// through Phase D. Local is intentionally separate -- its admin path
-	// is in-process and uses different firmware semantics (no session
-	// passkey, no PSK gap).
+	// Split targets: local goes through Phase C (operator-paced), every
+	// remote goes through atomic Phase B in this worker.
 	var localTarget *RotationTarget
 	remoteTargets := make([]*RotationTarget, 0, len(current))
 	for i := range current {
@@ -631,28 +712,17 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// Read pi_local_phase to decide whether Phase A and Phase D need to
-	// run. On a Retry against a rotation that already reached
-	// staging_added or phase_d_promoted, those Pi-side writes have
-	// already happened; re-running them would either re-write the
-	// staging slot redundantly (harmless but slow) OR re-write a slot
-	// that's now PRIMARY and demote the live PRIMARY in the process
-	// (BRICK). Phase B/C per-target loops have their own idempotency
-	// checks; this is the rotation-level equivalent for A and D.
+	// Phase A staging is idempotent: SetChannel(stagingIdx, SECONDARY,
+	// newPSK) on local. On retry where stagingIdx already holds newPSK,
+	// this is a no-op flash write. Skip if pi_local_phase past pending.
 	currentPiPhase := PiPhasePending
 	if rec, gErr := s.store.GetRotation(ctx, rotID); gErr == nil {
 		currentPiPhase = rec.PiLocalPhase
 	}
-	skipPhaseA := currentPiPhase != PiPhasePending
-	skipPhaseD := currentPiPhase == PiPhasePhaseDPromoted || currentPiPhase == PiPhaseRetired
 
-	// ---- Phase A: Pi adds the new PSK as a SECONDARY channel slot ----
-	if !skipPhaseA {
+	if currentPiPhase == PiPhasePending {
 		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase A · staging new PSK on Pi at slot %d", stagingIdx))
 		if err := s.applyLocalStagingChannel(ctx, stagingIdx, newPSK); err != nil {
-			// Hard abort -- without staging on Pi, Phase B acks would be
-			// undecryptable in any subsequent channel transition. Mark every
-			// target failed_b so the operator knows nothing happened.
 			slog.Error("phase A staging failed",
 				"rotation_id", rotID, "error", err)
 			for _, t := range remoteTargets {
@@ -669,35 +739,48 @@ func (s *Service) runPSKRotation(
 				"rotation_id", rotID, "error", err)
 		}
 	} else {
-		slog.Info("retry: skipping Phase A (Pi already past pending)",
+		slog.Info("retry: skipping Phase A (Pi already staged)",
 			"rotation_id", rotID, "pi_local_phase", currentPiPhase)
 	}
 
-	// ---- Phase B: push staging slot to each remote ----
-	// A retry that resumes from has_new_psk (target was failed_c) skips
-	// this loop -- staging is already on the remote, only the promote
-	// step needs replay.
+	// ---- Phase B: per-remote atomic migration transaction ----
+	// Each remote: begin -> SetChannel(staging, PRIMARY, new) ->
+	// SetChannel(oldSlot, DISABLED, empty) -> commit. ONE flash write,
+	// atomic. After this the remote is on new PRIMARY and old PSK is
+	// wiped from the remote. Pi remains on old PRIMARY + new SECONDARY
+	// throughout, so the next not-yet-migrated remote stays reachable
+	// via the still-shared old channel.
+	//
+	// Already-migrated remotes are not reachable from Pi during the
+	// rotation window (Pi's outgoing PRIMARY hash points at oldPSK which
+	// migrated remotes no longer have). That's acceptable — Phase B is
+	// done for them; the operator-paced Phase C below restores
+	// bi-directional comms.
 	for i, t := range remoteTargets {
-		// Targets already past Phase B keep their phase. Phase C loop
-		// picks them up.
-		if t.Phase == PhaseHasNewPSK || t.Phase == PhasePromotingC ||
-			t.Phase == PhaseOnNewPSK || t.Phase == PhaseFailedC ||
-			t.Phase == PhaseRetired {
+		if t.Phase == PhaseOnNewPSK || t.Phase == PhaseRetired {
 			continue
 		}
 		_ = s.store.IncrementTargetAttempts(ctx, rotID, t.NodeNum)
 		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePushingB, "", pskFP)
-		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B · pushing staging to !%08x", t.NodeNum))
+		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B · atomic migrate of !%08x", t.NodeNum))
 
-		err := s.pushStagingToRemote(ctx, t.NodeNum, stagingIdx, newPSK)
+		err := s.migrateRemoteAtomic(ctx, t.NodeNum, stagingIdx, oldSlot, newPSK)
 		if err != nil {
 			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedB, err.Error(), pskFP)
-			slog.Warn("PSK rotation phase B failed",
+			slog.Warn("phase B atomic migrate failed",
 				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
 			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B failed for !%08x", t.NodeNum))
 		} else {
-			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseHasNewPSK, "", pskFP)
-			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B ack · !%08x has staging", t.NodeNum))
+			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseOnNewPSK, "", pskFP)
+			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, VerifyMethodRemotePKC); mErr != nil {
+				slog.Warn("mark trust verified after migrate",
+					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
+			}
+			if mErr := s.store.SetNodeCurrentPSKFP(ctx, t.NodeNum, newPSKFP); mErr != nil {
+				slog.Warn("stamp current_psk_fp after migrate",
+					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
+			}
+			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase B done · !%08x on new PSK", t.NodeNum))
 		}
 
 		if opts.InterTargetDelay > 0 && i+1 < len(remoteTargets) {
@@ -709,74 +792,15 @@ func (s *Service) runPSKRotation(
 		}
 	}
 
-	// ---- Phase C: promote staging to PRIMARY on each remote ----
-	for _, t := range remoteTargets {
-		// Skip remotes that failed Phase B (no staging on them yet)
-		// or that already finished Phase C in a previous run.
-		if t.Phase == PhaseFailedB || t.Phase == PhaseOnNewPSK || t.Phase == PhaseRetired {
-			continue
-		}
-		s.transitionTarget(ctx, rotID, channelIndex, current, t, PhasePromotingC, "", pskFP)
-		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C · promoting !%08x to new PRIMARY", t.NodeNum))
-
-		err := s.promoteRemoteToNewPrimary(ctx, t.NodeNum, stagingIdx, newPSK)
-		if err != nil {
-			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseFailedC, err.Error(), pskFP)
-			slog.Warn("PSK rotation phase C failed",
-				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
-			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C failed for !%08x", t.NodeNum))
-		} else {
-			s.transitionTarget(ctx, rotID, channelIndex, current, t, PhaseOnNewPSK, "", pskFP)
-			s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase C ack · !%08x on new PSK", t.NodeNum))
-			// MarkTrustVerifiedNow stamps last_verified_at; the remote's
-			// current_psk_fp gets updated on the next GetTrust round-trip.
-			if mErr := s.store.MarkTrustVerifiedNow(ctx, t.NodeNum, VerifyMethodRemotePKC); mErr != nil {
-				slog.Warn("mark trust verified after promote",
-					"rotation_id", rotID, "node_num", t.NodeNum, "error", mErr)
-			}
-		}
-	}
-
-	// ---- Phase D: Pi promotes locally ----
-	if localTarget != nil && !skipPhaseD {
-		_ = s.store.IncrementTargetAttempts(ctx, rotID, localNum)
-		s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhasePromotingC, "", pskFP)
-		s.broadcastNotice(rotID, current, pskFP, fmt.Sprintf("Phase D · Pi promoting locally to slot %d", stagingIdx))
-
-		err := s.promotePiToNewPrimary(ctx, stagingIdx, newPSK)
-		if err != nil {
-			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseFailedC, err.Error(), pskFP)
-			slog.Error("PSK rotation phase D (local promote) failed",
-				"rotation_id", rotID, "error", err)
-		} else {
-			s.transitionTarget(ctx, rotID, channelIndex, current, localTarget, PhaseOnNewPSK, "", pskFP)
-			if mErr := s.store.MarkTrustVerifiedNow(ctx, localNum, VerifyMethodLocalUSB); mErr != nil {
-				slog.Warn("mark local trust verified", "rotation_id", rotID, "error", mErr)
-			}
-		}
-	} else if skipPhaseD {
-		slog.Info("retry: skipping Phase D (Pi already at phase_d_promoted)",
-			"rotation_id", rotID, "pi_local_phase", currentPiPhase)
-	}
-
-	if !skipPhaseD {
-		if err := s.store.UpsertPiLocalPhase(ctx, rotID, PiPhasePhaseDPromoted); err != nil {
-			slog.Warn("persist pi_local_phase=phase_d_promoted",
-				"rotation_id", rotID, "error", err)
-		}
-	}
-
-	// Update the channel snapshot with the new PSK fingerprint FIRST --
-	// the trust-refresh loop below calls GetTrust, which stamps each
-	// remote's current_psk_fp from localPrimaryPSKFP(), which reads from
-	// this row. If we updated the snapshot after the refresh loop, every
-	// node would get stamped with the OLD fingerprint and the retirement
-	// gate would stay closed forever.
+	// Update fleet_channels with the new fingerprint. The retirement gate
+	// (AllManagedNodesOnPSK) compares this to each remote's stamped
+	// current_psk_fp. Phase B already stamped the gate; this just makes
+	// the channels card show the new fp.
 	if err := s.store.UpsertChannel(ctx, ChannelRecord{
 		Index:           channelIndex,
-		Name:            "", // preserved via COALESCE in store
+		Name:            "",
 		Role:            "",
-		PSKFingerprint:  Fingerprint(newPSK),
+		PSKFingerprint:  newPSKFP,
 		PSKLength:       len(newPSK),
 		LastRotatedAt:   timeNowPtr(),
 		LastRotatedBy:   userID,
@@ -786,22 +810,13 @@ func (s *Service) runPSKRotation(
 			"rotation_id", rotID, "error", err)
 	}
 
-	// Refresh current_psk_fp for every member that landed on the new PSK
-	// -- a successful Phase C / D doesn't itself prove channel-layer
-	// alignment (the Pi could be on the new PRIMARY while a remote is
-	// stalled on phase_c_promoting), but a follow-up GetTrust does.
-	// Operator-driven retirement gates on this, so a fresh stamp here
-	// makes "all migrated" detectable without needing each operator to
-	// click Verify on every node post-rotation.
-	for _, t := range remoteTargets {
-		if t.Phase != PhaseOnNewPSK {
-			continue
-		}
-		if _, err := s.GetTrust(ctx, t.NodeNum); err != nil {
-			slog.Warn("post-rotation trust refresh",
-				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
-		}
-	}
+	// Phase C is operator-paced — runs via the /retire-old-psk endpoint
+	// which calls migratePiAtomic. The current rotation worker leaves Pi
+	// on old PRIMARY + new SECONDARY so an offline-during-rotation
+	// laggard can be retried via the still-active old channel before
+	// the operator commits Phase C. Mark localTarget as still pending
+	// (it'll transition to on_new_psk inside RetireOldPSK).
+	_ = localTarget // localTarget transitioned by Phase C in RetireOldPSK
 
 	// Audit summary.
 	successes := 0
@@ -907,20 +922,28 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	newPSKFP := rec.NewPSKFP
 
 	// Probe Pi-local for the SECONDARY slot that currently holds the
-	// OLD PSK. After Phase D the firmware auto-demoted the previous
-	// PRIMARY to SECONDARY at its prior slot index; that slot is what
-	// Phase E targets, NOT the rotation row's logical channel_index.
-	// If the rotation went through a Retry the staging slot (and thus
-	// the new PRIMARY slot post-Phase-D) may differ from
-	// rec.ChannelIndex, leaving rec.ChannelIndex pointing at the LIVE
-	// PRIMARY slot. Disabling that would brick the local Heltec.
-	oldChannelIdx := int32(-1)
+	// New-design Phase C: Pi atomic migration. After the rotation
+	// worker's Phase B has migrated every reachable remote, Pi is the
+	// only fleet member still on the OLD PSK as PRIMARY. The OLD PSK is
+	// already wiped from each migrated remote (it was DISABLED inside
+	// the Phase B atomic transaction). All this endpoint needs to do
+	// is run the same atomic transaction on Pi local.
+	//
+	// Find the OLD PSK slot by probing Pi state: the slot whose role is
+	// PRIMARY but whose PSK fingerprint != newPSKFP is the one to
+	// promote-from / wipe. The new PSK lives at stagingIdx as
+	// SECONDARY (added by Phase A).
+	if rec.StagingChannelIndex == nil {
+		return nil, errors.New("rotation has no staging_channel_index (rotation may pre-date the atomic worker)")
+	}
+	stagingIdx := *rec.StagingChannelIndex
+	oldSlot := int32(-1)
 	for idx := int32(0); idx < 8; idx++ {
 		ch, perr := s.readLocalChannel(ctx, idx)
 		if perr != nil {
 			continue
 		}
-		if ch.GetRole() != pb.Channel_SECONDARY {
+		if ch.GetRole() != pb.Channel_PRIMARY {
 			continue
 		}
 		var psk []byte
@@ -928,81 +951,93 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 			psk = ch.GetSettings().GetPsk()
 		}
 		if Fingerprint(psk) != newPSKFP {
-			oldChannelIdx = idx
+			oldSlot = idx
 			break
 		}
 	}
-	if oldChannelIdx < 0 {
-		// Nothing matches the OLD PSK pattern. Fall back to the rotation
-		// row's logical channel_index for backward compatibility, but
-		// log the unexpected case.
-		oldChannelIdx = *rec.ChannelIndex
-		slog.Info("retire: no SECONDARY slot with non-new PSK found; falling back to rotation channel_index",
-			"rotation_id", rotID, "channel_index", oldChannelIdx)
+	if oldSlot < 0 {
+		// Pi is already on the new PSK as PRIMARY (perhaps a previous
+		// retire attempt succeeded but the response was lost). No work
+		// to do; just stamp the rotation row as retired.
+		slog.Info("retire: Pi already on new PSK; nothing to migrate",
+			"rotation_id", rotID)
+		if mErr := s.store.MarkRotationRetired(ctx, rotID); mErr != nil {
+			return nil, mErr
+		}
+		return &RetireOldPSKResult{OK: true, OldChannelIndex: stagingIdx, NewPSKFP: newPSKFP}, nil
 	}
 
-	// Gate: every managed fleet member must show current_psk_fp == newPSKFP.
+	// Gate: every managed fleet member must show current_psk_fp ==
+	// newPSKFP. Same gate as before — operator must Verify any
+	// laggards (or use Retry) before Pi can promote.
 	allMigrated, laggards, err := s.store.AllManagedNodesOnPSK(ctx, newPSKFP)
 	if err != nil {
 		return nil, err
 	}
 	if !allMigrated {
 		s.auditFleet(ctx, userID, "rotate_psk_retire_blocked", "channel",
-			fmt.Sprintf("%d", oldChannelIdx), map[string]any{
+			fmt.Sprintf("%d", oldSlot), map[string]any{
 				"rotation_id": rotID,
 				"laggards":    laggards,
 				"new_psk_fp":  newPSKFP,
 			})
-		return &RetireOldPSKResult{OK: false, Laggards: laggards, OldChannelIndex: oldChannelIdx, NewPSKFP: newPSKFP}, nil
+		return &RetireOldPSKResult{OK: false, Laggards: laggards, OldChannelIndex: oldSlot, NewPSKFP: newPSKFP}, nil
 	}
 
-	// Locally disable the old slot. SetChannel role=DISABLED on the slot
-	// that previously held the old PRIMARY -- the firmware wipes the
-	// PSK material from the slot.
-	s.adminMu.Lock()
-	disableMsg := AdminSetChannel(oldChannelIdx, "", pb.Channel_DISABLED, nil)
-	if _, err := s.runLocalAdmin(ctx, disableMsg, "local-retire-old-psk"); err != nil {
-		s.adminMu.Unlock()
-		return nil, fmt.Errorf("disable local old slot: %w", err)
+	// We need the new PSK bytes to write into Pi's PRIMARY slot via
+	// SetChannel(stagingIdx, PRIMARY, newPSK). The rotation row stashes
+	// the raw PSK exactly for this case.
+	newPSK, err := s.store.GetRotationPSK(ctx, rotID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch stored psk: %w", err)
 	}
-	s.adminMu.Unlock()
+	if len(newPSK) == 0 {
+		return nil, errors.New("rotation has no stored PSK; cannot promote Pi without it")
+	}
+	defer NewSecret(newPSK).Clear()
 
-	// Best-effort broadcast to each remote that was managed by this
-	// rotation. A remote that's offline now stays SECONDARY-mapped on
-	// the old slot; harmless. Operator can re-trigger retirement later
-	// to push to it once it's back -- the gate stays open as long as
-	// every laggard is on the new PSK.
-	for _, t := range rec.Targets {
-		if t.NodeNum == s.localNode.LocalNodeNum() {
-			continue
-		}
-		s.adminMu.Lock()
-		// Refresh session passkey via Get; remote may have rebooted.
-		if _, gErr := s.runRemoteAdmin(ctx, t.NodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-retire-establish-session"); gErr != nil {
-			s.adminMu.Unlock()
-			slog.Warn("retire: remote unreachable",
-				"rotation_id", rotID, "node_num", t.NodeNum, "error", gErr)
-			continue
-		}
-		if _, dErr := s.runRemoteAdmin(ctx, t.NodeNum, AdminSetChannel(oldChannelIdx, "", pb.Channel_DISABLED, nil), "remote-retire-old-psk"); dErr != nil {
-			slog.Warn("retire: remote disable failed",
-				"rotation_id", rotID, "node_num", t.NodeNum, "error", dErr)
-		}
-		s.adminMu.Unlock()
+	// Pi atomic: begin -> SetChannel(staging, PRIMARY, new) ->
+	// SetChannel(oldSlot, DISABLED, empty) -> commit. After this Pi is
+	// on new PSK only; old PSK material wiped fleet-wide.
+	if err := s.migratePiAtomic(ctx, stagingIdx, oldSlot, newPSK); err != nil {
+		return nil, fmt.Errorf("Pi atomic migrate: %w", err)
 	}
 
+	// Update local-target state in the rotation row to on_new_psk so
+	// the UI shows everyone migrated.
+	current := append([]RotationTarget(nil), rec.Targets...)
+	for i := range current {
+		if current[i].NodeNum == s.localNode.LocalNodeNum() {
+			current[i].Phase = PhaseOnNewPSK
+			current[i].Status = statusForPhase(PhaseOnNewPSK)
+			current[i].LastError = ""
+			break
+		}
+	}
+	if uErr := s.store.UpdateRotationTargets(ctx, rotID, current, timeNowPtr()); uErr != nil {
+		slog.Warn("update rotation targets after Pi promote",
+			"rotation_id", rotID, "error", uErr)
+	}
+
+	// Stamp the local Pi trust row's current_psk_fp + record the rotation
+	// as retired.
+	if mErr := s.store.MarkTrustVerifiedNow(ctx, s.localNode.LocalNodeNum(), VerifyMethodLocalUSB); mErr != nil {
+		slog.Warn("mark local trust verified post-Pi-migrate",
+			"rotation_id", rotID, "error", mErr)
+	}
 	if err := s.store.MarkRotationRetired(ctx, rotID); err != nil {
 		return nil, err
 	}
 
 	s.auditFleet(ctx, userID, "rotate_psk_retire", "channel",
-		fmt.Sprintf("%d", oldChannelIdx), map[string]any{
-			"rotation_id":       rotID,
-			"old_channel_index": oldChannelIdx,
-			"new_psk_fp":        newPSKFP,
+		fmt.Sprintf("%d", oldSlot), map[string]any{
+			"rotation_id":  rotID,
+			"old_slot":     oldSlot,
+			"staging_slot": stagingIdx,
+			"new_psk_fp":   newPSKFP,
 		})
 
-	return &RetireOldPSKResult{OK: true, OldChannelIndex: oldChannelIdx, NewPSKFP: newPSKFP}, nil
+	return &RetireOldPSKResult{OK: true, OldChannelIndex: oldSlot, NewPSKFP: newPSKFP}, nil
 }
 
 // broadcastNotice emits a status-line WS event without touching the

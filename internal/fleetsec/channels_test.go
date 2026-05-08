@@ -1,6 +1,7 @@
 package fleetsec
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"testing"
@@ -234,6 +235,10 @@ func captureAdmin(data []byte, t *testing.T) sentAdmin {
 		out.variant = "SetChannel"
 		out.chanIdx = v.SetChannel.GetIndex()
 		out.chanRole = v.SetChannel.GetRole()
+	case *pb.AdminMessage_BeginEditSettings:
+		out.variant = "BeginEditSettings"
+	case *pb.AdminMessage_CommitEditSettings:
+		out.variant = "CommitEditSettings"
 	default:
 		out.variant = "other"
 	}
@@ -477,6 +482,103 @@ func TestPromoteRemoteToNewPrimary_SendsSetChannelPrimary(t *testing.T) {
 	second := captureAdmin(fs.history[1], t)
 	if second.variant != "SetChannel" || second.chanIdx != stagingIdx || second.chanRole != pb.Channel_PRIMARY {
 		t.Errorf("promote admin = %+v, want SetChannel(idx=%d, PRIMARY)", second, stagingIdx)
+	}
+}
+
+// TestMigrateRemoteAtomic_Sends5FrameSequence covers the new atomic
+// per-remote rotation primitive. Per begin-commit-empirical.md the
+// sequence is: Get (passkey establish) -> Begin -> Set(stage, PRIMARY,
+// new) -> Set(old, DISABLED, empty) -> Commit. Total 5 outbound frames.
+// CRITICAL: no intermediate reads inside the begin/commit window.
+func TestMigrateRemoteAtomic_Sends5FrameSequence(t *testing.T) {
+	s, _, fs := makeTestService(t)
+	const remote uint32 = 0xa1b2c3d4
+	const stagingIdx int32 = 1
+	const oldSlot int32 = 0
+	wantPasskey := []byte{0x77}
+	fs.replyQueue = []Reply{
+		// Get for session-passkey establish
+		{Kind: ReplyAdminMsg, Admin: &pb.AdminMessage{
+			SessionPasskey: wantPasskey,
+			PayloadVariant: &pb.AdminMessage_GetChannelResponse{
+				GetChannelResponse: &pb.Channel{Index: 0, Role: pb.Channel_PRIMARY},
+			},
+		}},
+		// 4 routing acks for Begin / Set / Set / Commit
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+	}
+	psk := bytes.Repeat([]byte{0xab}, 16)
+
+	if err := s.migrateRemoteAtomic(context.Background(), remote, stagingIdx, oldSlot, psk); err != nil {
+		t.Fatalf("migrateRemoteAtomic: %v", err)
+	}
+	if len(fs.history) != 5 {
+		t.Fatalf("history len = %d, want 5 (Get + Begin + 2*Set + Commit)", len(fs.history))
+	}
+	get := captureAdmin(fs.history[0], t)
+	begin := captureAdmin(fs.history[1], t)
+	setPri := captureAdmin(fs.history[2], t)
+	setDis := captureAdmin(fs.history[3], t)
+	commit := captureAdmin(fs.history[4], t)
+	if get.variant != "GetChannelRequest" {
+		t.Errorf("frame 0 = %s, want GetChannelRequest", get.variant)
+	}
+	if begin.variant != "BeginEditSettings" {
+		t.Errorf("frame 1 = %s, want BeginEditSettings", begin.variant)
+	}
+	if setPri.variant != "SetChannel" || setPri.chanIdx != stagingIdx || setPri.chanRole != pb.Channel_PRIMARY {
+		t.Errorf("frame 2 = %+v, want SetChannel(idx=%d, PRIMARY)", setPri, stagingIdx)
+	}
+	if setDis.variant != "SetChannel" || setDis.chanIdx != oldSlot || setDis.chanRole != pb.Channel_DISABLED {
+		t.Errorf("frame 3 = %+v, want SetChannel(idx=%d, DISABLED)", setDis, oldSlot)
+	}
+	if commit.variant != "CommitEditSettings" {
+		t.Errorf("frame 4 = %s, want CommitEditSettings", commit.variant)
+	}
+}
+
+// TestMigratePiAtomic_Sends4FrameSequence covers the local-side
+// equivalent. No initial Get (local admin path; passkey isn't checked
+// the same way for the loopback transport, and we don't need to refresh
+// it here because the rotation worker already issued admin frames
+// during Phase A). Begin -> Set(stage, PRIMARY, new) -> Set(old,
+// DISABLED, empty) -> Commit. 4 outbound frames.
+func TestMigratePiAtomic_Sends4FrameSequence(t *testing.T) {
+	s, _, fs := makeTestService(t)
+	const stagingIdx int32 = 1
+	const oldSlot int32 = 0
+	fs.replyQueue = []Reply{
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+	}
+	psk := bytes.Repeat([]byte{0xcd}, 16)
+
+	if err := s.migratePiAtomic(context.Background(), stagingIdx, oldSlot, psk); err != nil {
+		t.Fatalf("migratePiAtomic: %v", err)
+	}
+	if len(fs.history) != 4 {
+		t.Fatalf("history len = %d, want 4 (Begin + 2*Set + Commit)", len(fs.history))
+	}
+	begin := captureAdmin(fs.history[0], t)
+	setPri := captureAdmin(fs.history[1], t)
+	setDis := captureAdmin(fs.history[2], t)
+	commit := captureAdmin(fs.history[3], t)
+	if begin.variant != "BeginEditSettings" {
+		t.Errorf("frame 0 = %s, want BeginEditSettings", begin.variant)
+	}
+	if setPri.variant != "SetChannel" || setPri.chanIdx != stagingIdx || setPri.chanRole != pb.Channel_PRIMARY {
+		t.Errorf("frame 1 = %+v, want SetChannel(idx=%d, PRIMARY)", setPri, stagingIdx)
+	}
+	if setDis.variant != "SetChannel" || setDis.chanIdx != oldSlot || setDis.chanRole != pb.Channel_DISABLED {
+		t.Errorf("frame 2 = %+v, want SetChannel(idx=%d, DISABLED)", setDis, oldSlot)
+	}
+	if commit.variant != "CommitEditSettings" {
+		t.Errorf("frame 3 = %s, want CommitEditSettings", commit.variant)
 	}
 }
 
