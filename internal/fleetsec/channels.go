@@ -310,31 +310,31 @@ func (s *Service) tryRotateOnce(
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()
 
-	// Read existing channel settings so we preserve name + role.
-	getMsg := AdminGetChannel(uint32(channelIndex))
-	var reply *pb.AdminMessage
-	var err error
-	if isLocal {
-		reply, err = s.runLocalAdmin(ctx, getMsg, "local-get-channel")
-	} else {
-		reply, err = s.runRemoteAdmin(ctx, nodeNum, getMsg, "remote-get-channel")
+	// We previously read the existing channel via AdminGetChannel to
+	// preserve name + role across the rotation, but Meshtastic firmware
+	// (verified through 2.7.23) does not reply to PKC get_channel_request
+	// -- the local Heltec acks transport, the remote node receives the
+	// packet, but no get_channel_response payload is ever emitted. Local
+	// AdminGetChannel against the host firmware also fails with
+	// routing-error BAD_REQUEST. The Meshtastic Python CLI works around
+	// this by silently swallowing those timeouts and sending SetChannel
+	// with defaults; we adopt the same approach.
+	//
+	// For PRIMARY channel rotations (channelIndex 0) the role is always
+	// PRIMARY; the firmware preserves the existing name when SetChannel
+	// is sent with name="" because the protobuf field stays unset on the
+	// wire. Non-primary indices would need either a working GetChannel
+	// or operator-supplied name+role -- callers currently only rotate
+	// channel 0 so we error out for >0 to surface the limitation rather
+	// than silently re-default a secondary channel.
+	if channelIndex != 0 {
+		return fmt.Errorf("non-primary channel rotation (index %d) not supported: firmware get_channel admin path is unresponsive; supply name+role explicitly when this is wired up", channelIndex)
 	}
-	if err != nil {
-		return fmt.Errorf("get_channel: %w", err)
-	}
-	channel, err := extractChannel(reply)
-	if err != nil {
-		return fmt.Errorf("decode channel reply: %w", err)
-	}
+	role := pb.Channel_PRIMARY
 	name := ""
-	role := pb.Channel_DISABLED
-	if s := channel.GetSettings(); s != nil {
-		name = s.GetName()
-	}
-	role = channel.GetRole()
 
-	// Push the patched channel.
 	setMsg := AdminSetChannel(channelIndex, name, role, newPSK)
+	var err error
 	if isLocal {
 		_, err = s.runLocalAdmin(ctx, setMsg, "local-set-channel")
 	} else {
