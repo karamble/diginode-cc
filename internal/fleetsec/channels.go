@@ -518,6 +518,119 @@ func (s *Service) runPSKRotation(
 	}
 }
 
+// RetireOldPSKResult is what the retirement endpoint returns. On a
+// gate-failure (some node not yet on the new PSK) the API returns 409
+// with this struct populated -- Laggards lists the node-nums still on a
+// stale fingerprint so the operator can run Retry / Verify on each.
+// On success Laggards is empty and OldChannelIndex is the slot we just
+// disabled (typically the old PRIMARY index).
+type RetireOldPSKResult struct {
+	OK              bool     `json:"ok"`
+	Laggards        []uint32 `json:"laggards,omitempty"`
+	OldChannelIndex int32    `json:"oldChannelIndex,omitempty"`
+	NewPSKFP        string   `json:"newPskFingerprint,omitempty"`
+}
+
+// RetireOldPSK runs Phase E for a completed staged rotation. Gated on
+// every managed-trust row's current_psk_fp matching the rotation's
+// new PSK fingerprint -- a node that hasn't been Verified on the new
+// PSK keeps the gate closed even if it would have decrypted just fine,
+// because the operator hasn't proven it.
+//
+// On success: sends SetChannel(idx=oldPrimary, role=DISABLED) locally
+// AND to each fleet member that's reachable. Stamps the rotation as
+// retired. The OLD slot's PSK is wiped at the firmware level.
+//
+// Why not auto-broadcast retirement to remotes? Each remote already
+// has its old slot demoted to SECONDARY (firmware auto-demotion in
+// Phase C); leaving it in place is harmless until we explicitly
+// disable. Broadcasting retirement is a courtesy that frees the slot
+// on remotes too -- but a remote that's offline at retirement time
+// stays SECONDARY-mapped until it's individually retired later.
+func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*RetireOldPSKResult, error) {
+	rec, err := s.store.GetRotation(ctx, rotID)
+	if err != nil {
+		return nil, err
+	}
+	if rec.Kind != RotationKindPSK {
+		return nil, fmt.Errorf("rotation %s is not a PSK rotation", rotID)
+	}
+	if rec.PiLocalPhase != PiPhasePhaseDPromoted {
+		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want phase_d_promoted)", rec.PiLocalPhase)
+	}
+	if rec.RetiredAt != nil {
+		return nil, errors.New("rotation already retired")
+	}
+	if rec.ChannelIndex == nil {
+		return nil, errors.New("rotation has no channel_index")
+	}
+	oldChannelIdx := *rec.ChannelIndex
+	newPSKFP := rec.NewPSKFP
+
+	// Gate: every managed fleet member must show current_psk_fp == newPSKFP.
+	allMigrated, laggards, err := s.store.AllManagedNodesOnPSK(ctx, newPSKFP)
+	if err != nil {
+		return nil, err
+	}
+	if !allMigrated {
+		s.auditFleet(ctx, userID, "rotate_psk_retire_blocked", "channel",
+			fmt.Sprintf("%d", oldChannelIdx), map[string]any{
+				"rotation_id": rotID,
+				"laggards":    laggards,
+				"new_psk_fp":  newPSKFP,
+			})
+		return &RetireOldPSKResult{OK: false, Laggards: laggards, OldChannelIndex: oldChannelIdx, NewPSKFP: newPSKFP}, nil
+	}
+
+	// Locally disable the old slot. SetChannel role=DISABLED on the slot
+	// that previously held the old PRIMARY -- the firmware wipes the
+	// PSK material from the slot.
+	s.adminMu.Lock()
+	disableMsg := AdminSetChannel(oldChannelIdx, "", pb.Channel_DISABLED, nil)
+	if _, err := s.runLocalAdmin(ctx, disableMsg, "local-retire-old-psk"); err != nil {
+		s.adminMu.Unlock()
+		return nil, fmt.Errorf("disable local old slot: %w", err)
+	}
+	s.adminMu.Unlock()
+
+	// Best-effort broadcast to each remote that was managed by this
+	// rotation. A remote that's offline now stays SECONDARY-mapped on
+	// the old slot; harmless. Operator can re-trigger retirement later
+	// to push to it once it's back -- the gate stays open as long as
+	// every laggard is on the new PSK.
+	for _, t := range rec.Targets {
+		if t.NodeNum == s.localNode.LocalNodeNum() {
+			continue
+		}
+		s.adminMu.Lock()
+		// Refresh session passkey via Get; remote may have rebooted.
+		if _, gErr := s.runRemoteAdmin(ctx, t.NodeNum, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "remote-retire-establish-session"); gErr != nil {
+			s.adminMu.Unlock()
+			slog.Warn("retire: remote unreachable",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", gErr)
+			continue
+		}
+		if _, dErr := s.runRemoteAdmin(ctx, t.NodeNum, AdminSetChannel(oldChannelIdx, "", pb.Channel_DISABLED, nil), "remote-retire-old-psk"); dErr != nil {
+			slog.Warn("retire: remote disable failed",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", dErr)
+		}
+		s.adminMu.Unlock()
+	}
+
+	if err := s.store.MarkRotationRetired(ctx, rotID); err != nil {
+		return nil, err
+	}
+
+	s.auditFleet(ctx, userID, "rotate_psk_retire", "channel",
+		fmt.Sprintf("%d", oldChannelIdx), map[string]any{
+			"rotation_id":       rotID,
+			"old_channel_index": oldChannelIdx,
+			"new_psk_fp":        newPSKFP,
+		})
+
+	return &RetireOldPSKResult{OK: true, OldChannelIndex: oldChannelIdx, NewPSKFP: newPSKFP}, nil
+}
+
 // persistAndBroadcast writes the current rotation target snapshot back
 // to fleet_rotations and pushes a WS event so the UI updates in real
 // time. completedAt is non-nil only for the final broadcast (done=true).

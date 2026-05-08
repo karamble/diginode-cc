@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -419,6 +420,57 @@ func (s *Server) handleFleetSecRetryRotation(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
+}
+
+// handleFleetSecRetireOldPSK runs Phase E for a completed staged
+// rotation: disables the old SECONDARY slot on the local Heltec and
+// (best-effort) on each fleet member that's still reachable. Gated on
+// every managed-trust row's current_psk_fp matching the rotation's new
+// fingerprint -- if any node is still on a stale fingerprint, returns
+// 409 with the laggards list rather than the lossy 200 the UI would
+// have to second-guess.
+//
+// Idempotent: a rotation already retired returns 409.
+func (s *Server) handleFleetSecRetireOldPSK(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	if id == "" {
+		writeError(w, http.StatusBadRequest, "rotation id required")
+		return
+	}
+	var body struct {
+		Ack string `json:"ack"`
+	}
+	if err := readJSON(r, &body); err != nil && err != io.EOF {
+		writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	if body.Ack != "RETIRE" {
+		writeError(w, http.StatusBadRequest, `ack must be "RETIRE" -- typed confirmation is required because retiring removes the old PSK and any laggard not yet on the new PSK loses comms permanently`)
+		return
+	}
+
+	res, err := s.svc.FleetSec.RetireOldPSK(r.Context(), userIDFromCtx(r), id)
+	if err != nil {
+		switch {
+		case errors.Is(err, fleetsec.ErrNotFound):
+			writeError(w, http.StatusNotFound, "rotation not found")
+		default:
+			writeError(w, http.StatusInternalServerError, err.Error())
+		}
+		return
+	}
+	if !res.OK {
+		// Gate failed: laggards still on old PSK. 409 Conflict surfaces
+		// the laggards array so the UI can render "still pending: HB55,
+		// HB99" before re-enabling the Retire button.
+		writeJSON(w, http.StatusConflict, res)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 // ---- Recovery ----
