@@ -1,11 +1,10 @@
--- fleet_jobs: durable work queue for the rotation worker. Replaces the
--- in-process goroutine model where a container restart strands the
--- rotation row in pi_local_phase=staging_added with no worker to
--- finish it. Each job represents one unit of work (Phase A staging
--- on Pi, Phase B atomic migrate on one remote, Phase C Pi atomic,
--- recovery on one stranded node, periodic stranded-scan, drift-recovery
--- reset on one node). A single in-process worker leases jobs FIFO and
--- runs them; container restart re-leases via a stale-lease scan.
+-- fleet_jobs: durable work queue for the rotation worker. Each job is
+-- one unit of radio work (Phase A staging on Pi, Phase B atomic
+-- migrate on one remote, Phase C Pi atomic, recovery on one stranded
+-- node, periodic stranded-scan, drift-recovery reset on one node).
+-- A single in-process worker leases jobs FIFO and runs them; the
+-- stale-lease scan on startup re-leases anything left in_progress
+-- by a previous container.
 
 CREATE TABLE fleet_jobs (
     id              UUID            PRIMARY KEY DEFAULT uuid_generate_v4(),

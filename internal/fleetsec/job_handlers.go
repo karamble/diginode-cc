@@ -372,10 +372,9 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 
 	// Pre-pick the recovery slot for the OLD PSK so we can fold its
 	// SetChannel into the same atomic transaction as the migrate.
-	// Two consecutive flash writes on some firmware versions trigger
-	// a soft reboot mid-write that leaves the radio unresponsive for
-	// ~5 minutes (observed 2026-05-09 against firmware 2.7.21.e854894).
-	// One commit = one flash write = no reboot.
+	// Two consecutive flash writes trigger a firmware-side soft reboot
+	// that leaves the radio unresponsive for several minutes; one
+	// commit = one flash write = no reboot.
 	oldPSKFP := Fingerprint(oldPSK)
 	recoverySlot := int32(-1)
 	if len(oldPSK) > 0 {
@@ -500,15 +499,13 @@ func (h *recoverStrandedHandler) Run(ctx context.Context, job *jobs.Job) error {
 
 	// Find Pi's current PRIMARY slot + the new PSK to migrate the
 	// stranded node to. The new PSK lives at Pi's PRIMARY slot post-
-	// Phase-C; we read it directly off the radio for accuracy.
+	// Phase-C; read it directly off the radio for accuracy.
 	//
-	// Resilience: probeSlotsLocal returns "no PRIMARY found" both when
-	// every slot is genuinely DISABLED AND when the radio is busy
-	// rebooting (every read times out). Empirically the Heltec V3
-	// reboots after a Phase C atomic-with-recovery write and stays
-	// down for 4-6 minutes before USB re-enumeration. Retry the
-	// probe up to 5 times with 60s spacing so recovery jobs that
-	// fire during the settle window catch the radio when it's back.
+	// probeSlotsLocal returns "no PRIMARY found" both when every slot
+	// is genuinely DISABLED AND when the radio is busy rebooting (every
+	// read times out). The Heltec reboots after a Phase C atomic-with-
+	// recovery write and stays down for 4-6 minutes before USB
+	// re-enumeration; retry the probe up to 5 times with 60s spacing.
 	var primarySlot int32
 	var perr error
 	probeAttempts := 5

@@ -1,22 +1,12 @@
 // Package jobs is the durable work queue for fleet-security operations.
 //
-// Background: the rotation worker used to be a goroutine launched
-// inline by the RotatePSK HTTP handler. Container restart mid-rotation
-// stranded the rotation row at pi_local_phase=staging_added with no
-// worker to finish the work. Synchronous HTTP retire endpoints also
-// scaled poorly (radio-throttled per-remote work × N nodes >> any
-// reasonable HTTP timeout).
-//
 // Design goals:
 //   - Durable: jobs survive container restart. Stale leases re-run.
-//   - Async: HTTP enqueues + returns ms latency, worker runs out-of-band.
-//   - Sequential: single in-process worker, FIFO. Radio is exclusive
-//     so concurrent jobs would conflict; N=1 worker is correct.
-//   - Idempotent handlers: re-running a job is safe (atomic transactions
-//     overwrite by design).
-//
-// See ~/.claude/projects/-home-user-go-src-github-com-karamble-diginode-cc/memory/project_fleetsec_jobworker_design.md
-// for the full design rationale.
+//   - Async: HTTP enqueues and returns in ms; the worker runs out of band.
+//   - Sequential: single in-process worker, FIFO. The radio is
+//     exclusive, so a second concurrent worker would only contend.
+//   - Idempotent handlers: re-running a job is safe; atomic firmware
+//     transactions overwrite whatever the slot held.
 package jobs
 
 import (

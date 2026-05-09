@@ -293,69 +293,38 @@ func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32
 	return nil
 }
 
-// migrateRemoteAtomic is the new-design replacement for the legacy
-// 5-phase staged push + promote pair. It walks one
-// managed remote from "old PRIMARY at oldSlot" to "new PRIMARY at
-// stagingIdx, oldSlot wiped" inside a single atomic admin transaction
-// (begin_edit_settings → SetChannel(stagingIdx, PRIMARY, newPSK) →
-// SetChannel(oldSlot, DISABLED, empty) → commit_edit_settings).
+// migrateRemoteAtomic walks one managed remote from "old PRIMARY at
+// oldSlot" to "new PRIMARY at stagingIdx, oldSlot wiped" inside a
+// single atomic admin transaction:
+// begin_edit_settings -> SetChannel(stagingIdx, PRIMARY, newPSK) ->
+// SetChannel(oldSlot, DISABLED, empty) -> commit_edit_settings.
 //
-// Empirically validated 2026-05-09 over both local USB and PKC mesh
-// against Heltec V3 fw 2.7.23: multi-channel writes inside a single
-// transaction land in one flash cycle (~5s commit-side latency vs
-// ~30s × N for sequential separate SetChannels), and the firmware's
-// auto-demote semantics combined with last-write-wins inside the
-// transaction means slot N=PRIMARY new + slot M=DISABLED empty is the
-// guaranteed end state regardless of intermediate ordering. The
-// DISABLE-with-empty-psk wipes residual PSK material that a plain
-// SetChannel(role=DISABLED) leaves behind.
+// DISABLE-with-empty-psk wipes residual PSK material; SetChannel with
+// role=DISABLED alone leaves the bytes in place (firmware quirk).
 //
-// CRITICAL: do NOT issue any read admin frame between begin and
-// commit -- empirical test in begin-commit-empirical.md showed the
-// firmware discards pending writes if any non-set admin frame arrives
-// inside the transaction. Send all 4 frames contiguously.
+// CRITICAL: no read admin frames between begin and commit. Any non-
+// set admin verb received inside the transaction discards the
+// pending writes firmware-side.
 //
-// This call assumes Pi has already staged the new PSK locally as
-// SECONDARY at stagingIdx (Phase A) so Pi can decode the post-commit
-// admin reply that rides the remote's now-PRIMARY new PSK channel.
-//
-// Reachability assumption: Pi's outgoing PRIMARY at this moment is
-// still the OLD PSK; the remote also still has OLD PRIMARY (we haven't
-// rotated it yet). The transaction setup phase rides that shared
-// channel. Once the commit lands, the remote is on new-PRIMARY only
-// and Pi-from-the-remote's-perspective becomes one-way (Pi can hear
-// the remote on Pi's SECONDARY=newPSK, but Pi's outgoing default
-// channel-hash still points at oldPSK and the remote no longer has
-// it). That's fine — Phase B is done for that target.
+// Caller must have staged the new PSK on Pi as SECONDARY at
+// stagingIdx (Phase A) so Pi can decode replies from the post-commit
+// remote.
 func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagingIdx, oldSlot int32, newPSK []byte) error {
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()
-	// Establish a session_passkey before opening the transaction.
 	// AdminModule rejects state-changing verbs without a valid
-	// session_passkey. AdminGetChannel(0) is cheap and returns a
-	// passkey-bearing reply.
-	//
-	// Uses the LONG timeout (150s) too -- the establish-session frame
-	// can sit in the local TX queue 20-30s under EU 868 duty cycle
-	// throttling, then the remote's reply also has to fight for radio
-	// time. Default 30s timeout was barely catching some remotes.
+	// session_passkey; AdminGetChannel(0) returns one. Long timeout
+	// because the establish frame can wait 20-30s in the TX queue
+	// under EU 868 duty-cycle throttling.
 	if _, err := s.runRemoteAdminLong(ctx, nodeNum, AdminGetChannel(0), "remote-establish-session"); err != nil {
 		return fmt.Errorf("session establish: %w", err)
 	}
-	// Now send the 4-frame transaction. The first three (begin + 2x
-	// SetChannel) are fire-and-forget: hardware testing showed
-	// begin_edit_settings over PKC admin produces no detectable
-	// routing ack, so blocking-wait variants timeout at 150s+ even
-	// though the frame was processed. We only wait (with the long
-	// timeout) on the commit -- its routing ack is the single
-	// transaction-level success signal we need. If the commit succeeds
-	// every prior frame in the transaction was also accepted (atomic
-	// guarantee). If commit fails the whole transaction is discarded
-	// firmware-side.
-	//
-	// CRITICAL: still NO INTERMEDIATE READS. Even though we're
-	// fire-and-forgetting the first three, any read admin frame
-	// would discard the open transaction.
+	// begin + 2x SetChannel + commit are all fire-and-forget. The PKI
+	// commit-style routing ack is dropped firmware-side (AdminModule
+	// flags the auto-generated ROUTING_APP reply pki_encrypted=true,
+	// but Router refuses PKC on ROUTING_APP and aborts encoding).
+	// Verification comes from the post-commit get_channel probe below,
+	// whose reply rides ADMIN_APP and IS allowed under PKC.
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, AdminBeginEditSettings()); err != nil {
 		return fmt.Errorf("queue begin edit: %w", err)
 	}
@@ -363,29 +332,16 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, promote); err != nil {
 		return fmt.Errorf("queue set primary: %w", err)
 	}
-	// DISABLE-with-empty-psk: pass an explicitly-empty PSK so the
-	// firmware wipes residual key material (firmware-semantics.md §2
-	// notes that role=DISABLED alone does not wipe).
 	disable := AdminSetChannel(oldSlot, "", pb.Channel_DISABLED, nil)
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, disable); err != nil {
 		return fmt.Errorf("queue disable old: %w", err)
 	}
-	// Fire commit edit fire-and-forget. We CANNOT wait for a routing
-	// ack here: per firmware analysis (see ~/.claude/wiki/meshtastic/
-	// firmware-semantics.md §9), the remote's AdminModule sets
-	// pki_encrypted=true on the auto-generated NONE response for
-	// commands without myReply, but Router.cpp explicitly excludes
-	// PortNum_ROUTING_APP from PKC encoding and aborts the encode at
-	// PKI_FAILED. The ack is dropped before TX. Every PKI commit-style
-	// verb exhibits this. Verification has to come from a follow-up
-	// get_*_request (which returns on ADMIN_APP and is allowed under PKC).
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, AdminCommitEditSettings()); err != nil {
 		return fmt.Errorf("queue commit edit: %w", err)
 	}
-	// Hold for the firmware-side flash write to complete before the first
-	// probe. Empirical wiki §1 measured commit-to-applied at ~3-5s on
-	// USB; over PKC mesh add 5-15s for the commit frame to actually leave
-	// Pi's TX queue under EU 868 duty cycle.
+	// Hold for the flash write to complete before the first probe.
+	// Commit-to-applied is ~3-5s on USB; PKC mesh adds 5-15s for the
+	// commit frame to leave Pi's TX queue under EU 868 duty cycle.
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -441,23 +397,19 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 // then DISABLE-wipe the old slot in the same flash write. After this
 // returns the Pi-Heltec is on the new PSK only.
 //
-// Called as Phase C of the new design (operator-paced — runs after all
-// reachable managed remotes have completed Phase B and the operator
-// clicks "Promote Pi" / "Retire old PSK"). Local-admin path uses
-// session_passkey too (AdminModule enforces it on local admin since
-// 2.5.x).
+// Operator-paced Phase C runner: fires after all reachable managed
+// remotes complete Phase B and the operator clicks Retire. Local-admin
+// path still uses session_passkey (AdminModule enforces on local admin).
 func (s *Service) migratePiAtomic(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte) error {
 	return s.migratePiAtomicWithRecovery(ctx, stagingIdx, oldSlot, newPSK, -1, nil)
 }
 
-// migratePiAtomicWithRecovery is the variant Phase C uses to fold the
-// recovery-cache slot write into the same atomic transaction. Without
-// this, Phase C would do two consecutive flash writes (the migrate
-// commit + a separate SetChannel for the recovery slot), which on
-// some firmware versions triggers a soft reboot mid-write and leaves
-// the radio unresponsive for ~5 minutes. Pass recoverySlot=-1 +
-// recoveryPSK=nil to skip the recovery write (legacy migratePiAtomic
-// signature).
+// migratePiAtomicWithRecovery folds the recovery-cache slot write into
+// the same atomic transaction as the migrate. Two consecutive flash
+// writes on some firmware versions trigger a soft reboot mid-write
+// that leaves the radio unresponsive for ~5 minutes. One commit = one
+// flash write. Pass recoverySlot=-1 + recoveryPSK=nil to skip the
+// recovery write entirely.
 func (s *Service) migratePiAtomicWithRecovery(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte, recoverySlot int32, recoveryPSK []byte) error {
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()
@@ -542,12 +494,10 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	if rec.RetiredAt != nil || rec.PiLocalPhase == PiPhaseRetired {
 		return nil, errors.New("rotation already retired")
 	}
-	// New 3-phase atomic design uses pi_local_phase=staging_added as the
-	// "ready for Phase C" signal -- the worker leaves Pi at Phase A
-	// (SECONDARY staged) and the operator clicks Retire to trigger
-	// Phase C atomically. Old 5-phase design used phase_d_promoted as
-	// the gate; accept either for backward compatibility with any
-	// legacy in-flight rotation rows.
+	// pi_local_phase=staging_added is the "ready for Phase C" signal:
+	// Phase A staged the new PSK as SECONDARY on Pi and the operator
+	// clicked Retire to trigger Phase C atomically. phase_d_promoted
+	// is accepted for in-flight rows from before the 3-phase rewrite.
 	if rec.PiLocalPhase != PiPhaseStagingAdded && rec.PiLocalPhase != PiPhasePhaseDPromoted {
 		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want staging_added or phase_d_promoted)", rec.PiLocalPhase)
 	}
@@ -557,18 +507,9 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	}
 	newPSKFP := rec.NewPSKFP
 
-	// Probe Pi-local for the SECONDARY slot that currently holds the
-	// New-design Phase C: Pi atomic migration. After the rotation
-	// worker's Phase B has migrated every reachable remote, Pi is the
-	// only fleet member still on the OLD PSK as PRIMARY. The OLD PSK is
-	// already wiped from each migrated remote (it was DISABLED inside
-	// the Phase B atomic transaction). All this endpoint needs to do
-	// is enqueue the Phase C job for the worker to run out of band.
-	//
-	// Find the OLD PSK slot by probing Pi state: the slot whose role is
-	// PRIMARY but whose PSK fingerprint != newPSKFP is the one to
-	// promote-from / wipe. The new PSK lives at stagingIdx as
-	// SECONDARY (added by Phase A).
+	// After Phase B has migrated every reachable remote, Pi is the only
+	// fleet member still on the OLD PSK as PRIMARY. The endpoint enqueues
+	// the Phase C job for the worker to run out of band.
 	if rec.StagingChannelIndex == nil {
 		return nil, errors.New("rotation has no staging_channel_index (rotation may pre-date the atomic worker)")
 	}
