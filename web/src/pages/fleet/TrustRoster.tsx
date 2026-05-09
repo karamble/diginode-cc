@@ -105,8 +105,16 @@ export default function TrustRoster() {
                   className="border-b border-dark-700/30 hover:bg-dark-800/50"
                 >
                   <td className="py-2 pr-3">
-                    <div className="text-dark-100 text-xs">
-                      {n.shortName || n.longName || n.sensorShortId || `node ${n.nodeNum}`}
+                    <div className="text-xs text-dark-100">
+                      <span className="font-semibold">
+                        {n.longName || n.shortName || n.sensorShortId || `node ${n.nodeNum}`}
+                      </span>
+                      {n.shortName && n.longName && (
+                        <span className="text-dark-400">
+                          {' · '}
+                          {n.shortName}
+                        </span>
+                      )}
                     </div>
                     <div className="text-[10px] text-dark-500 font-mono">
                       {n.nodeId || `!${n.nodeNum.toString(16)}`}

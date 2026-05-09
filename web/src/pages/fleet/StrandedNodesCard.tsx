@@ -110,8 +110,16 @@ export default function StrandedNodesCard() {
             return (
               <tr key={n.nodeNum} className="text-dark-200">
                 <td className="py-2 pr-3">
-                  <div className="font-medium text-dark-100">
-                    {n.shortName || n.longName || n.nodeId || `!${n.nodeNum.toString(16)}`}
+                  <div className="text-dark-100">
+                    <span className="font-semibold">
+                      {n.longName || n.shortName || n.nodeId || `!${n.nodeNum.toString(16)}`}
+                    </span>
+                    {n.shortName && n.longName && (
+                      <span className="text-dark-400">
+                        {' · '}
+                        {n.shortName}
+                      </span>
+                    )}
                   </div>
                   <div className="text-dark-500 font-mono text-[10px]">
                     {n.nodeId || `!${n.nodeNum.toString(16).padStart(8, '0')}`}
