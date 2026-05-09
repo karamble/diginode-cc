@@ -504,25 +504,34 @@ func (h *recoverStrandedHandler) Run(ctx context.Context, job *jobs.Job) error {
 	//
 	// Resilience: probeSlotsLocal returns "no PRIMARY found" both when
 	// every slot is genuinely DISABLED AND when the radio is busy
-	// rebooting (every read times out). The post-Phase-C radio reboot
-	// window is empirically up to ~5 minutes. Retry once after a
-	// 90s sleep so a recover_stranded job that fires during the
-	// settle window doesn't fail a node permanently — the next attempt
-	// catches the radio after re-enumeration.
-	_, primarySlot, perr := h.svc.probeSlotsLocal(ctx)
-	if perr != nil {
-		slog.Warn("recover_stranded: probe Pi failed, will retry once after 90s settle",
-			"node_num", p.NodeNum, "error", perr)
+	// rebooting (every read times out). Empirically the Heltec V3
+	// reboots after a Phase C atomic-with-recovery write and stays
+	// down for 4-6 minutes before USB re-enumeration. Retry the
+	// probe up to 5 times with 60s spacing so recovery jobs that
+	// fire during the settle window catch the radio when it's back.
+	var primarySlot int32
+	var perr error
+	probeAttempts := 5
+	for attempt := 1; attempt <= probeAttempts; attempt++ {
+		_, primarySlot, perr = h.svc.probeSlotsLocal(ctx)
+		if perr == nil {
+			break
+		}
+		if attempt == probeAttempts {
+			break
+		}
+		slog.Warn("recover_stranded: probe Pi failed, will retry",
+			"node_num", p.NodeNum, "attempt", attempt,
+			"max_attempts", probeAttempts, "error", perr)
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(90 * time.Second):
+		case <-time.After(60 * time.Second):
 		}
-		_, primarySlot, perr = h.svc.probeSlotsLocal(ctx)
 	}
 	if perr != nil {
-		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "probe Pi: "+perr.Error())
-		return fmt.Errorf("probe Pi slots: %w", perr)
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "probe Pi after retries: "+perr.Error())
+		return fmt.Errorf("probe Pi slots after %d attempts: %w", probeAttempts, perr)
 	}
 	if primarySlot < 0 || primarySlot > 1 {
 		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum,
