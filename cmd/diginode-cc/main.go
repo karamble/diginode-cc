@@ -29,6 +29,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/faa"
 	"github.com/karamble/diginode-cc/internal/firewall"
 	"github.com/karamble/diginode-cc/internal/fleetsec"
+	fleetsecjobs "github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
@@ -535,6 +536,19 @@ func main() {
 	fleetSecSvc := fleetsec.NewService(db, auditSvc, serialMgr, dispatcher)
 	dispatcher.SetAdminReplyHandler(fleetSecSvc.Tracker())
 	fleetSecSvc.WireHub(hub) // live PSK-rotation progress events
+
+	// Durable jobs queue for fleet-security work. The polling worker
+	// drives PSK rotation phases A/B/C out of band so HTTP handlers
+	// return immediately and a container restart mid-rotation can
+	// resume from the persisted job state.
+	fleetJobsStore := fleetsecjobs.NewStore(db)
+	fleetJobsLoop := fleetsecjobs.NewLoop(fleetJobsStore, "diginode-cc", slog.Default())
+	fleetSecSvc.SetJobsStore(fleetJobsStore)
+	fleetSecSvc.RegisterJobHandlers(fleetJobsLoop)
+	if err := fleetJobsLoop.Start(ctx); err != nil {
+		slog.Error("failed to start fleet-security jobs loop", "error", err)
+	}
+	defer fleetJobsLoop.Stop()
 
 	// Start serial manager (always runs; retries until device appears)
 	go func() {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/karamble/diginode-cc/internal/audit"
 	"github.com/karamble/diginode-cc/internal/database"
+	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
 	"github.com/karamble/diginode-cc/internal/serial"
 )
@@ -48,6 +49,7 @@ type Service struct {
 	audit     *audit.Service
 	serial    SerialSender
 	localNode LocalNodeProvider
+	jobs      *jobs.Store // optional, set via SetJobsStore; required for the new async API path
 
 	hubRef hubRef // optional WS broadcaster, set via WireHub
 

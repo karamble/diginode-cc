@@ -1,0 +1,385 @@
+package fleetsec
+
+// Job handlers for the fleet_jobs queue. Each handler wraps the
+// existing low-level migrate primitives (applyLocalStagingChannel,
+// migrateRemoteAtomic, migratePiAtomic) with the job-payload decode
+// and post-success bookkeeping (transitionTarget, stamps,
+// notifications). Registered with jobs.Loop in main.go startup.
+//
+// Handlers MUST be idempotent. The worker may re-lease a job after
+// a crashed in_progress run. Idempotency comes from the firmware-side
+// atomic transactions (begin/commit overrides whatever the slot held)
+// plus DB-state checks before duplicate work.
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log/slog"
+
+	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
+	pb "github.com/karamble/diginode-cc/internal/meshpb"
+)
+
+// PhaseAPayload carries no per-job state. The Phase A handler probes
+// Pi, picks the staging slot (reusing a pinned slot from the rotation
+// row if present), stages the new PSK as SECONDARY, then enqueues a
+// Phase B job per remote target. All state lives on fleet_rotations.
+type PhaseAPayload struct{}
+
+// PhaseBPayload is the per-remote atomic-migrate job. The handler
+// receives stagingIdx + oldSlot pre-computed by Phase A so it does
+// not need to re-probe Pi for every remote.
+type PhaseBPayload struct {
+	StagingIdx    int32  `json:"stagingIdx"`
+	OldSlot       int32  `json:"oldSlot"`
+	TargetNodeNum uint32 `json:"targetNodeNum"`
+}
+
+// PhaseCPayload is the operator-paced Pi-promote job. Enqueued by
+// RetireOldPSK after the gate check passes. The handler re-probes
+// Pi to find the OLD slot dynamically (resilient to slot drift
+// between gate check and Phase C dispatch).
+type PhaseCPayload struct {
+	StagingIdx int32 `json:"stagingIdx"`
+}
+
+// ---- Phase A handler ----
+
+type phaseAHandler struct{ svc *Service }
+
+func (h *phaseAHandler) Kind() jobs.Kind { return jobs.KindRotatePhaseA }
+
+func (h *phaseAHandler) Run(ctx context.Context, job *jobs.Job) error {
+	if job.RotationID == nil {
+		return errors.New("phase A job missing rotation_id")
+	}
+	rotID := *job.RotationID
+
+	rec, err := h.svc.store.GetRotation(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation: %w", err)
+	}
+
+	psk, err := h.svc.store.GetRotationPSK(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation psk: %w", err)
+	}
+	if len(psk) == 0 {
+		return errors.New("rotation has no stored PSK (already cleared?)")
+	}
+	defer NewSecret(psk).Clear()
+
+	pskFP := Fingerprint(psk)
+	current := append([]RotationTarget(nil), rec.Targets...)
+	channelIdx := int32(0)
+	if rec.ChannelIndex != nil {
+		channelIdx = *rec.ChannelIndex
+	}
+
+	// Probe Pi for primary slot. We need this both to pick the
+	// staging slot (if not pinned) and as the OLD slot for Phase B.
+	_, primarySlot, perr := h.svc.probeSlotsLocal(ctx)
+	if perr != nil {
+		return fmt.Errorf("probe Pi slots: %w", perr)
+	}
+
+	// Determine staging slot. Reuse a pinned slot from a prior run
+	// (retry / re-lease) so the catch-up lands at the same place.
+	var stagingIdx int32
+	if rec.StagingChannelIndex != nil {
+		stagingIdx = *rec.StagingChannelIndex
+	} else {
+		switch primarySlot {
+		case 0:
+			stagingIdx = 1
+		case 1:
+			stagingIdx = 0
+		default:
+			return fmt.Errorf("Pi PRIMARY at non-canonical slot %d (expected 0 or 1); run reset_node first", primarySlot)
+		}
+		if err := h.svc.store.SetStagingChannelIndex(ctx, rotID, stagingIdx); err != nil {
+			slog.Warn("persist staging_channel_index", "rotation_id", rotID, "error", err)
+		}
+		h.svc.broadcastNotice(rotID, current, pskFP,
+			fmt.Sprintf("Picked staging slot %d (Pi PRIMARY at %d)", stagingIdx, primarySlot))
+	}
+
+	// Stage Pi if not already staged. SetChannel(stagingIdx, SECONDARY,
+	// newPSK) is idempotent at the firmware level (overwrites whatever
+	// the slot held). DB phase check just avoids re-broadcasting.
+	if rec.PiLocalPhase == PiPhasePending {
+		h.svc.broadcastNotice(rotID, current, pskFP,
+			fmt.Sprintf("Phase A · staging new PSK on Pi at slot %d", stagingIdx))
+		if err := h.svc.applyLocalStagingChannel(ctx, stagingIdx, psk); err != nil {
+			return fmt.Errorf("phase A staging: %w", err)
+		}
+		if err := h.svc.store.UpsertPiLocalPhase(ctx, rotID, PiPhaseStagingAdded); err != nil {
+			slog.Warn("persist pi_local_phase=staging_added",
+				"rotation_id", rotID, "error", err)
+		}
+	} else {
+		slog.Info("phase A: Pi already staged, skipping staging step",
+			"rotation_id", rotID, "pi_local_phase", rec.PiLocalPhase)
+	}
+
+	// Update fleet_channels with the new PSK fingerprint so the
+	// channels card reflects the rotation. The retirement gate
+	// (AllManagedNodesOnPSK) compares per-node current_psk_fp against
+	// this; Phase B stamps that as it succeeds per remote.
+	if err := h.svc.store.UpsertChannel(ctx, ChannelRecord{
+		Index:          channelIdx,
+		Name:           "",
+		Role:           "",
+		PSKFingerprint: pskFP,
+		PSKLength:      len(psk),
+		LastRotatedAt:  timeNowPtr(),
+		LastRotatedBy:  rec.StartedBy,
+		LastRotationID: rotID,
+	}); err != nil {
+		slog.Warn("update fleet_channels after staging",
+			"rotation_id", rotID, "error", err)
+	}
+
+	// Enqueue Phase B for each remote target not yet done. Skip the
+	// local node (Phase C handles Pi). Skip targets that already
+	// reached on_new_psk or retired (idempotent re-enqueue is harmless
+	// but pollutes job history). Debounce against existing pending
+	// jobs to avoid duplicate enqueues on re-lease.
+	localNum := h.svc.localNode.LocalNodeNum()
+	enqueued := 0
+	for _, t := range current {
+		if t.NodeNum == localNum {
+			continue
+		}
+		if t.Phase == PhaseOnNewPSK || t.Phase == PhaseRetired {
+			continue
+		}
+		nodeNum64 := int64(t.NodeNum)
+		pending, err := h.svc.jobs.HasPendingFor(ctx, jobs.KindRotatePhaseB, nodeNum64)
+		if err != nil {
+			slog.Warn("phase B debounce check",
+				"rotation_id", rotID, "node_num", t.NodeNum, "error", err)
+		}
+		if pending {
+			continue
+		}
+		_, err = h.svc.jobs.Enqueue(ctx, jobs.EnqueueOpts{
+			Kind:          jobs.KindRotatePhaseB,
+			RotationID:    &rotID,
+			TargetNodeNum: &nodeNum64,
+			Payload: PhaseBPayload{
+				StagingIdx:    stagingIdx,
+				OldSlot:       primarySlot,
+				TargetNodeNum: t.NodeNum,
+			},
+		})
+		if err != nil {
+			return fmt.Errorf("enqueue phase B for !%08x: %w", t.NodeNum, err)
+		}
+		enqueued++
+	}
+
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase A done · %d Phase B job(s) queued", enqueued))
+	return nil
+}
+
+// ---- Phase B handler ----
+
+type phaseBHandler struct{ svc *Service }
+
+func (h *phaseBHandler) Kind() jobs.Kind { return jobs.KindRotatePhaseB }
+
+func (h *phaseBHandler) Run(ctx context.Context, job *jobs.Job) error {
+	if job.RotationID == nil {
+		return errors.New("phase B job missing rotation_id")
+	}
+	rotID := *job.RotationID
+	var p PhaseBPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return fmt.Errorf("decode phase B payload: %w", err)
+	}
+	if p.TargetNodeNum == 0 {
+		return errors.New("phase B targetNodeNum must be non-zero")
+	}
+	psk, err := h.svc.store.GetRotationPSK(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation psk: %w", err)
+	}
+	if len(psk) == 0 {
+		return errors.New("rotation has no stored PSK")
+	}
+	defer NewSecret(psk).Clear()
+
+	rec, err := h.svc.store.GetRotation(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation: %w", err)
+	}
+	pskFP := Fingerprint(psk)
+	current := append([]RotationTarget(nil), rec.Targets...)
+	channelIdx := int32(0)
+	if rec.ChannelIndex != nil {
+		channelIdx = *rec.ChannelIndex
+	}
+
+	// Find this target's row. Idempotent: skip if already on_new_psk.
+	var t *RotationTarget
+	for i := range current {
+		if current[i].NodeNum == p.TargetNodeNum {
+			t = &current[i]
+			break
+		}
+	}
+	if t == nil {
+		return fmt.Errorf("target %x not found in rotation row", p.TargetNodeNum)
+	}
+	if t.Phase == PhaseOnNewPSK || t.Phase == PhaseRetired {
+		slog.Info("phase B: skipping (already on new PSK)",
+			"rotation_id", rotID, "node_num", p.TargetNodeNum)
+		return nil
+	}
+
+	_ = h.svc.store.IncrementTargetAttempts(ctx, rotID, p.TargetNodeNum)
+	h.svc.transitionTarget(ctx, rotID, channelIdx, current, t, PhasePushingB, "", pskFP)
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase B · atomic migrate of !%08x", p.TargetNodeNum))
+
+	if err := h.svc.migrateRemoteAtomic(ctx, p.TargetNodeNum, p.StagingIdx, p.OldSlot, psk); err != nil {
+		h.svc.transitionTarget(ctx, rotID, channelIdx, current, t, PhaseFailedB, err.Error(), pskFP)
+		h.svc.broadcastNotice(rotID, current, pskFP,
+			fmt.Sprintf("Phase B failed for !%08x", p.TargetNodeNum))
+		return fmt.Errorf("phase B atomic migrate: %w", err)
+	}
+
+	h.svc.transitionTarget(ctx, rotID, channelIdx, current, t, PhaseOnNewPSK, "", pskFP)
+	if mErr := h.svc.store.MarkTrustVerifiedNow(ctx, p.TargetNodeNum, VerifyMethodRemotePKC); mErr != nil {
+		slog.Warn("mark trust verified after migrate",
+			"rotation_id", rotID, "node_num", p.TargetNodeNum, "error", mErr)
+	}
+	if mErr := h.svc.store.SetNodeCurrentPSKFP(ctx, p.TargetNodeNum, pskFP); mErr != nil {
+		slog.Warn("stamp current_psk_fp after migrate",
+			"rotation_id", rotID, "node_num", p.TargetNodeNum, "error", mErr)
+	}
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase B done · !%08x on new PSK", p.TargetNodeNum))
+	return nil
+}
+
+// ---- Phase C handler ----
+
+type phaseCHandler struct{ svc *Service }
+
+func (h *phaseCHandler) Kind() jobs.Kind { return jobs.KindRotatePhaseC }
+
+func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
+	if job.RotationID == nil {
+		return errors.New("phase C job missing rotation_id")
+	}
+	rotID := *job.RotationID
+	var p PhaseCPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return fmt.Errorf("decode phase C payload: %w", err)
+	}
+	rec, err := h.svc.store.GetRotation(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation: %w", err)
+	}
+	if rec.RetiredAt != nil || rec.PiLocalPhase == PiPhaseRetired {
+		slog.Info("phase C: skipping (already retired)", "rotation_id", rotID)
+		return nil
+	}
+
+	// Find Pi's actual OLD-PSK slot dynamically: PRIMARY whose fp != newFP.
+	newPSKFP := rec.NewPSKFP
+	oldSlot := int32(-1)
+	for idx := int32(0); idx < 8; idx++ {
+		ch, perr := h.svc.readLocalChannel(ctx, idx)
+		if perr != nil {
+			continue
+		}
+		if ch.GetRole() != pb.Channel_PRIMARY {
+			continue
+		}
+		var pskBytes []byte
+		if ch.GetSettings() != nil {
+			pskBytes = ch.GetSettings().GetPsk()
+		}
+		if Fingerprint(pskBytes) != newPSKFP {
+			oldSlot = idx
+			break
+		}
+	}
+	if oldSlot < 0 {
+		// Pi already on new PSK as PRIMARY (previous Phase C succeeded
+		// firmware-side but lost the reply). Mark retired and exit.
+		slog.Info("phase C: Pi already on new PSK; nothing to migrate",
+			"rotation_id", rotID)
+		return h.svc.store.MarkRotationRetired(ctx, rotID)
+	}
+
+	psk, err := h.svc.store.GetRotationPSK(ctx, rotID)
+	if err != nil {
+		return fmt.Errorf("fetch rotation psk: %w", err)
+	}
+	if len(psk) == 0 {
+		return errors.New("rotation has no stored PSK; cannot promote Pi without it")
+	}
+	defer NewSecret(psk).Clear()
+
+	pskFP := Fingerprint(psk)
+	current := append([]RotationTarget(nil), rec.Targets...)
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase C · Pi atomic promote slot %d, wipe slot %d", p.StagingIdx, oldSlot))
+
+	if err := h.svc.migratePiAtomic(ctx, p.StagingIdx, oldSlot, psk); err != nil {
+		return fmt.Errorf("Pi atomic migrate: %w", err)
+	}
+
+	// Stamp local target on_new_psk.
+	for i := range current {
+		if current[i].NodeNum == h.svc.localNode.LocalNodeNum() {
+			current[i].Phase = PhaseOnNewPSK
+			current[i].Status = statusForPhase(PhaseOnNewPSK)
+			current[i].LastError = ""
+			break
+		}
+	}
+	if uErr := h.svc.store.UpdateRotationTargets(ctx, rotID, current, timeNowPtr()); uErr != nil {
+		slog.Warn("update rotation targets after Pi promote",
+			"rotation_id", rotID, "error", uErr)
+	}
+	if mErr := h.svc.store.MarkTrustVerifiedNow(ctx, h.svc.localNode.LocalNodeNum(), VerifyMethodLocalUSB); mErr != nil {
+		slog.Warn("mark local trust verified post-Pi-migrate",
+			"rotation_id", rotID, "error", mErr)
+	}
+	if err := h.svc.store.MarkRotationRetired(ctx, rotID); err != nil {
+		return fmt.Errorf("mark retired: %w", err)
+	}
+	// Drop the stashed raw PSK now that Pi is on new and old is wiped fleet-wide.
+	if cErr := h.svc.store.ClearRotationPSK(ctx, rotID); cErr != nil {
+		slog.Warn("clear rotation psk after retire",
+			"rotation_id", rotID, "error", cErr)
+	}
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase C done · Pi on new PSK · old slot %d wiped fleet-wide", oldSlot))
+	return nil
+}
+
+// ---- Wiring ----
+
+// RegisterJobHandlers registers Phase A/B/C handlers with the loop.
+// Called from main.go startup after the fleetsec service is constructed.
+func (s *Service) RegisterJobHandlers(loop *jobs.Loop) {
+	loop.Register(&phaseAHandler{svc: s})
+	loop.Register(&phaseBHandler{svc: s})
+	loop.Register(&phaseCHandler{svc: s})
+}
+
+// SetJobsStore wires the jobs.Store into the service so RotatePSK,
+// RetireOldPSK, RetryRotation can enqueue jobs instead of running
+// goroutines. Called from main.go startup.
+func (s *Service) SetJobsStore(store *jobs.Store) {
+	s.jobs = store
+}

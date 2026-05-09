@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
 	"github.com/karamble/diginode-cc/internal/ws"
 )
@@ -178,9 +179,26 @@ func (s *Service) RotatePSK(
 		// even if a future caller leaked it).
 	})
 
-	// Detached context for the background runner -- the caller's
-	// HTTP handler context expires once the response is written.
-	go s.runPSKRotation(context.Background(), userID, rotID, channelIndex, pskCopy, rotTargets, opts)
+	// In-memory copy is no longer needed; PSK plaintext lives on the
+	// rotation row (InsertRotation stashed it) for handlers to pull.
+	for i := range pskCopy {
+		pskCopy[i] = 0
+	}
+
+	// Enqueue Phase A. The handler probes Pi, picks the staging slot,
+	// stages the new PSK, then enqueues per-remote Phase B jobs. The
+	// HTTP caller returns immediately; the worker drives the rotation
+	// out of band so a 30-node fleet doesn't time out the request.
+	if s.jobs == nil {
+		return "", errors.New("fleet-security jobs queue not wired (svc.SetJobsStore not called)")
+	}
+	if _, err := s.jobs.Enqueue(ctx, jobs.EnqueueOpts{
+		Kind:       jobs.KindRotatePhaseA,
+		RotationID: &rotID,
+		Payload:    PhaseAPayload{},
+	}); err != nil {
+		return rotID, fmt.Errorf("enqueue phase A: %w", err)
+	}
 
 	return rotID, nil
 }
@@ -927,18 +945,6 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want staging_added or phase_d_promoted)", rec.PiLocalPhase)
 	}
 
-	// Detach from the caller's deadline so the per-remote PKC round
-	// (DefaultRemoteAdminTimeout = 30s, GetConfig + SetChannel each)
-	// can finish even when the inbound HTTP request times out. A
-	// 2-remote fleet needs ~2*60s wall worst-case; without this
-	// detach the second remote's first transaction starts on an
-	// already-expired context and aborts immediately. Audit + DB row
-	// state still record the outcome, so the UI can re-trigger Retire
-	// if the operator gives up waiting.
-	deadline := 2*time.Minute + time.Duration(2*len(rec.Targets))*DefaultRemoteAdminTimeout
-	bgCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), deadline)
-	defer cancel()
-	ctx = bgCtx
 	if rec.ChannelIndex == nil {
 		return nil, errors.New("rotation has no channel_index")
 	}
@@ -950,7 +956,7 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	// only fleet member still on the OLD PSK as PRIMARY. The OLD PSK is
 	// already wiped from each migrated remote (it was DISABLED inside
 	// the Phase B atomic transaction). All this endpoint needs to do
-	// is run the same atomic transaction on Pi local.
+	// is enqueue the Phase C job for the worker to run out of band.
 	//
 	// Find the OLD PSK slot by probing Pi state: the slot whose role is
 	// PRIMARY but whose PSK fingerprint != newPSKFP is the one to
@@ -960,107 +966,58 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 		return nil, errors.New("rotation has no staging_channel_index (rotation may pre-date the atomic worker)")
 	}
 	stagingIdx := *rec.StagingChannelIndex
-	oldSlot := int32(-1)
-	for idx := int32(0); idx < 8; idx++ {
-		ch, perr := s.readLocalChannel(ctx, idx)
-		if perr != nil {
-			continue
-		}
-		if ch.GetRole() != pb.Channel_PRIMARY {
-			continue
-		}
-		var psk []byte
-		if ch.GetSettings() != nil {
-			psk = ch.GetSettings().GetPsk()
-		}
-		if Fingerprint(psk) != newPSKFP {
-			oldSlot = idx
-			break
-		}
-	}
-	if oldSlot < 0 {
-		// Pi is already on the new PSK as PRIMARY (perhaps a previous
-		// retire attempt succeeded but the response was lost). No work
-		// to do; just stamp the rotation row as retired.
-		slog.Info("retire: Pi already on new PSK; nothing to migrate",
-			"rotation_id", rotID)
-		if mErr := s.store.MarkRotationRetired(ctx, rotID); mErr != nil {
-			return nil, mErr
-		}
-		return &RetireOldPSKResult{OK: true, OldChannelIndex: stagingIdx, NewPSKFP: newPSKFP}, nil
-	}
 
 	// Gate: every managed fleet member must show current_psk_fp ==
-	// newPSKFP. Same gate as before — operator must Verify any
-	// laggards (or use Retry) before Pi can promote.
+	// newPSKFP. Operator must Verify any laggards (or use Retry)
+	// before Pi can promote. Run gate before enqueueing so the UI
+	// can surface the laggard list inline.
 	allMigrated, laggards, err := s.store.AllManagedNodesOnPSK(ctx, newPSKFP)
 	if err != nil {
 		return nil, err
 	}
 	if !allMigrated {
 		s.auditFleet(ctx, userID, "rotate_psk_retire_blocked", "channel",
-			fmt.Sprintf("%d", oldSlot), map[string]any{
+			fmt.Sprintf("%d", stagingIdx), map[string]any{
 				"rotation_id": rotID,
 				"laggards":    laggards,
 				"new_psk_fp":  newPSKFP,
 			})
-		return &RetireOldPSKResult{OK: false, Laggards: laggards, OldChannelIndex: oldSlot, NewPSKFP: newPSKFP}, nil
+		return &RetireOldPSKResult{OK: false, Laggards: laggards, OldChannelIndex: stagingIdx, NewPSKFP: newPSKFP}, nil
 	}
 
-	// We need the new PSK bytes to write into Pi's PRIMARY slot via
-	// SetChannel(stagingIdx, PRIMARY, newPSK). The rotation row stashes
-	// the raw PSK exactly for this case.
-	newPSK, err := s.store.GetRotationPSK(ctx, rotID)
-	if err != nil {
-		return nil, fmt.Errorf("fetch stored psk: %w", err)
-	}
-	if len(newPSK) == 0 {
-		return nil, errors.New("rotation has no stored PSK; cannot promote Pi without it")
-	}
-	defer NewSecret(newPSK).Clear()
-
-	// Pi atomic: begin -> SetChannel(staging, PRIMARY, new) ->
-	// SetChannel(oldSlot, DISABLED, empty) -> commit. After this Pi is
-	// on new PSK only; old PSK material wiped fleet-wide.
-	if err := s.migratePiAtomic(ctx, stagingIdx, oldSlot, newPSK); err != nil {
-		return nil, fmt.Errorf("Pi atomic migrate: %w", err)
+	if s.jobs == nil {
+		return nil, errors.New("fleet-security jobs queue not wired (svc.SetJobsStore not called)")
 	}
 
-	// Update local-target state in the rotation row to on_new_psk so
-	// the UI shows everyone migrated.
-	current := append([]RotationTarget(nil), rec.Targets...)
-	for i := range current {
-		if current[i].NodeNum == s.localNode.LocalNodeNum() {
-			current[i].Phase = PhaseOnNewPSK
-			current[i].Status = statusForPhase(PhaseOnNewPSK)
-			current[i].LastError = ""
-			break
+	// Debounce: if a Phase C job is already pending or in progress for
+	// this rotation, reuse it instead of enqueueing a duplicate.
+	existing, lerr := s.jobs.ListByRotation(ctx, rotID)
+	if lerr == nil {
+		for _, j := range existing {
+			if j.Kind == jobs.KindRotatePhaseC && (j.State == jobs.StateQueued || j.State == jobs.StateInProgress) {
+				slog.Info("retire: Phase C already queued; reusing",
+					"rotation_id", rotID, "job_id", j.ID)
+				return &RetireOldPSKResult{OK: true, OldChannelIndex: stagingIdx, NewPSKFP: newPSKFP}, nil
+			}
 		}
 	}
-	if uErr := s.store.UpdateRotationTargets(ctx, rotID, current, timeNowPtr()); uErr != nil {
-		slog.Warn("update rotation targets after Pi promote",
-			"rotation_id", rotID, "error", uErr)
-	}
 
-	// Stamp the local Pi trust row's current_psk_fp + record the rotation
-	// as retired.
-	if mErr := s.store.MarkTrustVerifiedNow(ctx, s.localNode.LocalNodeNum(), VerifyMethodLocalUSB); mErr != nil {
-		slog.Warn("mark local trust verified post-Pi-migrate",
-			"rotation_id", rotID, "error", mErr)
-	}
-	if err := s.store.MarkRotationRetired(ctx, rotID); err != nil {
-		return nil, err
+	if _, err := s.jobs.Enqueue(ctx, jobs.EnqueueOpts{
+		Kind:       jobs.KindRotatePhaseC,
+		RotationID: &rotID,
+		Payload:    PhaseCPayload{StagingIdx: stagingIdx},
+	}); err != nil {
+		return nil, fmt.Errorf("enqueue phase C: %w", err)
 	}
 
 	s.auditFleet(ctx, userID, "rotate_psk_retire", "channel",
-		fmt.Sprintf("%d", oldSlot), map[string]any{
+		fmt.Sprintf("%d", stagingIdx), map[string]any{
 			"rotation_id":  rotID,
-			"old_slot":     oldSlot,
 			"staging_slot": stagingIdx,
 			"new_psk_fp":   newPSKFP,
 		})
 
-	return &RetireOldPSKResult{OK: true, OldChannelIndex: oldSlot, NewPSKFP: newPSKFP}, nil
+	return &RetireOldPSKResult{OK: true, OldChannelIndex: stagingIdx, NewPSKFP: newPSKFP}, nil
 }
 
 // broadcastNotice emits a status-line WS event without touching the
@@ -1187,7 +1144,7 @@ func (s *Service) RetryRotation(
 		want[t] = true
 	}
 	current := append([]RotationTarget(nil), rec.Targets...)
-	any := false
+	anyEligible := false
 	for i := range current {
 		if !want[current[i].NodeNum] {
 			continue
@@ -1197,16 +1154,16 @@ func (s *Service) RetryRotation(
 			current[i].Phase = PhasePending
 			current[i].Status = statusForPhase(PhasePending)
 			current[i].LastError = ""
-			any = true
+			anyEligible = true
 		case PhaseFailedC, PhasePromotingC:
 			current[i].Phase = PhaseHasNewPSK
 			current[i].Status = statusForPhase(PhaseHasNewPSK)
 			current[i].LastError = ""
-			any = true
+			anyEligible = true
 		case PhasePending:
 			// Already pending -- worker will pick it up; counts as
 			// a retry request even though no reset was needed.
-			any = true
+			anyEligible = true
 		case PhaseOnNewPSK, PhaseRetired:
 			// Already done; nothing to retry. Skip silently.
 			continue
@@ -1214,15 +1171,41 @@ func (s *Service) RetryRotation(
 			// In an unusual mid-rotation snapshot: B succeeded but
 			// the worker hadn't reached this target's C yet. Worker
 			// will pick it up.
-			any = true
+			anyEligible = true
 		}
 	}
-	if !any {
+	if !anyEligible {
 		return errors.New("no eligible targets matched the retry list (already done or unknown node-num)")
 	}
 
-	pskCopy := append([]byte(nil), newPSK...)
-	go s.runPSKRotation(context.Background(), userID, id, *rec.ChannelIndex, pskCopy, current, RotatePSKOpts{Ack: "ROTATE"})
+	// Persist the reset target rows so the worker sees the right
+	// resting state when it picks each Phase B job up.
+	if err := s.store.UpdateRotationTargets(ctx, id, current, nil); err != nil {
+		return fmt.Errorf("persist retry target reset: %w", err)
+	}
+
+	if s.jobs == nil {
+		return errors.New("fleet-security jobs queue not wired (svc.SetJobsStore not called)")
+	}
+
+	// Re-enqueue Phase A. The handler is idempotent: it skips Pi
+	// staging if pi_local_phase is already past pending, then
+	// enqueues fresh Phase B jobs for any target not on_new_psk.
+	// Using Phase A as the entry point lets us reuse its slot-pick
+	// + per-target debounce instead of duplicating the loop here.
+	if _, err := s.jobs.Enqueue(ctx, jobs.EnqueueOpts{
+		Kind:       jobs.KindRotatePhaseA,
+		RotationID: &id,
+		Payload:    PhaseAPayload{},
+	}); err != nil {
+		return fmt.Errorf("enqueue phase A retry: %w", err)
+	}
+	s.auditFleet(ctx, userID, "rotate_psk_retry", "channel",
+		fmt.Sprintf("%d", *rec.ChannelIndex), map[string]any{
+			"rotation_id":  id,
+			"target_count": len(targetNodeNums),
+			"new_psk_fp":   rec.NewPSKFP,
+		})
 	return nil
 }
 
