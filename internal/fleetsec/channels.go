@@ -917,8 +917,14 @@ func (s *Service) RetireOldPSK(ctx context.Context, userID, rotID string) (*Reti
 	if rec.RetiredAt != nil || rec.PiLocalPhase == PiPhaseRetired {
 		return nil, errors.New("rotation already retired")
 	}
-	if rec.PiLocalPhase != PiPhasePhaseDPromoted {
-		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want phase_d_promoted -- the rotation must reach Phase D before retirement)", rec.PiLocalPhase)
+	// New 3-phase atomic design uses pi_local_phase=staging_added as the
+	// "ready for Phase C" signal -- the worker leaves Pi at Phase A
+	// (SECONDARY staged) and the operator clicks Retire to trigger
+	// Phase C atomically. Old 5-phase design used phase_d_promoted as
+	// the gate; accept either for backward compatibility with any
+	// legacy in-flight rotation rows.
+	if rec.PiLocalPhase != PiPhaseStagingAdded && rec.PiLocalPhase != PiPhasePhaseDPromoted {
+		return nil, fmt.Errorf("rotation not ready to retire (pi_local_phase=%s, want staging_added or phase_d_promoted)", rec.PiLocalPhase)
 	}
 
 	// Detach from the caller's deadline so the per-remote PKC round

@@ -31,10 +31,13 @@ export default function ChannelsCard() {
   const [retireRotation, setRetireRotation] = useState<Rotation | null>(null)
 
   // Most-recent rotation per channel index, for the "Retire old PSK"
-  // affordance. The card only surfaces a Retire button when the local
-  // Heltec has reached phase_d_promoted (Phase D done) but hasn't been
-  // retired yet -- ie, both PSKs are alive on Pi pending operator
-  // confirmation that all nodes have migrated.
+  // affordance. The card surfaces a Retire button when the rotation is
+  // in the operator-paced retire window:
+  //   3-phase atomic design: pi_local_phase = staging_added (Phase A
+  //     complete, every reachable remote migrated atomically, Pi still
+  //     on old PRIMARY waiting for operator-paced Phase C).
+  //   legacy 5-phase design: pi_local_phase = phase_d_promoted.
+  // Either way: not yet retired and ready for the Pi-side promote.
   const { data: pendingRetirements } = useQuery<Record<number, Rotation>>({
     queryKey: ['fleet-security', 'pending-retirements'],
     queryFn: async () => {
@@ -44,7 +47,10 @@ export default function ChannelsCard() {
         if (!ch.lastRotationId) continue
         try {
           const rot = await fleetSecurityApi.getRotation(ch.lastRotationId)
-          if (rot.piLocalPhase === 'phase_d_promoted' && !rot.retiredAt) {
+          const ready =
+            rot.piLocalPhase === 'staging_added' ||
+            rot.piLocalPhase === 'phase_d_promoted'
+          if (ready && !rot.retiredAt) {
             out[ch.index] = rot
           }
         } catch {
