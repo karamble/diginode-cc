@@ -488,14 +488,30 @@ func TestPromoteRemoteToNewPrimary_SendsSetChannelPrimary(t *testing.T) {
 // TestMigrateRemoteAtomic_Sends5FrameSequence covers the new atomic
 // per-remote rotation primitive. Per begin-commit-empirical.md the
 // sequence is: Get (passkey establish) -> Begin -> Set(stage, PRIMARY,
-// new) -> Set(old, DISABLED, empty) -> Commit. Total 5 outbound frames.
-// CRITICAL: no intermediate reads inside the begin/commit window.
+// new) -> Set(old, DISABLED, empty) -> Commit -> Get (verify probe).
+// Total 6 outbound frames: 5 transaction + 1 post-commit verify.
+// CRITICAL: no intermediate reads inside the begin/commit window itself.
+// The commit ack from the firmware is dropped at the radio layer for
+// PKI commit-style verbs (see ~/.claude/wiki/meshtastic/firmware-semantics.md
+// §9), so the controller validates by reading the staging slot back.
 func TestMigrateRemoteAtomic_Sends5FrameSequence(t *testing.T) {
+	// Shrink verify timings so the test doesn't sleep 12+s.
+	prevWait, prevDeadline, prevBackoff := commitVerifyInitialWait, commitVerifyDeadline, commitVerifyBackoff
+	commitVerifyInitialWait = 1 * time.Millisecond
+	commitVerifyDeadline = 500 * time.Millisecond
+	commitVerifyBackoff = 10 * time.Millisecond
+	t.Cleanup(func() {
+		commitVerifyInitialWait, commitVerifyDeadline, commitVerifyBackoff = prevWait, prevDeadline, prevBackoff
+	})
+
 	s, _, fs := makeTestService(t)
 	const remote uint32 = 0xa1b2c3d4
 	const stagingIdx int32 = 1
 	const oldSlot int32 = 0
 	wantPasskey := []byte{0x77}
+	psk := bytes.Repeat([]byte{0xab}, 16)
+	pskFP := Fingerprint(psk)
+	_ = pskFP // verify probe matches against this in the reply below
 	fs.replyQueue = []Reply{
 		// Get for session-passkey establish
 		{Kind: ReplyAdminMsg, Admin: &pb.AdminMessage{
@@ -504,25 +520,40 @@ func TestMigrateRemoteAtomic_Sends5FrameSequence(t *testing.T) {
 				GetChannelResponse: &pb.Channel{Index: 0, Role: pb.Channel_PRIMARY},
 			},
 		}},
-		// 4 routing acks for Begin / Set / Set / Commit
+		// Begin / Set / Set / Commit are fire-and-forget; SendToRadio still
+		// pops a queue entry per Send, so feed harmless empty routing acks.
 		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
 		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
 		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
 		{Kind: ReplyRoutingAck, Routing: &pb.Routing{Variant: &pb.Routing_ErrorReason{ErrorReason: pb.Routing_NONE}}},
+		// Post-commit verify probe: get_channel(stagingIdx) returns the
+		// expected PRIMARY+newPSK state.
+		{Kind: ReplyAdminMsg, Admin: &pb.AdminMessage{
+			SessionPasskey: wantPasskey,
+			PayloadVariant: &pb.AdminMessage_GetChannelResponse{
+				GetChannelResponse: &pb.Channel{
+					Index: stagingIdx,
+					Role:  pb.Channel_PRIMARY,
+					Settings: &pb.ChannelSettings{
+						Psk: psk,
+					},
+				},
+			},
+		}},
 	}
-	psk := bytes.Repeat([]byte{0xab}, 16)
 
 	if err := s.migrateRemoteAtomic(context.Background(), remote, stagingIdx, oldSlot, psk); err != nil {
 		t.Fatalf("migrateRemoteAtomic: %v", err)
 	}
-	if len(fs.history) != 5 {
-		t.Fatalf("history len = %d, want 5 (Get + Begin + 2*Set + Commit)", len(fs.history))
+	if len(fs.history) != 6 {
+		t.Fatalf("history len = %d, want 6 (Get + Begin + 2*Set + Commit + verify Get)", len(fs.history))
 	}
 	get := captureAdmin(fs.history[0], t)
 	begin := captureAdmin(fs.history[1], t)
 	setPri := captureAdmin(fs.history[2], t)
 	setDis := captureAdmin(fs.history[3], t)
 	commit := captureAdmin(fs.history[4], t)
+	verify := captureAdmin(fs.history[5], t)
 	if get.variant != "GetChannelRequest" {
 		t.Errorf("frame 0 = %s, want GetChannelRequest", get.variant)
 	}
@@ -537,6 +568,9 @@ func TestMigrateRemoteAtomic_Sends5FrameSequence(t *testing.T) {
 	}
 	if commit.variant != "CommitEditSettings" {
 		t.Errorf("frame 4 = %s, want CommitEditSettings", commit.variant)
+	}
+	if verify.variant != "GetChannelRequest" {
+		t.Errorf("frame 5 = %s, want GetChannelRequest (post-commit verify)", verify.variant)
 	}
 }
 

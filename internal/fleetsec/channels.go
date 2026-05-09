@@ -15,6 +15,14 @@ import (
 	"github.com/karamble/diginode-cc/internal/ws"
 )
 
+// Commit verify-via-probe timing knobs. Vars (not consts) so tests can
+// shrink them. See migrateRemoteAtomic for the rationale.
+var (
+	commitVerifyInitialWait = 12 * time.Second
+	commitVerifyDeadline    = 60 * time.Second
+	commitVerifyBackoff     = 8 * time.Second
+)
+
 // RotationProgressEvent is the payload of WS events emitted as a
 // rotation walks its target list. The frontend's RotationProgressDrawer
 // subscribes to fleet-security.rotation.progress and updates the per-
@@ -596,27 +604,35 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, disable); err != nil {
 		return fmt.Errorf("queue disable old: %w", err)
 	}
-	commitErr := func() error {
-		_, err := s.runRemoteAdminLong(ctx, nodeNum, AdminCommitEditSettings(), "remote-commit-edit")
-		return err
-	}()
-	if commitErr == nil {
-		return nil
+	// Fire commit edit fire-and-forget. We CANNOT wait for a routing
+	// ack here: per firmware analysis (see ~/.claude/wiki/meshtastic/
+	// firmware-semantics.md §9), the remote's AdminModule sets
+	// pki_encrypted=true on the auto-generated NONE response for
+	// commands without myReply, but Router.cpp explicitly excludes
+	// PortNum_ROUTING_APP from PKC encoding and aborts the encode at
+	// PKI_FAILED. The ack is dropped before TX. Every PKI commit-style
+	// verb exhibits this. Verification has to come from a follow-up
+	// get_*_request (which returns on ADMIN_APP and is allowed under PKC).
+	if err := s.fireAndForgetRemoteAdmin(nodeNum, AdminCommitEditSettings()); err != nil {
+		return fmt.Errorf("queue commit edit: %w", err)
 	}
-	// Commit routing ack didn't return. The firmware may still have
-	// applied the transaction (commit ack is the LAST thing to leave
-	// the radio post-flash, easy to lose to duty-cycle drops or peer
-	// receiver gaps). Verify by reading the staging slot back over PKC:
-	// PkiEncrypted payloads route by destination pubkey, so the read
-	// works whether the remote is on old- or new-PSK PRIMARY. If the
-	// slot reports PRIMARY + matching PSK fingerprint, the transaction
-	// landed and we treat the lost ack as transient.
-	//
-	// Holds adminMu throughout — using runRemoteAdmin directly
-	// (not readRemoteChannel which would re-acquire the mutex).
+	// Hold for the firmware-side flash write to complete before the first
+	// probe. Empirical wiki §1 measured commit-to-applied at ~3-5s on
+	// USB; over PKC mesh add 5-15s for the commit frame to actually leave
+	// Pi's TX queue under EU 868 duty cycle.
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(commitVerifyInitialWait):
+	}
+	// Verify by reading the staging slot back over PKC. get_channel
+	// returns get_channel_response on ADMIN_APP which IS allowed under
+	// PKC, so the reply path works. PRIMARY role + matching PSK
+	// fingerprint = transaction applied. Anything else after the
+	// retry window = real failure.
 	pskFP := Fingerprint(newPSK)
-	verifyDeadline := time.Now().Add(60 * time.Second)
-	verifyBackoff := 8 * time.Second
+	verifyDeadline := time.Now().Add(commitVerifyDeadline)
+	verifyBackoff := commitVerifyBackoff
 	var lastProbeErr error
 	for time.Now().Before(verifyDeadline) {
 		probeReply, perr := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(stagingIdx)), "remote-commit-verify")
@@ -628,12 +644,11 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 					psk = ch.GetSettings().GetPsk()
 				}
 				if Fingerprint(psk) == pskFP {
-					slog.Info("remote commit verified post-timeout via probe",
-						"node_num", nodeNum, "staging_idx", stagingIdx,
-						"original_ack_error", commitErr)
+					slog.Info("remote commit verified via probe",
+						"node_num", nodeNum, "staging_idx", stagingIdx)
 					return nil
 				}
-				lastProbeErr = fmt.Errorf("staging slot is PRIMARY but PSK fp mismatch")
+				lastProbeErr = fmt.Errorf("staging slot is PRIMARY but PSK fp mismatch (got %s, want %s)", Fingerprint(psk), pskFP)
 			} else if cerr != nil {
 				lastProbeErr = cerr
 			} else {
@@ -644,14 +659,14 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 		}
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("commit edit: %w (verify cancelled: %v)", commitErr, ctx.Err())
+			return ctx.Err()
 		case <-time.After(verifyBackoff):
 		}
 	}
 	if lastProbeErr == nil {
 		lastProbeErr = errors.New("verify deadline reached with no successful probe")
 	}
-	return fmt.Errorf("commit edit: %w (verify also failed: %v)", commitErr, lastProbeErr)
+	return fmt.Errorf("commit verify: %w", lastProbeErr)
 }
 
 // migratePiAtomic is the local equivalent of migrateRemoteAtomic. Runs
