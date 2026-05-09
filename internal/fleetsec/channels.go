@@ -596,10 +596,62 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 	if err := s.fireAndForgetRemoteAdmin(nodeNum, disable); err != nil {
 		return fmt.Errorf("queue disable old: %w", err)
 	}
-	if _, err := s.runRemoteAdminLong(ctx, nodeNum, AdminCommitEditSettings(), "remote-commit-edit"); err != nil {
-		return fmt.Errorf("commit edit: %w", err)
+	commitErr := func() error {
+		_, err := s.runRemoteAdminLong(ctx, nodeNum, AdminCommitEditSettings(), "remote-commit-edit")
+		return err
+	}()
+	if commitErr == nil {
+		return nil
 	}
-	return nil
+	// Commit routing ack didn't return. The firmware may still have
+	// applied the transaction (commit ack is the LAST thing to leave
+	// the radio post-flash, easy to lose to duty-cycle drops or peer
+	// receiver gaps). Verify by reading the staging slot back over PKC:
+	// PkiEncrypted payloads route by destination pubkey, so the read
+	// works whether the remote is on old- or new-PSK PRIMARY. If the
+	// slot reports PRIMARY + matching PSK fingerprint, the transaction
+	// landed and we treat the lost ack as transient.
+	//
+	// Holds adminMu throughout — using runRemoteAdmin directly
+	// (not readRemoteChannel which would re-acquire the mutex).
+	pskFP := Fingerprint(newPSK)
+	verifyDeadline := time.Now().Add(60 * time.Second)
+	verifyBackoff := 8 * time.Second
+	var lastProbeErr error
+	for time.Now().Before(verifyDeadline) {
+		probeReply, perr := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(stagingIdx)), "remote-commit-verify")
+		if perr == nil {
+			ch, cerr := extractChannel(probeReply)
+			if cerr == nil && ch.GetRole() == pb.Channel_PRIMARY {
+				var psk []byte
+				if ch.GetSettings() != nil {
+					psk = ch.GetSettings().GetPsk()
+				}
+				if Fingerprint(psk) == pskFP {
+					slog.Info("remote commit verified post-timeout via probe",
+						"node_num", nodeNum, "staging_idx", stagingIdx,
+						"original_ack_error", commitErr)
+					return nil
+				}
+				lastProbeErr = fmt.Errorf("staging slot is PRIMARY but PSK fp mismatch")
+			} else if cerr != nil {
+				lastProbeErr = cerr
+			} else {
+				lastProbeErr = fmt.Errorf("staging slot role is %v, expected PRIMARY", ch.GetRole())
+			}
+		} else {
+			lastProbeErr = perr
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("commit edit: %w (verify cancelled: %v)", commitErr, ctx.Err())
+		case <-time.After(verifyBackoff):
+		}
+	}
+	if lastProbeErr == nil {
+		lastProbeErr = errors.New("verify deadline reached with no successful probe")
+	}
+	return fmt.Errorf("commit edit: %w (verify also failed: %v)", commitErr, lastProbeErr)
 }
 
 // migratePiAtomic is the local equivalent of migrateRemoteAtomic. Runs
