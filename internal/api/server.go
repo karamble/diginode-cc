@@ -378,6 +378,7 @@ func (s *Server) setupRoutes() chi.Router {
 					r.Post("/trust/{nodeNum}/verify", s.handleFleetSecVerifyTrust)
 					r.Get("/channels", s.handleFleetSecListChannels)
 					r.Get("/rotations/{id}", s.handleFleetSecGetRotation)
+					r.Get("/stranded", s.handleFleetSecListStranded)
 				})
 				// Identity + Trust + Channels (mutations) -- ADMIN only
 				r.With(auth.RequireRole(auth.RoleAdmin)).Group(func(r chi.Router) {
@@ -394,6 +395,8 @@ func (s *Server) setupRoutes() chi.Router {
 					r.With(middleware.Timeout(5 * time.Minute)).Post("/rotations/{id}/retire-old-psk", s.handleFleetSecRetireOldPSK)
 					r.Post("/recovery", s.handleFleetSecStartRecovery)
 					r.Get("/recovery/{id}", s.handleFleetSecGetRecovery)
+					r.Post("/stranded/{nodeNum}/recover-now", s.handleFleetSecRecoverStrandedNow)
+					r.Delete("/stranded/{nodeNum}", s.handleFleetSecCancelStranded)
 				})
 			})
 

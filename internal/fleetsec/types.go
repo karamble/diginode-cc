@@ -92,7 +92,31 @@ type NodeTrustRecord struct {
 	// added the column. NULL means "never verified post-000028";
 	// retirement gate treats null as not-yet-migrated.
 	CurrentPSKFP      string       `json:"currentPskFp,omitempty"`
+	// PreviousPSKFP records the PSK fingerprint this node was on
+	// immediately before the most recent fleet-wide rotation that
+	// stranded it. Pairs with a row in fleet_recovery_psks (same fp)
+	// holding the actual PSK bytes the recover_stranded job needs.
+	// Migration 000030.
+	PreviousPSKFP     string       `json:"previousPskFp,omitempty"`
+	StrandedSince     *time.Time   `json:"strandedSince,omitempty"`
+	RecoveryAttempts  int          `json:"recoveryAttempts,omitempty"`
+	LastRecoveryAt    *time.Time   `json:"lastRecoveryAt,omitempty"`
+	LastRecoveryError string       `json:"lastRecoveryError,omitempty"`
 	Notes             string       `json:"notes,omitempty"`
+}
+
+// RecoveryPSKRecord mirrors a row in fleet_recovery_psks. Holds the
+// raw PSK bytes for one historical PSK that's still alive on Pi-Heltec
+// as a SECONDARY recovery channel (slots 2..7). The dispatcher hook +
+// recover_stranded job handler use this to re-rotate stranded nodes
+// onto the current PSK without operator intervention. Migration 000031.
+type RecoveryPSKRecord struct {
+	Slot       int32      `json:"slot"`
+	FP         string     `json:"fp"`
+	PSK        []byte     `json:"-"` // never serialised over the API
+	PSKHash    int16      `json:"pskHash"`
+	AddedAt    time.Time  `json:"addedAt"`
+	RotationID *string    `json:"rotationId,omitempty"`
 }
 
 // ChannelRole names map to meshpb.Channel_Role enum values. Stored as

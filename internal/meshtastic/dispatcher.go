@@ -167,6 +167,7 @@ type Dispatcher struct {
 	posHandler           PositionHandler
 	statusRequestHandler StatusRequestHandler
 	adminReplyHandler    AdminReplyHandler
+	strandedHook         StrandedRecoveryHook
 	onDeviceTime         func(t time.Time)
 	onAlertEval          func(ctx context.Context, evt alerts.DetectionEvent)
 	onWebhookFire        func(eventType string, payload interface{})
@@ -356,6 +357,23 @@ func (d *Dispatcher) SetStatusRequestHandler(h StatusRequestHandler) { d.statusR
 // but no in-flight transaction state is updated.
 func (d *Dispatcher) SetAdminReplyHandler(h AdminReplyHandler) { d.adminReplyHandler = h }
 
+// StrandedRecoveryHook is the dispatcher's per-packet probe for the
+// fleet-security stranded-node recovery flow. The hook receives the
+// from-node + the wire channel hash byte (MeshPacket.channel for
+// encrypted packets is a 1-byte hash, NOT a slot index per Meshtastic
+// proto comment). The hook decides — entirely in fleetsec land —
+// whether this signals a stranded node returning on a recovery PSK
+// channel and enqueues a recover_stranded job if so. Cheap O(1) map
+// lookup on the hot path.
+type StrandedRecoveryHook interface {
+	ObserveInboundPacket(from uint32, channelHash byte, portNum uint32)
+}
+
+// SetStrandedRecoveryHook registers the fleet-security recovery hook.
+// May be nil — when nil, the dispatcher skips the per-packet probe
+// (zero overhead).
+func (d *Dispatcher) SetStrandedRecoveryHook(h StrandedRecoveryHook) { d.strandedHook = h }
+
 // SetDeviceTimeCallback sets a callback invoked when a device time is received.
 func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
 
@@ -504,6 +522,15 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		"to", mp.To,
 		"port", portNum.String(),
 		"payloadLen", len(mp.Payload))
+
+	// Stranded-recovery hook: any inbound packet from a known fleet
+	// member whose wire channel hash matches a recovery-cache slot is
+	// a stranded-node-coming-back-online event. Hook decides
+	// internally whether to enqueue a recover_stranded job. Cheap
+	// O(1) map lookup; hook is gated by an early-exit map miss.
+	if d.strandedHook != nil && mp.From != 0 && mp.From != d.localNodeNum {
+		d.strandedHook.ObserveInboundPacket(mp.From, byte(mp.Channel), mp.PortNum)
+	}
 
 	// Register / touch the sending node so it appears in the node list.
 	// Every mesh packet tells us a node exists, even if we don't have its full info yet.

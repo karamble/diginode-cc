@@ -318,7 +318,11 @@ func (s *Server) handleFleetSecRotatePSK(w http.ResponseWriter, r *http.Request)
 	var psk []byte
 	switch body.Source {
 	case "random":
-		psk, err = fleetsec.RandomPSK(16)
+		// Generate a random PSK whose channel hash doesn't collide
+		// with any active Pi-Heltec channel (PRIMARY + recovery cache).
+		// 8 attempts is deep overkill at ~7 active channels in 256
+		// hash buckets but cheap.
+		psk, err = s.svc.FleetSec.GenerateRandomPSKAvoidCollision(r.Context(), 16, 8)
 	case "explicit":
 		psk, err = fleetsec.DecodePubkeyB64(body.PSKBase64)
 		// DecodePubkeyB64 enforces 32-byte length; for 16-byte PSKs the
@@ -473,7 +477,78 @@ func (s *Server) handleFleetSecRetireOldPSK(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, res)
 }
 
-// ---- Recovery ----
+// ---- Stranded nodes (post-rotation recovery) ----
+
+// handleFleetSecListStranded returns every node currently flagged
+// stranded (failed to migrate during the most recent rotation that
+// retired its PSK). Read-only; the dispatcher hook + recover_stranded
+// job handler do the actual work.
+func (s *Server) handleFleetSecListStranded(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	out, err := s.svc.FleetSec.ListStranded(r.Context())
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if out == nil {
+		out = []fleetsec.NodeTrustRecord{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// handleFleetSecRecoverStrandedNow forces an immediate
+// recover_stranded job for the named node, bypassing the dispatcher
+// hook's wait-for-inbound-traffic gate. The node must already have
+// stranded_since + previous_psk_fp set (the operator can't recover a
+// node we never tried to rotate). Returns the queued job id.
+func (s *Server) handleFleetSecRecoverStrandedNow(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	nodeNum, err := strconv.ParseUint(chi.URLParam(r, "nodeNum"), 10, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "nodeNum must be a uint32")
+		return
+	}
+	jobID, err := s.svc.FleetSec.ForceRecoverStranded(r.Context(), uint32(nodeNum))
+	if err != nil {
+		switch {
+		case errors.Is(err, fleetsec.ErrNotFound):
+			writeError(w, http.StatusNotFound, err.Error())
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"jobId": jobID})
+}
+
+// handleFleetSecCancelStranded clears the stranded markers + previous
+// PSK pointer on a node, telling diginode-cc to stop trying to recover
+// it. Used when the operator gives up + plans to USB-recover (or the
+// node is permanently lost). Audit-logged.
+func (s *Server) handleFleetSecCancelStranded(w http.ResponseWriter, r *http.Request) {
+	if s.svc.FleetSec == nil {
+		writeError(w, http.StatusServiceUnavailable, "fleet security service not configured")
+		return
+	}
+	nodeNum, err := strconv.ParseUint(chi.URLParam(r, "nodeNum"), 10, 32)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "nodeNum must be a uint32")
+		return
+	}
+	if err := s.svc.FleetSec.CancelStranded(r.Context(), userIDFromCtx(r), uint32(nodeNum)); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ---- Recovery (legacy CC-PRO recovery flow, distinct from stranded) ----
 
 func (s *Server) handleFleetSecStartRecovery(w http.ResponseWriter, r *http.Request) {
 	if s.svc.FleetSec == nil {

@@ -134,6 +134,16 @@ func (s *Service) RotatePSK(
 	if channelIndex < 0 {
 		return "", errors.New("channelIndex must be >= 0")
 	}
+	// Pre-flight: refuse to stage a PSK whose 1-byte channel hash
+	// collides with the active PRIMARY or any recovery cache slot.
+	// Firmware's lowest-slot-wins decryption would silently drop
+	// traffic on the colliding channel. Random-source callers
+	// (handler) regenerate via GenerateRandomPSKAvoidCollision so
+	// in practice this only triggers for explicit operator-supplied
+	// PSKs that happen to collide.
+	if cErr := s.CheckPSKHashCollision(ctx, newPSK); cErr != nil {
+		return "", cErr
+	}
 
 	// Build the initial targets slice. Service operations need an
 	// isolated copy of newPSK -- the caller's slice could outlive this

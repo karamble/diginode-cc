@@ -325,8 +325,12 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 	}
 
 	// Find Pi's actual OLD-PSK slot dynamically: PRIMARY whose fp != newFP.
+	// Capture the OLD PSK bytes too so we can stash them in the recovery
+	// cache after Phase C succeeds (lets us auto-rotate stranded nodes
+	// when they come back online days later).
 	newPSKFP := rec.NewPSKFP
 	oldSlot := int32(-1)
+	var oldPSK []byte
 	for idx := int32(0); idx < 8; idx++ {
 		ch, perr := h.svc.readLocalChannel(ctx, idx)
 		if perr != nil {
@@ -341,6 +345,7 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 		}
 		if Fingerprint(pskBytes) != newPSKFP {
 			oldSlot = idx
+			oldPSK = append([]byte(nil), pskBytes...)
 			break
 		}
 	}
@@ -390,24 +395,200 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 	if err := h.svc.store.MarkRotationRetired(ctx, rotID); err != nil {
 		return fmt.Errorf("mark retired: %w", err)
 	}
+
+	// Stash the OLD PSK in the recovery cache + wake Pi-Heltec to keep
+	// it alive as a SECONDARY slot. Lets us re-rotate any stranded
+	// node that comes back online later. AddRecoveryPSK returns the
+	// chosen slot (FIFO eviction handles cache-full); SetChannel writes
+	// it to the radio. If the cache write succeeds but the radio write
+	// fails, the next startup reconcile will re-mirror.
+	oldPSKFP := Fingerprint(oldPSK)
+	if len(oldPSK) > 0 {
+		oldHash := ChannelHash("", oldPSK)
+		recRotID := rotID
+		recoverySlot, addErr := h.svc.store.AddRecoveryPSK(ctx, oldPSKFP, oldPSK, oldHash, &recRotID)
+		if addErr != nil {
+			slog.Warn("add recovery psk to cache",
+				"rotation_id", rotID, "old_fp", oldPSKFP, "error", addErr)
+		} else {
+			if err := h.svc.applyLocalStagingChannel(ctx, recoverySlot, oldPSK); err != nil {
+				slog.Warn("set recovery channel on Pi-Heltec",
+					"rotation_id", rotID, "slot", recoverySlot, "error", err)
+			} else {
+				slog.Info("recovery cache: added old PSK",
+					"rotation_id", rotID, "slot", recoverySlot,
+					"old_fp", oldPSKFP, "hash", oldHash)
+			}
+		}
+	}
+
+	// Mark every remote target NOT on the new PSK as stranded. The
+	// recover_stranded job (enqueued by the dispatcher hook when one
+	// of these nodes is heard on the recovery channel) will re-rotate
+	// them onto the new PSK without operator intervention.
+	for _, ct := range current {
+		if ct.NodeNum == h.svc.localNode.LocalNodeNum() {
+			continue
+		}
+		if ct.Phase == PhaseOnNewPSK || ct.Phase == PhaseRetired {
+			continue
+		}
+		if mErr := h.svc.store.MarkStranded(ctx, ct.NodeNum, oldPSKFP); mErr != nil {
+			slog.Warn("mark target stranded after retire",
+				"rotation_id", rotID, "node_num", ct.NodeNum, "error", mErr)
+		}
+	}
+
 	// Drop the stashed raw PSK now that Pi is on new and old is wiped fleet-wide.
 	if cErr := h.svc.store.ClearRotationPSK(ctx, rotID); cErr != nil {
 		slog.Warn("clear rotation psk after retire",
 			"rotation_id", rotID, "error", cErr)
 	}
+
+	// Refresh the dispatcher's recovery-hash table so any subsequent
+	// inbound packet from a stranded node on the just-retired PSK
+	// triggers a recover_stranded job immediately.
+	h.svc.rebuildRecoveryHook(ctx)
+
 	h.svc.broadcastNotice(rotID, current, pskFP,
 		fmt.Sprintf("Phase C done · Pi on new PSK · old slot %d wiped fleet-wide", oldSlot))
 	return nil
 }
 
+// ---- recover_stranded handler ----
+
+// RecoverStrandedPayload addresses one stranded node + the fingerprint
+// of the PSK it was last on. The handler looks up the recovery cache
+// row by fp, then runs the standard atomic migrate primitive against
+// the node using the recovery slot index as the OLD slot the remote
+// will demote/disable. The new PSK + staging slot are derived from
+// Pi's current PRIMARY at execution time.
+type RecoverStrandedPayload struct {
+	NodeNum   uint32 `json:"nodeNum"`
+	PrevPSKFP string `json:"prevPskFp"`
+	// Source: "dispatcher" (event-driven hook), "scan" (periodic
+	// stranded scan), or "manual" (operator forced via API). Audit-only.
+	Source string `json:"source,omitempty"`
+}
+
+type recoverStrandedHandler struct{ svc *Service }
+
+func (h *recoverStrandedHandler) Kind() jobs.Kind { return jobs.KindRecoverStrand }
+
+func (h *recoverStrandedHandler) Run(ctx context.Context, job *jobs.Job) error {
+	var p RecoverStrandedPayload
+	if err := json.Unmarshal(job.Payload, &p); err != nil {
+		return fmt.Errorf("decode recover-stranded payload: %w", err)
+	}
+	if p.NodeNum == 0 {
+		return errors.New("recover-stranded payload missing nodeNum")
+	}
+	if p.PrevPSKFP == "" {
+		return errors.New("recover-stranded payload missing prevPskFp")
+	}
+
+	// Fetch the cached PSK bytes that the stranded node is still on.
+	rec, err := h.svc.store.GetRecoveryPSKByFP(ctx, p.PrevPSKFP)
+	if err != nil {
+		// Cache evicted (FIFO push from a later rotation while this
+		// node was stranded across that rotation). Operator must
+		// USB-recover. Stamp the failure on the node row.
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum,
+			"prev psk evicted from recovery cache; manual USB recovery required")
+		return fmt.Errorf("recovery psk for fp=%s not in cache (evicted)", p.PrevPSKFP)
+	}
+	defer NewSecret(rec.PSK).Clear()
+
+	// Find Pi's current PRIMARY slot + the new PSK to migrate the
+	// stranded node to. The new PSK lives at Pi's PRIMARY slot post-
+	// Phase-C; we read it directly off the radio for accuracy.
+	_, primarySlot, perr := h.svc.probeSlotsLocal(ctx)
+	if perr != nil {
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "probe Pi: "+perr.Error())
+		return fmt.Errorf("probe Pi slots: %w", perr)
+	}
+	if primarySlot < 0 || primarySlot > 1 {
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum,
+			fmt.Sprintf("Pi PRIMARY at non-canonical slot %d", primarySlot))
+		return fmt.Errorf("Pi PRIMARY at non-canonical slot %d", primarySlot)
+	}
+	primaryCh, perr := h.svc.readLocalChannel(ctx, primarySlot)
+	if perr != nil {
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "read Pi PRIMARY: "+perr.Error())
+		return fmt.Errorf("read Pi PRIMARY slot %d: %w", primarySlot, perr)
+	}
+	var newPSK []byte
+	if primaryCh.GetSettings() != nil {
+		newPSK = primaryCh.GetSettings().GetPsk()
+	}
+	if len(newPSK) == 0 {
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "Pi PRIMARY has no PSK material")
+		return errors.New("Pi PRIMARY has no PSK material; cannot recover")
+	}
+	newPSKFP := Fingerprint(newPSK)
+	if newPSKFP == p.PrevPSKFP {
+		// Pi has rolled back somehow OR this node is already on the
+		// current PSK. Either way nothing to do.
+		_ = h.svc.store.ClearStranded(ctx, p.NodeNum)
+		return nil
+	}
+
+	// Staging slot = the other of {0, 1}. The remote already has the
+	// OLD PSK at SOME slot; the atomic transaction tells the remote
+	// to install the new PSK at stagingIdx as PRIMARY (auto-demoting
+	// its current PRIMARY) and then DISABLE the slot we tell it the
+	// old PSK lives in. We don't know the remote's slot layout, but
+	// firmware accepts SetChannel by slot index unconditionally — we
+	// can target the same slot we use on Pi (0 or 1) since the
+	// remote almost certainly mirrors that layout. If it doesn't, the
+	// migrate succeeds for the new slot and the remote's stale old
+	// slot is wiped on the next rotation.
+	stagingIdx := int32(1)
+	if primarySlot == 1 {
+		stagingIdx = 0
+	}
+	oldSlot := primarySlot
+
+	slog.Info("recover_stranded: starting",
+		"node_num", p.NodeNum, "prev_fp", p.PrevPSKFP,
+		"new_fp", newPSKFP, "staging_idx", stagingIdx,
+		"recovery_slot", rec.Slot, "source", p.Source)
+
+	// Standard atomic migrate. Same primitive Phase B uses; the
+	// verify-via-probe fallback inside it handles the lost-ack case.
+	if err := h.svc.migrateRemoteAtomic(ctx, p.NodeNum, stagingIdx, oldSlot, newPSK); err != nil {
+		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, err.Error())
+		return fmt.Errorf("recover-stranded migrate: %w", err)
+	}
+
+	// Stamp success on the node row.
+	if mErr := h.svc.store.MarkTrustVerifiedNow(ctx, p.NodeNum, VerifyMethodRemotePKC); mErr != nil {
+		slog.Warn("mark trust verified after recovery",
+			"node_num", p.NodeNum, "error", mErr)
+	}
+	if mErr := h.svc.store.SetNodeCurrentPSKFP(ctx, p.NodeNum, newPSKFP); mErr != nil {
+		slog.Warn("stamp current_psk_fp after recovery",
+			"node_num", p.NodeNum, "error", mErr)
+	}
+	if cErr := h.svc.store.ClearStranded(ctx, p.NodeNum); cErr != nil {
+		slog.Warn("clear stranded marker after recovery",
+			"node_num", p.NodeNum, "error", cErr)
+	}
+	slog.Info("recover_stranded: succeeded",
+		"node_num", p.NodeNum, "prev_fp", p.PrevPSKFP, "new_fp", newPSKFP)
+	return nil
+}
+
 // ---- Wiring ----
 
-// RegisterJobHandlers registers Phase A/B/C handlers with the loop.
-// Called from main.go startup after the fleetsec service is constructed.
+// RegisterJobHandlers registers Phase A/B/C and recover_stranded
+// handlers with the loop. Called from main.go startup after the
+// fleetsec service is constructed.
 func (s *Service) RegisterJobHandlers(loop *jobs.Loop) {
 	loop.Register(&phaseAHandler{svc: s})
 	loop.Register(&phaseBHandler{svc: s})
 	loop.Register(&phaseCHandler{svc: s})
+	loop.Register(&recoverStrandedHandler{svc: s})
 }
 
 // SetJobsStore wires the jobs.Store into the service so RotatePSK,

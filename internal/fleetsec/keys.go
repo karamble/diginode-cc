@@ -123,6 +123,32 @@ func FingerprintEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
+// ChannelHash returns the 1-byte XOR hash a Heltec-class radio puts on
+// the wire for a (name, psk) pair. Verbatim from firmware
+// Channels.cpp::generateHash: hash = xor(name bytes) ^ xor(psk bytes).
+//
+// Used to:
+//   - Detect channel-hash collisions BEFORE staging a new rotation.
+//     The mesh has 256 buckets and up to 8 active channels; collision
+//     would silently drop traffic on the higher-slot channel
+//     (firmware decrypts against the lowest-slot match only).
+//   - Map an inbound MeshPacket.channel byte back to the recovery slot
+//     it belongs to in the dispatcher hook.
+//
+// Our rotation worker always passes name="" to AdminSetChannel, so in
+// practice the hash collapses to xor(psk) but the helper accepts both
+// for forward-compat with named-channel rotation.
+func ChannelHash(name string, psk []byte) byte {
+	var h byte
+	for i := 0; i < len(name); i++ {
+		h ^= name[i]
+	}
+	for _, b := range psk {
+		h ^= b
+	}
+	return h
+}
+
 // EncodePubkeyB64 returns the standard-base64 (with padding) form of a
 // pubkey, matching what `meshtastic --info` prints. Used by the UI's
 // "Export pubkey" action.

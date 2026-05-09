@@ -49,7 +49,8 @@ type Service struct {
 	audit     *audit.Service
 	serial    SerialSender
 	localNode LocalNodeProvider
-	jobs      *jobs.Store // optional, set via SetJobsStore; required for the new async API path
+	jobs         *jobs.Store           // optional, set via SetJobsStore; required for the new async API path
+	recoveryHook *recoveryDispatchHook // optional, set via SetupRecoveryHook; nil disables event-driven detection
 
 	hubRef hubRef // optional WS broadcaster, set via WireHub
 

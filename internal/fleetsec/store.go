@@ -130,6 +130,11 @@ func (s *Store) ListNodeTrust(ctx context.Context) ([]NodeTrustRecord, error) {
 		       t.last_drift_check_at,
 		       COALESCE(t.drift_status, 'unknown'),
 		       COALESCE(t.current_psk_fp, ''),
+		       COALESCE(t.previous_psk_fp, ''),
+		       t.stranded_since,
+		       COALESCE(t.recovery_attempts, 0),
+		       t.last_recovery_at,
+		       COALESCE(t.last_recovery_error, ''),
 		       COALESCE(t.notes, '')
 		  FROM nodes n
 		  LEFT JOIN fleet_node_trust t ON t.node_num = n.node_num
@@ -147,7 +152,9 @@ func (s *Store) ListNodeTrust(ctx context.Context) ([]NodeTrustRecord, error) {
 		if err := rows.Scan(&nodeNum, &r.NodeID, &r.LongName, &r.ShortName,
 			&r.SensorShortID, &r.LastHeard, &r.IsOnline, &fpsJSON,
 			&r.IsManaged, &r.LastVerifiedAt, &r.LastVerifyMethod,
-			&r.LastDriftCheckAt, &r.DriftStatus, &r.CurrentPSKFP, &r.Notes); err != nil {
+			&r.LastDriftCheckAt, &r.DriftStatus, &r.CurrentPSKFP,
+			&r.PreviousPSKFP, &r.StrandedSince, &r.RecoveryAttempts,
+			&r.LastRecoveryAt, &r.LastRecoveryError, &r.Notes); err != nil {
 			return nil, fmt.Errorf("scan node trust: %w", err)
 		}
 		r.NodeNum = uint32(nodeNum)
@@ -180,6 +187,11 @@ func (s *Store) GetNodeTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRec
 		       t.last_drift_check_at,
 		       COALESCE(t.drift_status, 'unknown'),
 		       COALESCE(t.current_psk_fp, ''),
+		       COALESCE(t.previous_psk_fp, ''),
+		       t.stranded_since,
+		       COALESCE(t.recovery_attempts, 0),
+		       t.last_recovery_at,
+		       COALESCE(t.last_recovery_error, ''),
 		       COALESCE(t.notes, '')
 		  FROM nodes n
 		  LEFT JOIN fleet_node_trust t ON t.node_num = n.node_num
@@ -187,7 +199,9 @@ func (s *Store) GetNodeTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRec
 		Scan(&nn, &r.NodeID, &r.LongName, &r.ShortName, &r.SensorShortID,
 			&r.LastHeard, &r.IsOnline, &fpsJSON, &r.IsManaged,
 			&r.LastVerifiedAt, &r.LastVerifyMethod, &r.LastDriftCheckAt,
-			&r.DriftStatus, &r.CurrentPSKFP, &r.Notes)
+			&r.DriftStatus, &r.CurrentPSKFP,
+			&r.PreviousPSKFP, &r.StrandedSince, &r.RecoveryAttempts,
+			&r.LastRecoveryAt, &r.LastRecoveryError, &r.Notes)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}

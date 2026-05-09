@@ -545,6 +545,21 @@ func main() {
 	fleetJobsLoop := fleetsecjobs.NewLoop(fleetJobsStore, "diginode-cc", slog.Default())
 	fleetSecSvc.SetJobsStore(fleetJobsStore)
 	fleetSecSvc.RegisterJobHandlers(fleetJobsLoop)
+
+	// Stranded-node recovery: dispatcher hook + initial cache load.
+	// The hook fires the recover_stranded job the instant a stranded
+	// fleet member shows up on a recovery-cache channel hash. Map
+	// is rebuilt after every Phase C completion automatically.
+	recoveryHook := fleetSecSvc.SetupRecoveryHook()
+	dispatcher.SetStrandedRecoveryHook(recoveryHook)
+	go func() {
+		// Initial cache load runs in background so a slow DB doesn't
+		// block startup. Hook silently no-ops if its table is empty.
+		if err := recoveryHook.RebuildHashTable(ctx); err != nil {
+			slog.Warn("recovery hook: initial table build", "error", err)
+		}
+	}()
+
 	if err := fleetJobsLoop.Start(ctx); err != nil {
 		slog.Error("failed to start fleet-security jobs loop", "error", err)
 	}
