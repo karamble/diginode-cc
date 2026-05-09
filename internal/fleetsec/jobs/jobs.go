@@ -355,8 +355,12 @@ func NewLoop(store *Store, workerID string, logger *slog.Logger) *Loop {
 		handlers:     map[Kind]Handler{},
 		workerID:     workerID,
 		pollInterval: 2 * time.Second,
-		jobTimeout:   5 * time.Minute,
-		logger:       logger,
+		// 8min covers the worst-case recover_stranded path (5min probe-retry
+		// budget through a Heltec V3 USB-reboot window + ~30s migrate). All
+		// other handlers complete in < 90s. ResumeStaleLeases threshold
+		// matches in Loop.Start.
+		jobTimeout: 8 * time.Minute,
+		logger:     logger,
 	}
 }
 
@@ -381,7 +385,7 @@ func (l *Loop) Start(parent context.Context) error {
 	l.mu.Unlock()
 
 	// Resume any stale leases left over from a prior process.
-	resumed, err := l.store.ResumeStaleLeases(ctx, 5*time.Minute)
+	resumed, err := l.store.ResumeStaleLeases(ctx, 10*time.Minute)
 	if err != nil {
 		l.logger.Warn("jobs: failed to resume stale leases on startup",
 			"error", err)
