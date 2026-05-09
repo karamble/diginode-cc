@@ -51,6 +51,15 @@ export interface NodeTrust {
   // "migration lagging" trust rows during a staged rotation. Empty
   // means "never verified since 000028".
   currentPskFp?: string
+  // PSK fingerprint the node was last on before the most recent
+  // rotation that stranded it. Pairs with a row in fleet_recovery_psks
+  // (same fp) holding the actual PSK bytes the recover_stranded job
+  // needs. Migration 000030.
+  previousPskFp?: string
+  strandedSince?: string
+  recoveryAttempts?: number
+  lastRecoveryAt?: string
+  lastRecoveryError?: string
   notes?: string
 }
 
@@ -155,7 +164,8 @@ export const fleetSecurityApi = {
       { ack: 'RETIRE' },
     ),
 
-  // Recovery
+  // Recovery (legacy CC-PRO compromised-identity flow, distinct from
+  // post-rotation stranded-node recovery below).
   startRecovery: (body: {
     rescuePrivB64: string
     rescuePubB64: string
@@ -166,6 +176,18 @@ export const fleetSecurityApi = {
     api.post<{ recoveryId: string }>('/fleet-security/recovery', body),
   getRecovery: (id: string) =>
     api.get<RecoveryStatus>(`/fleet-security/recovery/${id}`),
+
+  // Stranded nodes (post-rotation recovery). The dispatcher hook +
+  // recover_stranded job handler do the actual work; the UI surfaces
+  // who's stranded and gives the operator force-recover + give-up
+  // affordances.
+  listStranded: () => api.get<NodeTrust[]>('/fleet-security/stranded'),
+  recoverStrandedNow: (nodeNum: number) =>
+    api.post<{ jobId: string }>(
+      `/fleet-security/stranded/${nodeNum}/recover-now`,
+    ),
+  cancelStranded: (nodeNum: number) =>
+    api.delete<{ ok: boolean }>(`/fleet-security/stranded/${nodeNum}`),
 }
 
 // ---- Channels + Rotations types ----

@@ -12,6 +12,7 @@ import { useAuthStore } from '../stores/authStore'
 import IdentityCard from './fleet/IdentityCard'
 import TrustRoster from './fleet/TrustRoster'
 import ChannelsCard from './fleet/ChannelsCard'
+import StrandedNodesCard from './fleet/StrandedNodesCard'
 import RecoveryWizard from './fleet/RecoveryWizard'
 
 export default function FleetSecurityPage() {
@@ -39,6 +40,7 @@ export default function FleetSecurityPage() {
       <IdentityCard />
       <TrustRoster />
       <ChannelsCard />
+      <StrandedNodesCard />
 
       {isAdmin && (
         <section className="bg-red-900/10 border border-red-700/30 rounded-lg p-5">
