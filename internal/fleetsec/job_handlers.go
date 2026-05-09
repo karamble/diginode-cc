@@ -20,6 +20,7 @@ import (
 
 	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
+	"github.com/karamble/diginode-cc/internal/ws"
 )
 
 // PhaseAPayload carries no per-job state. The Phase A handler probes
@@ -264,6 +265,38 @@ func (h *phaseBHandler) Run(ctx context.Context, job *jobs.Job) error {
 	}
 	h.svc.broadcastNotice(rotID, current, pskFP,
 		fmt.Sprintf("Phase B done · !%08x on new PSK", p.TargetNodeNum))
+
+	// If every remote target is now on_new_psk (or retired), stamp
+	// completed_at so the UI drawer flips to its "Phase B complete · ready
+	// to retire" state. The local Pi target stays in pending until Phase C
+	// promotes it; that's expected for the operator-paced retirement gate.
+	allRemotesDone := true
+	localNum := h.svc.localNode.LocalNodeNum()
+	for _, ct := range current {
+		if ct.NodeNum == localNum {
+			continue
+		}
+		if ct.Phase != PhaseOnNewPSK && ct.Phase != PhaseRetired {
+			allRemotesDone = false
+			break
+		}
+	}
+	if allRemotesDone {
+		if uErr := h.svc.store.UpdateRotationTargets(ctx, rotID, current, timeNowPtr()); uErr != nil {
+			slog.Warn("stamp completed_at after final phase B",
+				"rotation_id", rotID, "error", uErr)
+		}
+		h.svc.hubRef.broadcast(ws.Event{
+			Type: EventFleetSecRotation,
+			Payload: RotationProgressEvent{
+				RotationID: rotID,
+				Kind:       RotationKindPSK,
+				Targets:    current,
+				Done:       true,
+				NewPSKFP:   pskFP,
+			},
+		})
+	}
 	return nil
 }
 
