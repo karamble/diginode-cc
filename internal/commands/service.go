@@ -125,6 +125,11 @@ type Service struct {
 	nodeRate map[uint32]time.Time // last command time per node
 	mu       sync.Mutex
 	sendFn   func(nodeNum uint32, cmdType string, payload []byte) error
+	// chatEcho mirrors the on-wire command line into chat_messages so
+	// the operator sees it alongside other broadcast/DM traffic. nil
+	// when chat is unwired (tests). Called post-TX with the resolved
+	// from/to/text the chat service would have built itself.
+	chatEcho func(from, to, channel uint32, text string)
 	// rawBLEAvailable gates the auto-attach of RAW_BLE_ON/OFF around
 	// DEVICE_SCAN_START. Set once at boot from the lookupper's
 	// startup-probe result. Never flipped at runtime.
@@ -156,6 +161,15 @@ func (s *Service) SetSendFunc(fn func(nodeNum uint32, cmdType string, payload []
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.sendFn = fn
+}
+
+// SetChatEcho wires the chat-publish hook the worker calls post-TX so
+// outgoing command lines land in chat_messages alongside other mesh
+// traffic. main.go passes a closure over chat.Service.PersistAndBroadcast.
+func (s *Service) SetChatEcho(fn func(from, to, channel uint32, text string)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.chatEcho = fn
 }
 
 // Enqueue adds a new command to the queue.
@@ -835,10 +849,30 @@ func (s *Service) send(cmd *Command) {
 		s.nodeRate[cmd.TargetNode] = now
 	}
 
+	echo := s.chatEcho
+	echoText := ""
+	if echo != nil && err == nil && len(payload) > 0 {
+		// Broadcast commands (TargetNode=0) ride the primary channel; per-
+		// node commands ride a unicast addressed to that node. The chat
+		// service uses to=0xffffffff for "broadcast" filtering, so map
+		// TargetNode=0 onto BroadcastAddr to keep the broadcast tab
+		// surfacing them.
+		echoText = string(payload)
+	}
+
 	s.hub.Broadcast(ws.Event{
 		Type:    ws.EventCommand,
 		Payload: cmd,
 	})
+
+	if echo != nil && echoText != "" {
+		const broadcastAddr uint32 = 0xffffffff
+		to := cmd.TargetNode
+		if to == 0 {
+			to = broadcastAddr
+		}
+		go echo(0, to, 0, echoText)
+	}
 
 	go s.persistCommand(cmd)
 }

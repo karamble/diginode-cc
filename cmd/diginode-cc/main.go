@@ -147,6 +147,10 @@ func main() {
 	// The AntiHunter dispatcher inside each remote Heltec parses the @TARGET
 	// prefix itself, so we always broadcast at the mesh layer and let the
 	// firmware filter by node-id — no per-target Meshtastic routing needed.
+	// Mirror outbound command lines into chat_messages so the operator
+	// sees them in the chat tab alongside other broadcast traffic. The
+	// commands worker calls this only on a successful TX.
+	commandsSvc.SetChatEcho(chatSvc.PersistAndBroadcast)
 	commandsSvc.SetSendFunc(func(_ uint32, _ string, payload []byte) error {
 		return serialMgr.SendToRadio(
 			serial.BuildTextMessage(serial.BroadcastAddr, string(payload)),
