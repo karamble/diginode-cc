@@ -691,6 +691,18 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 // session_passkey too (AdminModule enforces it on local admin since
 // 2.5.x).
 func (s *Service) migratePiAtomic(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte) error {
+	return s.migratePiAtomicWithRecovery(ctx, stagingIdx, oldSlot, newPSK, -1, nil)
+}
+
+// migratePiAtomicWithRecovery is the variant Phase C uses to fold the
+// recovery-cache slot write into the same atomic transaction. Without
+// this, Phase C would do two consecutive flash writes (the migrate
+// commit + a separate SetChannel for the recovery slot), which on
+// some firmware versions triggers a soft reboot mid-write and leaves
+// the radio unresponsive for ~5 minutes. Pass recoverySlot=-1 +
+// recoveryPSK=nil to skip the recovery write (legacy migratePiAtomic
+// signature).
+func (s *Service) migratePiAtomicWithRecovery(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte, recoverySlot int32, recoveryPSK []byte) error {
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()
 	if _, err := s.runLocalAdmin(ctx, AdminBeginEditSettings(), "local-begin-edit"); err != nil {
@@ -703,6 +715,12 @@ func (s *Service) migratePiAtomic(ctx context.Context, stagingIdx, oldSlot int32
 	disable := AdminSetChannel(oldSlot, "", pb.Channel_DISABLED, nil)
 	if _, err := s.runLocalAdmin(ctx, disable, "local-disable-old"); err != nil {
 		return fmt.Errorf("disable old: %w", err)
+	}
+	if recoverySlot >= 0 && len(recoveryPSK) > 0 {
+		recovery := AdminSetChannel(recoverySlot, "", pb.Channel_SECONDARY, recoveryPSK)
+		if _, err := s.runLocalAdmin(ctx, recovery, "local-set-recovery"); err != nil {
+			return fmt.Errorf("set recovery: %w", err)
+		}
 	}
 	if _, err := s.runLocalAdmin(ctx, AdminCommitEditSettings(), "local-commit-edit"); err != nil {
 		return fmt.Errorf("commit edit: %w", err)

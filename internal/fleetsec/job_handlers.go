@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
@@ -368,10 +369,34 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 
 	pskFP := Fingerprint(psk)
 	current := append([]RotationTarget(nil), rec.Targets...)
-	h.svc.broadcastNotice(rotID, current, pskFP,
-		fmt.Sprintf("Phase C · Pi atomic promote slot %d, wipe slot %d", p.StagingIdx, oldSlot))
 
-	if err := h.svc.migratePiAtomic(ctx, p.StagingIdx, oldSlot, psk); err != nil {
+	// Pre-pick the recovery slot for the OLD PSK so we can fold its
+	// SetChannel into the same atomic transaction as the migrate.
+	// Two consecutive flash writes on some firmware versions trigger
+	// a soft reboot mid-write that leaves the radio unresponsive for
+	// ~5 minutes (observed 2026-05-09 against firmware 2.7.21.e854894).
+	// One commit = one flash write = no reboot.
+	oldPSKFP := Fingerprint(oldPSK)
+	recoverySlot := int32(-1)
+	if len(oldPSK) > 0 {
+		recRotID := rotID
+		oldHash := ChannelHash("", oldPSK)
+		slot, addErr := h.svc.store.AddRecoveryPSK(ctx, oldPSKFP, oldPSK, oldHash, &recRotID)
+		if addErr != nil {
+			slog.Warn("recovery cache: AddRecoveryPSK failed; rotation will retire without cache entry",
+				"rotation_id", rotID, "old_fp", oldPSKFP, "error", addErr)
+		} else {
+			recoverySlot = slot
+			slog.Info("recovery cache: pre-allocated slot for atomic write",
+				"rotation_id", rotID, "slot", slot,
+				"old_fp", oldPSKFP, "hash", oldHash)
+		}
+	}
+
+	h.svc.broadcastNotice(rotID, current, pskFP,
+		fmt.Sprintf("Phase C · Pi atomic promote slot %d, wipe slot %d, cache old at slot %d", p.StagingIdx, oldSlot, recoverySlot))
+
+	if err := h.svc.migratePiAtomicWithRecovery(ctx, p.StagingIdx, oldSlot, psk, recoverySlot, oldPSK); err != nil {
 		return fmt.Errorf("Pi atomic migrate: %w", err)
 	}
 
@@ -394,32 +419,6 @@ func (h *phaseCHandler) Run(ctx context.Context, job *jobs.Job) error {
 	}
 	if err := h.svc.store.MarkRotationRetired(ctx, rotID); err != nil {
 		return fmt.Errorf("mark retired: %w", err)
-	}
-
-	// Stash the OLD PSK in the recovery cache + wake Pi-Heltec to keep
-	// it alive as a SECONDARY slot. Lets us re-rotate any stranded
-	// node that comes back online later. AddRecoveryPSK returns the
-	// chosen slot (FIFO eviction handles cache-full); SetChannel writes
-	// it to the radio. If the cache write succeeds but the radio write
-	// fails, the next startup reconcile will re-mirror.
-	oldPSKFP := Fingerprint(oldPSK)
-	if len(oldPSK) > 0 {
-		oldHash := ChannelHash("", oldPSK)
-		recRotID := rotID
-		recoverySlot, addErr := h.svc.store.AddRecoveryPSK(ctx, oldPSKFP, oldPSK, oldHash, &recRotID)
-		if addErr != nil {
-			slog.Warn("add recovery psk to cache",
-				"rotation_id", rotID, "old_fp", oldPSKFP, "error", addErr)
-		} else {
-			if err := h.svc.applyLocalStagingChannel(ctx, recoverySlot, oldPSK); err != nil {
-				slog.Warn("set recovery channel on Pi-Heltec",
-					"rotation_id", rotID, "slot", recoverySlot, "error", err)
-			} else {
-				slog.Info("recovery cache: added old PSK",
-					"rotation_id", rotID, "slot", recoverySlot,
-					"old_fp", oldPSKFP, "hash", oldHash)
-			}
-		}
 	}
 
 	// Mark every remote target NOT on the new PSK as stranded. The
@@ -502,7 +501,25 @@ func (h *recoverStrandedHandler) Run(ctx context.Context, job *jobs.Job) error {
 	// Find Pi's current PRIMARY slot + the new PSK to migrate the
 	// stranded node to. The new PSK lives at Pi's PRIMARY slot post-
 	// Phase-C; we read it directly off the radio for accuracy.
+	//
+	// Resilience: probeSlotsLocal returns "no PRIMARY found" both when
+	// every slot is genuinely DISABLED AND when the radio is busy
+	// rebooting (every read times out). The post-Phase-C radio reboot
+	// window is empirically up to ~5 minutes. Retry once after a
+	// 90s sleep so a recover_stranded job that fires during the
+	// settle window doesn't fail a node permanently — the next attempt
+	// catches the radio after re-enumeration.
 	_, primarySlot, perr := h.svc.probeSlotsLocal(ctx)
+	if perr != nil {
+		slog.Warn("recover_stranded: probe Pi failed, will retry once after 90s settle",
+			"node_num", p.NodeNum, "error", perr)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(90 * time.Second):
+		}
+		_, primarySlot, perr = h.svc.probeSlotsLocal(ctx)
+	}
 	if perr != nil {
 		_ = h.svc.store.IncrementRecoveryAttempt(ctx, p.NodeNum, "probe Pi: "+perr.Error())
 		return fmt.Errorf("probe Pi slots: %w", perr)
