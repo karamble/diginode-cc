@@ -172,8 +172,26 @@ func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind 
 }
 
 // runRemoteAdmin sends an AdminMessage to a REMOTE node via PKC. Same
-// return shape as runLocalAdmin.
+// return shape as runLocalAdmin. Uses DefaultRemoteAdminTimeout (30s)
+// — fast unreachability detection. For high-latency in-transaction
+// frames where EU 868 duty cycle throttling can push the actual TX
+// 30+ seconds after enqueue, use runRemoteAdminLong instead.
 func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg *pb.AdminMessage, kind string) (*pb.AdminMessage, error) {
+	return s.runRemoteAdminWithTimeout(ctx, remoteNodeNum, msg, kind, DefaultRemoteAdminTimeout)
+}
+
+// runRemoteAdminLong is the duty-cycle-tolerant variant. The 150s
+// timeout (LongRemoteAdminTimeout) accounts for the case where the
+// local Heltec's TX queue is throttled by the EU 868 1% duty cycle
+// (firmware-side dutyCycle=10 percent of hour, polite mode halves to
+// 5%) and an admin frame waits ~30s in queue before going on-air. Use
+// for the in-transaction frames of begin/commit_edit_settings sequences
+// where the Pi has just bursted multiple admin frames.
+func (s *Service) runRemoteAdminLong(ctx context.Context, remoteNodeNum uint32, msg *pb.AdminMessage, kind string) (*pb.AdminMessage, error) {
+	return s.runRemoteAdminWithTimeout(ctx, remoteNodeNum, msg, kind, LongRemoteAdminTimeout)
+}
+
+func (s *Service) runRemoteAdminWithTimeout(ctx context.Context, remoteNodeNum uint32, msg *pb.AdminMessage, kind string, timeout time.Duration) (*pb.AdminMessage, error) {
 	if remoteNodeNum == 0 {
 		return nil, errors.New("remote node number must be non-zero")
 	}
@@ -183,9 +201,8 @@ func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg 
 	// firmware accepts that as the start of a session for Get*, then
 	// includes a fresh passkey in its reply that we'll cache via send().
 	// For Set* without a cached passkey, the firmware will reject with
-	// ADMIN_BAD_SESSION_KEY; the rotation worker's pushStagingToRemote
-	// + promoteRemoteToNewPrimary helpers do a GetConfig SECURITY first
-	// to populate the cache before the SetChannel goes out.
+	// ADMIN_BAD_SESSION_KEY; the migration helpers do a GetChannel
+	// first to populate the cache before in-transaction frames go out.
 	if pk := s.getSessionPasskey(remoteNodeNum); len(pk) > 0 {
 		msg.SessionPasskey = pk
 	}
@@ -198,7 +215,7 @@ func (s *Service) runRemoteAdmin(ctx context.Context, remoteNodeNum uint32, msg 
 	// routing ack for every outbound packet -- without this filter, that
 	// loopback would falsely succeed every PKC Set* even when the remote
 	// is unreachable or unpowered.
-	return s.send(ctx, frame, packetID, kind, DefaultRemoteAdminTimeout, adminMessageExpectsReply(msg), remoteNodeNum)
+	return s.send(ctx, frame, packetID, kind, timeout, adminMessageExpectsReply(msg), remoteNodeNum)
 }
 
 // adminMessageExpectsReply reports whether the firmware will follow up

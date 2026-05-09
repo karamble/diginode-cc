@@ -12,9 +12,19 @@ import (
 
 // Transaction defaults. Plan §3.3 calls for 10s timeout for local admin,
 // 30s for remote PKC; service code picks per-call.
+//
+// LongRemoteAdminTimeout: 30s is too short when the local radio is
+// duty-cycle-throttled on EU 868 (~10% TX budget). A burst of admin
+// frames (the 5-frame begin/commit transaction is the worst case)
+// queues at the local Heltec for ~30s per frame just to clear the
+// duty-cycle counter, blowing the per-frame timeout before the
+// remote even receives the packet. 150s gives enough headroom for
+// queue + over-air TX + remote processing + return-path even on a
+// fully-throttled radio.
 const (
 	DefaultLocalAdminTimeout  = 10 * time.Second
 	DefaultRemoteAdminTimeout = 30 * time.Second
+	LongRemoteAdminTimeout    = 150 * time.Second
 )
 
 // ReplyKind identifies which kind of inbound packet completed a transaction.
