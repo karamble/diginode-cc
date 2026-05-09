@@ -20,9 +20,10 @@ import (
 //   - reply: a single canned Reply, replayed for every Send. Convenient
 //     for one-shot tests like a single Get or Set admin.
 //   - replyQueue: ordered Reply values, one consumed per Send. The
-//     tests of multi-step helpers (pushStagingToRemote, etc) use this
-//     to script a Get-then-Set sequence with different replies. When
-//     replyQueue is non-empty it's preferred over reply.
+//     tests of multi-step helpers (migrateRemoteAtomic, migratePiAtomic,
+//     etc) use this to script a Get-then-fire-and-forget-then-Get
+//     sequence with different replies. When replyQueue is non-empty
+//     it's preferred over reply.
 //
 // history accumulates every outbound frame in order so tests can
 // assert the sequence + content of admin packets the helper emitted.
