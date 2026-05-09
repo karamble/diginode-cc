@@ -22,6 +22,7 @@ import ADSBPage from './pages/ADSBPage'
 import ACARSPage from './pages/ACARSPage'
 import TerminalPage from './pages/TerminalPage'
 import ExportsPage from './pages/ExportsPage'
+import FleetSecurityPage from './pages/FleetSecurityPage'
 
 function AuthenticatedApp() {
   useWebSocketBridge()
@@ -47,6 +48,7 @@ function AuthenticatedApp() {
         <Route path="/terminal" element={<TerminalPage />} />
         <Route path="/exports" element={<ExportsPage />} />
         <Route path="/users" element={<UsersPage />} />
+        <Route path="/fleet-security" element={<FleetSecurityPage />} />
         <Route path="/config" element={<ConfigPage />} />
       </Route>
     </Routes>

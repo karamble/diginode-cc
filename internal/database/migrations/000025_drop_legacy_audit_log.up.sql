@@ -1,0 +1,12 @@
+-- Drop the dead audit_log (singular) table left behind by 000001_initial_schema.
+--
+-- 000003_cc_pro_compat.up.sql created audit_logs (plural) to match the CC PRO
+-- table name; the audit.Service in internal/audit/ has only ever written to
+-- audit_logs. The original audit_log table sat empty in every deployment
+-- since 000003 landed and just clutters \dt output and pg_dump.
+--
+-- Safe to drop unconditionally: the row count has been zero across every
+-- environment we've inspected. IF EXISTS guards a fresh DB where 000001 and
+-- 000025 land in the same first-boot run (000001 still creates the table; we
+-- drop it again right after).
+DROP TABLE IF EXISTS audit_log;

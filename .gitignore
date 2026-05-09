@@ -6,6 +6,11 @@
 # Frontend build output
 web/dist/
 web/node_modules/
+web/tsconfig.tsbuildinfo
+
+# Generated Meshtastic protobuf bindings — regenerated via `make proto`
+# from a pinned upstream commit. Not committed; see FLEET_SECURITY.md §3.1.
+/internal/meshpb/
 
 # IDE
 .idea/

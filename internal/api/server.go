@@ -24,6 +24,7 @@ import (
 	"github.com/karamble/diginode-cc/internal/exports"
 	"github.com/karamble/diginode-cc/internal/faa"
 	"github.com/karamble/diginode-cc/internal/firewall"
+	"github.com/karamble/diginode-cc/internal/fleetsec"
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
@@ -73,6 +74,7 @@ type Services struct {
 	Database    *database.DB
 	StatusBroadcast *statusbroadcast.Service
 	BLEClassify *bleclassify.Service
+	FleetSec    *fleetsec.Service
 }
 
 // DB returns the database handle for direct queries (admin operations).
@@ -360,6 +362,42 @@ func (s *Server) setupRoutes() chi.Router {
 				r.Post("/prune", s.handlePruneOldData)
 				r.Post("/factory-reset", s.handleFactoryReset)
 				r.Delete("/tiles-cache", s.handleClearTileCache)
+			})
+
+			// Fleet Security: control-center identity, per-node trust roster,
+			// channel PSK rotation. Reads OPERATOR+; mutations ADMIN-only.
+			// Recovery wizard endpoints land in step 9.
+			r.Route("/fleet-security", func(r chi.Router) {
+				// Identity + Trust + Channels (read)
+				r.With(auth.RequireRole(auth.RoleOperator)).Group(func(r chi.Router) {
+					r.Get("/identity", s.handleFleetSecGetIdentity)
+					r.Get("/identity/pubkey", s.handleFleetSecExportPubkey)
+					r.Get("/identities", s.handleFleetSecListIdentities)
+					r.Get("/trust", s.handleFleetSecListTrust)
+					r.Get("/trust/{nodeNum}", s.handleFleetSecGetTrust)
+					r.Post("/trust/{nodeNum}/verify", s.handleFleetSecVerifyTrust)
+					r.Get("/channels", s.handleFleetSecListChannels)
+					r.Get("/rotations/{id}", s.handleFleetSecGetRotation)
+					r.Get("/stranded", s.handleFleetSecListStranded)
+				})
+				// Identity + Trust + Channels (mutations) -- ADMIN only
+				r.With(auth.RequireRole(auth.RoleAdmin)).Group(func(r chi.Router) {
+					r.Post("/identity/import", s.handleFleetSecImportIdentity)
+					r.Post("/identities", s.handleFleetSecRegisterIdentity)
+					r.Delete("/identities/{fingerprint}", s.handleFleetSecRevokeIdentity)
+					r.Put("/trust/{nodeNum}/admin-keys", s.handleFleetSecSetAdminKeys)
+					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
+					r.Post("/channels/{idx}/rotate", s.handleFleetSecRotatePSK)
+					// Retry + retire walk every fleet member sequentially over PKC,
+					// each transaction up to DefaultRemoteAdminTimeout = 30s. The
+					// global 30s router timeout is far too short -- override per-route.
+					r.With(middleware.Timeout(5 * time.Minute)).Post("/rotations/{id}/retry", s.handleFleetSecRetryRotation)
+					r.With(middleware.Timeout(5 * time.Minute)).Post("/rotations/{id}/retire-old-psk", s.handleFleetSecRetireOldPSK)
+					r.Post("/recovery", s.handleFleetSecStartRecovery)
+					r.Get("/recovery/{id}", s.handleFleetSecGetRecovery)
+					r.Post("/stranded/{nodeNum}/recover-now", s.handleFleetSecRecoverStrandedNow)
+					r.Delete("/stranded/{nodeNum}", s.handleFleetSecCancelStranded)
+				})
 			})
 
 			// Exports

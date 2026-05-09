@@ -12,6 +12,7 @@ require (
 	github.com/pquerna/otp v1.5.0
 	go.bug.st/serial v1.6.4
 	golang.org/x/crypto v0.49.0
+	google.golang.org/protobuf v1.36.7
 )
 
 require (

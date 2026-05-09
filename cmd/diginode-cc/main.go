@@ -28,6 +28,8 @@ import (
 	"github.com/karamble/diginode-cc/internal/exports"
 	"github.com/karamble/diginode-cc/internal/faa"
 	"github.com/karamble/diginode-cc/internal/firewall"
+	"github.com/karamble/diginode-cc/internal/fleetsec"
+	fleetsecjobs "github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	"github.com/karamble/diginode-cc/internal/geofences"
 	"github.com/karamble/diginode-cc/internal/inventory"
 	"github.com/karamble/diginode-cc/internal/mail"
@@ -145,6 +147,10 @@ func main() {
 	// The AntiHunter dispatcher inside each remote Heltec parses the @TARGET
 	// prefix itself, so we always broadcast at the mesh layer and let the
 	// firmware filter by node-id — no per-target Meshtastic routing needed.
+	// Mirror outbound command lines into chat_messages so the operator
+	// sees them in the chat tab alongside other broadcast traffic. The
+	// commands worker calls this only on a successful TX.
+	commandsSvc.SetChatEcho(chatSvc.PersistAndBroadcast)
 	commandsSvc.SetSendFunc(func(_ uint32, _ string, payload []byte) error {
 		return serialMgr.SendToRadio(
 			serial.BuildTextMessage(serial.BroadcastAddr, string(payload)),
@@ -527,6 +533,42 @@ func main() {
 	// Audit logging service
 	auditSvc := audit.NewService(db)
 
+	// Fleet Security service: control-center identity, per-node trust
+	// roster, channel PSK rotation. Wires its transaction tracker into
+	// the dispatcher so inbound ADMIN/ROUTING acks land back here for
+	// in-flight transaction resolution.
+	fleetSecSvc := fleetsec.NewService(db, auditSvc, serialMgr, dispatcher)
+	dispatcher.SetAdminReplyHandler(fleetSecSvc.Tracker())
+	fleetSecSvc.WireHub(hub) // live PSK-rotation progress events
+
+	// Durable jobs queue for fleet-security work. The polling worker
+	// drives PSK rotation phases A/B/C out of band so HTTP handlers
+	// return immediately and a container restart mid-rotation can
+	// resume from the persisted job state.
+	fleetJobsStore := fleetsecjobs.NewStore(db)
+	fleetJobsLoop := fleetsecjobs.NewLoop(fleetJobsStore, "diginode-cc", slog.Default())
+	fleetSecSvc.SetJobsStore(fleetJobsStore)
+	fleetSecSvc.RegisterJobHandlers(fleetJobsLoop)
+
+	// Stranded-node recovery: dispatcher hook + initial cache load.
+	// The hook fires the recover_stranded job the instant a stranded
+	// fleet member shows up on a recovery-cache channel hash. Map
+	// is rebuilt after every Phase C completion automatically.
+	recoveryHook := fleetSecSvc.SetupRecoveryHook()
+	dispatcher.SetStrandedRecoveryHook(recoveryHook)
+	go func() {
+		// Initial cache load runs in background so a slow DB doesn't
+		// block startup. Hook silently no-ops if its table is empty.
+		if err := recoveryHook.RebuildHashTable(ctx); err != nil {
+			slog.Warn("recovery hook: initial table build", "error", err)
+		}
+	}()
+
+	if err := fleetJobsLoop.Start(ctx); err != nil {
+		slog.Error("failed to start fleet-security jobs loop", "error", err)
+	}
+	defer fleetJobsLoop.Stop()
+
 	// Start serial manager (always runs; retries until device appears)
 	go func() {
 		if err := serialMgr.Start(); err != nil {
@@ -584,6 +626,7 @@ func main() {
 		Database:    db,
 		StatusBroadcast: statusSvc,
 		BLEClassify: bleSvc,
+		FleetSec:    fleetSecSvc,
 	}
 
 	// HTTP server

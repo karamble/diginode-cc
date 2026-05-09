@@ -166,6 +166,8 @@ type Dispatcher struct {
 	chatHandler          ChatHandler
 	posHandler           PositionHandler
 	statusRequestHandler StatusRequestHandler
+	adminReplyHandler    AdminReplyHandler
+	strandedHook         StrandedRecoveryHook
 	onDeviceTime         func(t time.Time)
 	onAlertEval          func(ctx context.Context, evt alerts.DetectionEvent)
 	onWebhookFire        func(eventType string, payload interface{})
@@ -241,6 +243,23 @@ type StatusRequestHandler interface {
 // PositionHandler processes position updates.
 type PositionHandler interface {
 	HandlePosition(from uint32, pos *serial.PositionData)
+}
+
+// AdminReplyHandler receives inbound AdminMessage payloads (PortNum_ADMIN_APP)
+// and Routing acks (PortNum_ROUTING) and matches them to in-flight admin
+// transactions. Implemented by fleetsec.Service. The dispatcher only routes;
+// fleetsec does the protobuf decoding via meshpb so the dispatcher stays free
+// of Curve25519 / AdminMessage variant logic.
+type AdminReplyHandler interface {
+	// HandleAdminReply is called for every PortNum_ADMIN_APP packet from any
+	// node (including the local Heltec). Payload is the marshalled
+	// meshpb.AdminMessage; requestID is Data.request_id (the originating
+	// packet ID this is a reply to, or 0 for unsolicited admin packets).
+	HandleAdminReply(from uint32, requestID uint32, payload []byte)
+	// HandleRoutingAck is called for every PortNum_ROUTING packet — Routing
+	// protobuf carries Routing.error_reason; requestID identifies which of
+	// our outbound packets is being acked.
+	HandleRoutingAck(from uint32, requestID uint32, payload []byte)
 }
 
 // NewDispatcher creates a new packet dispatcher.
@@ -332,6 +351,29 @@ func (d *Dispatcher) SetChatHandler(h ChatHandler) { d.chatHandler = h }
 // the payload is a "@<us> STATUS" request and reply accordingly.
 func (d *Dispatcher) SetStatusRequestHandler(h StatusRequestHandler) { d.statusRequestHandler = h }
 
+// SetAdminReplyHandler wires fleetsec.Service into the dispatch loop so it
+// can receive AdminMessage replies and Routing acks. May be nil — when nil,
+// PortNum_ADMIN_APP and PortNum_ROUTING packets are still handled (logged)
+// but no in-flight transaction state is updated.
+func (d *Dispatcher) SetAdminReplyHandler(h AdminReplyHandler) { d.adminReplyHandler = h }
+
+// StrandedRecoveryHook is the dispatcher's per-packet probe for the
+// fleet-security stranded-node recovery flow. The hook receives the
+// from-node + the wire channel hash byte (MeshPacket.channel for
+// encrypted packets is a 1-byte hash, NOT a slot index per Meshtastic
+// proto comment). The hook decides — entirely in fleetsec land —
+// whether this signals a stranded node returning on a recovery PSK
+// channel and enqueues a recover_stranded job if so. Cheap O(1) map
+// lookup on the hot path.
+type StrandedRecoveryHook interface {
+	ObserveInboundPacket(from uint32, channelHash byte, portNum uint32)
+}
+
+// SetStrandedRecoveryHook registers the fleet-security recovery hook.
+// May be nil — when nil, the dispatcher skips the per-packet probe
+// (zero overhead).
+func (d *Dispatcher) SetStrandedRecoveryHook(h StrandedRecoveryHook) { d.strandedHook = h }
+
 // SetDeviceTimeCallback sets a callback invoked when a device time is received.
 func (d *Dispatcher) SetDeviceTimeCallback(fn func(t time.Time)) { d.onDeviceTime = fn }
 
@@ -357,21 +399,50 @@ func (d *Dispatcher) HandlePacket(pkt *serial.FromRadioPacket) {
 			if d.onDeviceTime != nil {
 				d.onDeviceTime(time.Now())
 			}
-			// Mark the local node as a gotailme C2 gateway
+			// MyInfo.MyNodeNum is the authoritative local-node identity --
+			// the firmware emits it before any NodeInfo in the wantConfig
+			// dump. Pin localNodeNum here so a later NodeInfo arriving
+			// out-of-order (e.g. for HB35 when the Pi-Heltec's NodeDB has
+			// been re-pinned) can't be mis-identified as us. fleetsec uses
+			// this value to decide local-vs-remote admin paths -- a wrong
+			// value sends remote PKC operations down the local-loopback
+			// path and they time out.
+			if pkt.MyInfo.MyNodeNum != 0 {
+				d.localNodeSeen = true
+				d.localNodeNum = pkt.MyInfo.MyNodeNum
+			}
+			// Mark the local node as a gotailme C2 gateway. Skipped if the
+			// node-handler hasn't seen the matching NodeInfo yet -- the
+			// NodeInfo path below will MarkLocal once it lands.
 			if d.nodeHandler != nil && pkt.MyInfo.MyNodeNum != 0 {
 				d.nodeHandler.TouchNode(pkt.MyInfo.MyNodeNum, 0, 0)
 				d.nodeHandler.ClassifyNode(pkt.MyInfo.MyNodeNum, "gotailme")
+				d.nodeHandler.MarkLocal(pkt.MyInfo.MyNodeNum)
+				if d.pendingFirmware != "" {
+					d.nodeHandler.SetFirmwareVersion(pkt.MyInfo.MyNodeNum, d.pendingFirmware)
+				}
 			}
 		}
 
 	case serial.FromRadioNodeInfo:
 		if pkt.NodeInfo != nil && d.nodeHandler != nil {
 			d.nodeHandler.HandleNodeInfo(pkt.NodeInfo)
-			// The first NodeInfo in the wantConfig dump is the local node.
-			// Mark it as our own gotailme C2 gateway.
+			// Fallback path: if MyInfo never arrived (very early window
+			// or quirky firmware), pin localNodeNum from the first
+			// NodeInfo we see. The MyInfo handler above is preferred
+			// and runs first under normal conditions.
 			if !d.localNodeSeen && pkt.NodeInfo.Num != 0 {
 				d.localNodeSeen = true
 				d.localNodeNum = pkt.NodeInfo.Num
+				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
+				if d.pendingFirmware != "" {
+					d.nodeHandler.SetFirmwareVersion(pkt.NodeInfo.Num, d.pendingFirmware)
+				}
+			} else if pkt.NodeInfo.Num == d.localNodeNum && d.localNodeNum != 0 {
+				// MyInfo set localNodeNum but couldn't MarkLocal because
+				// the nodes service hadn't created the node entry yet.
+				// Now that NodeInfo for the local node has arrived, the
+				// entry exists -- promote it.
 				d.nodeHandler.MarkLocal(pkt.NodeInfo.Num)
 				if d.pendingFirmware != "" {
 					d.nodeHandler.SetFirmwareVersion(pkt.NodeInfo.Num, d.pendingFirmware)
@@ -451,6 +522,15 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		"to", mp.To,
 		"port", portNum.String(),
 		"payloadLen", len(mp.Payload))
+
+	// Stranded-recovery hook: any inbound packet from a known fleet
+	// member whose wire channel hash matches a recovery-cache slot is
+	// a stranded-node-coming-back-online event. Hook decides
+	// internally whether to enqueue a recover_stranded job. Cheap
+	// O(1) map lookup; hook is gated by an early-exit map miss.
+	if d.strandedHook != nil && mp.From != 0 && mp.From != d.localNodeNum {
+		d.strandedHook.ObserveInboundPacket(mp.From, byte(mp.Channel), mp.PortNum)
+	}
 
 	// Register / touch the sending node so it appears in the node list.
 	// Every mesh packet tells us a node exists, even if we don't have its full info yet.
@@ -582,8 +662,22 @@ func (d *Dispatcher) handleMeshPacket(mp *serial.MeshPacketData) {
 		}
 
 	case PortNumRouting:
-		// Routing ACKs, error codes
-		slog.Debug("routing packet", "from", mp.From)
+		// Routing acks: error codes for an outbound packet identified by
+		// Data.request_id. Forward to fleetsec so it can resolve in-flight
+		// admin transactions.
+		slog.Debug("routing ack", "from", mp.From, "request_id", mp.RequestID)
+		if d.adminReplyHandler != nil {
+			d.adminReplyHandler.HandleRoutingAck(mp.From, mp.RequestID, mp.Payload)
+		}
+
+	case PortNumAdmin:
+		// AdminMessage replies (get_channel_response, get_config_response,
+		// remote-admin command echoes). fleetsec decodes via meshpb to
+		// extract the response variant and match it to a pending request.
+		slog.Debug("admin packet", "from", mp.From, "request_id", mp.RequestID, "len", len(mp.Payload))
+		if d.adminReplyHandler != nil {
+			d.adminReplyHandler.HandleAdminReply(mp.From, mp.RequestID, mp.Payload)
+		}
 
 	case PortNumTraceroute:
 		slog.Debug("traceroute packet", "from", mp.From)

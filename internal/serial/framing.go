@@ -223,19 +223,23 @@ type EnvironmentMetrics struct {
 }
 
 type MeshPacketData struct {
-	From        uint32
-	To          uint32
-	Channel     uint32
-	ID          uint32
-	RxTime      uint32
-	RxSNR       float32
-	RxRSSI      int32
-	HopLimit    uint32
-	HopStart    uint32
-	Priority    uint32
-	PortNum     uint32
-	Payload     []byte
-	WantAck     bool
+	From      uint32
+	To        uint32
+	Channel   uint32
+	ID        uint32
+	RxTime    uint32
+	RxSNR     float32
+	RxRSSI    int32
+	HopLimit  uint32
+	HopStart  uint32
+	Priority  uint32
+	PortNum   uint32
+	Payload   []byte
+	WantAck   bool
+	// RequestID is Data.request_id (field 6) — the packet ID this packet is
+	// a reply to. Populated for Routing acks and for AdminMessage responses
+	// that travel as direct replies. Zero for unsolicited packets.
+	RequestID uint32
 }
 
 type ConfigPayload struct {
@@ -758,7 +762,7 @@ func decodeMeshPacket(data []byte) *MeshPacketData {
 			subData := data[pos : pos+int(length)]
 			pos += int(length)
 			if fieldNum == 4 { // decoded payload (Data message)
-				mp.PortNum, mp.Payload = decodeDataPayload(subData)
+				mp.PortNum, mp.Payload, mp.RequestID = decodeDataPayload(subData)
 			}
 		case 5: // fixed32
 			if pos+4 > len(data) {
@@ -790,7 +794,7 @@ func decodeMeshPacket(data []byte) *MeshPacketData {
 	return mp
 }
 
-func decodeDataPayload(data []byte) (portNum uint32, payload []byte) {
+func decodeDataPayload(data []byte) (portNum uint32, payload []byte, requestID uint32) {
 	pos := 0
 	for pos < len(data) {
 		tag, n := decodeVarint(data[pos:])
@@ -801,33 +805,43 @@ func decodeDataPayload(data []byte) (portNum uint32, payload []byte) {
 		fieldNum := tag >> 3
 		wireType := tag & 0x7
 
-		if wireType == 0 {
+		switch wireType {
+		case 0: // varint
 			val, n := decodeVarint(data[pos:])
 			if n == 0 {
-				break
+				return
 			}
 			pos += n
 			if fieldNum == 1 {
 				portNum = uint32(val)
 			}
-		} else if wireType == 2 {
+		case 2: // length-delimited
 			length, n := decodeVarint(data[pos:])
 			if n == 0 {
-				break
+				return
 			}
 			pos += n
 			if pos+int(length) > len(data) {
-				break
+				return
 			}
 			if fieldNum == 2 {
 				payload = make([]byte, length)
 				copy(payload, data[pos:pos+int(length)])
 			}
 			pos += int(length)
-		} else {
+		case 5: // fixed32
+			if pos+4 > len(data) {
+				return
+			}
+			u32 := binary.LittleEndian.Uint32(data[pos : pos+4])
+			pos += 4
+			if fieldNum == 6 { // request_id
+				requestID = u32
+			}
+		default:
 			pos = skipField(data, pos, wireType)
 			if pos < 0 {
-				break
+				return
 			}
 		}
 	}
