@@ -540,10 +540,14 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 	defer s.adminMu.Unlock()
 	// Establish a session_passkey before opening the transaction.
 	// AdminModule rejects state-changing verbs without a valid
-	// session_passkey (verified at AdminModule.cpp:99-141 master
-	// 2026-05-08; see ~/.claude/wiki/meshtastic/firmware-semantics.md).
-	// AdminGetChannel(0) is cheap and returns a passkey-bearing reply.
-	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(0), "remote-establish-session"); err != nil {
+	// session_passkey. AdminGetChannel(0) is cheap and returns a
+	// passkey-bearing reply.
+	//
+	// Uses the LONG timeout (150s) too -- the establish-session frame
+	// can sit in the local TX queue 20-30s under EU 868 duty cycle
+	// throttling, then the remote's reply also has to fight for radio
+	// time. Default 30s timeout was barely catching some remotes.
+	if _, err := s.runRemoteAdminLong(ctx, nodeNum, AdminGetChannel(0), "remote-establish-session"); err != nil {
 		return fmt.Errorf("session establish: %w", err)
 	}
 	// Now send the 4-frame transaction. The first three (begin + 2x
