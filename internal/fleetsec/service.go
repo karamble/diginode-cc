@@ -218,6 +218,38 @@ func (s *Service) runRemoteAdminWithTimeout(ctx context.Context, remoteNodeNum u
 	return s.send(ctx, frame, packetID, kind, timeout, adminMessageExpectsReply(msg), remoteNodeNum)
 }
 
+// fireAndForgetRemoteAdmin queues an admin frame for the local Heltec
+// to transmit but does NOT register a transaction or wait for any
+// reply. Used for the intermediate frames inside an atomic
+// begin/commit transaction (begin_edit_settings + 1+ SetChannel
+// frames) where the firmware's reply behaviour is unreliable -- our
+// Pi-side hardware testing showed begin_edit_settings over PKC admin
+// frequently produces no detectable routing ack at all, leaving any
+// blocking wait to time out at 150s+ even though the frame was
+// processed correctly. The COMMIT frame is the only one we wait on
+// (via runRemoteAdminLong), and its routing ack reflects the success
+// of the whole transaction.
+//
+// This call still applies the cached session_passkey + builds a PKC
+// packet -- the firmware-side authentication path is unchanged. It
+// just bypasses the controller-side wait.
+func (s *Service) fireAndForgetRemoteAdmin(remoteNodeNum uint32, msg *pb.AdminMessage) error {
+	if s.serial == nil {
+		return ErrSerialNotReady
+	}
+	if remoteNodeNum == 0 {
+		return errors.New("remote node number must be non-zero")
+	}
+	if pk := s.getSessionPasskey(remoteNodeNum); len(pk) > 0 {
+		msg.SessionPasskey = pk
+	}
+	frame, _, err := serial.BuildAdminPacketPKC(remoteNodeNum, msg)
+	if err != nil {
+		return fmt.Errorf("build remote admin packet: %w", err)
+	}
+	return s.serial.SendToRadio(frame)
+}
+
 // adminMessageExpectsReply reports whether the firmware will follow up
 // the transport-level Routing ack with a get_*_response AdminMessage
 // payload. Get*Request variants expect such a reply; Set* and command

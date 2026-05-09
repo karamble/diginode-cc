@@ -546,25 +546,33 @@ func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagi
 	if _, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(0), "remote-establish-session"); err != nil {
 		return fmt.Errorf("session establish: %w", err)
 	}
-	// Now send the 4-frame transaction back-to-back. NO INTERMEDIATE READS.
-	// All four use the LONG timeout because EU 868 duty cycle throttles
-	// the local TX queue: a burst of 4 admin frames can take 60-120s to
-	// clear the radio, and the routing ack from the remote can land
-	// well past the standard 30s per-frame budget. LongRemoteAdminTimeout
-	// gives ~150s headroom.
-	if _, err := s.runRemoteAdminLong(ctx, nodeNum, AdminBeginEditSettings(), "remote-begin-edit"); err != nil {
-		return fmt.Errorf("begin edit: %w", err)
+	// Now send the 4-frame transaction. The first three (begin + 2x
+	// SetChannel) are fire-and-forget: hardware testing showed
+	// begin_edit_settings over PKC admin produces no detectable
+	// routing ack, so blocking-wait variants timeout at 150s+ even
+	// though the frame was processed. We only wait (with the long
+	// timeout) on the commit -- its routing ack is the single
+	// transaction-level success signal we need. If the commit succeeds
+	// every prior frame in the transaction was also accepted (atomic
+	// guarantee). If commit fails the whole transaction is discarded
+	// firmware-side.
+	//
+	// CRITICAL: still NO INTERMEDIATE READS. Even though we're
+	// fire-and-forgetting the first three, any read admin frame
+	// would discard the open transaction.
+	if err := s.fireAndForgetRemoteAdmin(nodeNum, AdminBeginEditSettings()); err != nil {
+		return fmt.Errorf("queue begin edit: %w", err)
 	}
 	promote := AdminSetChannel(stagingIdx, "", pb.Channel_PRIMARY, newPSK)
-	if _, err := s.runRemoteAdminLong(ctx, nodeNum, promote, "remote-set-primary"); err != nil {
-		return fmt.Errorf("set primary: %w", err)
+	if err := s.fireAndForgetRemoteAdmin(nodeNum, promote); err != nil {
+		return fmt.Errorf("queue set primary: %w", err)
 	}
 	// DISABLE-with-empty-psk: pass an explicitly-empty PSK so the
 	// firmware wipes residual key material (firmware-semantics.md §2
 	// notes that role=DISABLED alone does not wipe).
 	disable := AdminSetChannel(oldSlot, "", pb.Channel_DISABLED, nil)
-	if _, err := s.runRemoteAdminLong(ctx, nodeNum, disable, "remote-disable-old"); err != nil {
-		return fmt.Errorf("disable old: %w", err)
+	if err := s.fireAndForgetRemoteAdmin(nodeNum, disable); err != nil {
+		return fmt.Errorf("queue disable old: %w", err)
 	}
 	if _, err := s.runRemoteAdminLong(ctx, nodeNum, AdminCommitEditSettings(), "remote-commit-edit"); err != nil {
 		return fmt.Errorf("commit edit: %w", err)
