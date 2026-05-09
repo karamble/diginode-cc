@@ -1,5 +1,5 @@
 // Typed wrappers around the /api/fleet-security backend (see
-// internal/api/handlers_fleetsecurity.go and FLEET_SECURITY.md §3.4).
+// internal/api/handlers_fleetsecurity.go).
 // Mirrors the api/client.ts pattern used by other domains.
 
 import api from './client'
@@ -209,7 +209,7 @@ export type RotationKind = 'psk' | 'identity' | 'admin-keys' | 'recovery'
 // Legacy 4-state status, kept for backward-compat with older Rotation
 // rows (pre-migration 000027). New code reads `phase`.
 export type TargetStatus = 'pending' | 'in-flight' | 'acked' | 'failed'
-// 5-phase staged rotation per project_psk_rotation_secondary_channel_staging.md.
+// Per-target staged rotation phases.
 //
 //   pending           -> phase_b_pushing  -> has_new_psk
 //                                          -> failed_b

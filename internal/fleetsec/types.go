@@ -1,8 +1,7 @@
 // Package fleetsec implements the Fleet Security feature: control-center
 // identity management, per-node trust roster (admin_key + is_managed),
-// channel PSK rotation, and the recovery wizard. See FLEET_SECURITY.md
-// at the repo root for the full design and §3.3 for the public service
-// surface this package exposes.
+// channel PSK rotation with stranded-node recovery, and the
+// compromise-recovery wizard.
 package fleetsec
 
 import "time"
@@ -165,8 +164,7 @@ const (
 	TargetStatusFailed   TargetStatus = "failed"
 )
 
-// RotationPhase is the per-target phase for a staged 5-phase PSK rotation
-// (project_psk_rotation_secondary_channel_staging.md).
+// RotationPhase is the per-target phase for a staged PSK rotation.
 //
 // Phase B = Pi pushes new PSK to the remote on a SECONDARY channel slot.
 // Phase C = remote promotes the SECONDARY to PRIMARY.

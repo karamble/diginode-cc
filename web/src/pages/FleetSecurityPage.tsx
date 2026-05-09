@@ -32,8 +32,6 @@ export default function FleetSecurityPage() {
         <h2 className="text-lg font-semibold text-dark-100">Fleet Security</h2>
         <p className="text-xs text-dark-400 mt-1">
           Control-center identity, per-node trust, and channel PSK lifecycle.
-          See <code className="text-dark-300">FLEET_SECURITY.md</code> for the
-          design overview.
         </p>
       </div>
 
@@ -50,8 +48,7 @@ export default function FleetSecurityPage() {
             or lost. Walks through installing a rescue keypair on the
             local Heltec, minting a new primary, pushing the new admin_key
             list to every reachable deployed node, then restoring the new
-            primary locally. See FLEET_SECURITY.md §6.4 for the full
-            playbook.
+            primary locally.
           </p>
           <button
             type="button"

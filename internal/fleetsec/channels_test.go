@@ -144,15 +144,15 @@ func TestApplyLocalStagingChannel_SendsSetChannelSecondary(t *testing.T) {
 }
 
 
-// TestMigrateRemoteAtomic_Sends5FrameSequence covers the new atomic
-// per-remote rotation primitive. Per begin-commit-empirical.md the
-// sequence is: Get (passkey establish) -> Begin -> Set(stage, PRIMARY,
-// new) -> Set(old, DISABLED, empty) -> Commit -> Get (verify probe).
-// Total 6 outbound frames: 5 transaction + 1 post-commit verify.
-// CRITICAL: no intermediate reads inside the begin/commit window itself.
-// The commit ack from the firmware is dropped at the radio layer for
-// PKI commit-style verbs (see ~/.claude/wiki/meshtastic/firmware-semantics.md
-// §9), so the controller validates by reading the staging slot back.
+// TestMigrateRemoteAtomic_Sends5FrameSequence covers the per-remote
+// atomic rotation primitive. The sequence is: Get (passkey establish)
+// -> Begin -> Set(stage, PRIMARY, new) -> Set(old, DISABLED, empty)
+// -> Commit -> Get (verify probe). Total 6 outbound frames: 5
+// transaction + 1 post-commit verify. CRITICAL: no intermediate
+// reads inside the begin/commit window. The commit ack is dropped
+// firmware-side for PKI command-style verbs, so the controller
+// validates by reading the staging slot back instead of waiting on
+// a routing ack that can never arrive.
 func TestMigrateRemoteAtomic_Sends5FrameSequence(t *testing.T) {
 	// Shrink verify timings so the test doesn't sleep 12+s.
 	prevWait, prevDeadline, prevBackoff := commitVerifyInitialWait, commitVerifyDeadline, commitVerifyBackoff

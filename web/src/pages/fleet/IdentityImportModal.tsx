@@ -1,7 +1,7 @@
 // IdentityImportModal pushes a BYO X25519 keypair to the local Heltec
 // and registers the pubkey as the new primary in the registry.
 //
-// Use cases (per FLEET_SECURITY.md §6):
+// Use cases:
 //   - First-time setup with a deterministically-generated keypair.
 //   - Disaster recovery: flash a fresh control-center Heltec with a
 //     previously-escrowed keypair to resume admin without touching

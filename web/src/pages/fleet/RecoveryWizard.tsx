@@ -1,5 +1,4 @@
-// RecoveryWizard walks the disaster-recovery flow described in
-// FLEET_SECURITY.md §6.4. Three steps:
+// RecoveryWizard walks the compromise-recovery flow. Three steps:
 //   1. Confirm scenario + paste rescue keypair from cold storage.
 //   2. Acknowledge consequences via TypedConfirm("RECOVER").
 //   3. Watch the staged progress (install-rescue → push-fleet →

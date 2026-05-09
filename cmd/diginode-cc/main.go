@@ -536,7 +536,7 @@ func main() {
 	// Fleet Security service: control-center identity, per-node trust
 	// roster, channel PSK rotation. Wires its transaction tracker into
 	// the dispatcher so inbound ADMIN/ROUTING acks land back here for
-	// in-flight transaction resolution. See FLEET_SECURITY.md.
+	// in-flight transaction resolution.
 	fleetSecSvc := fleetsec.NewService(db, auditSvc, serialMgr, dispatcher)
 	dispatcher.SetAdminReplyHandler(fleetSecSvc.Tracker())
 	fleetSecSvc.WireHub(hub) // live PSK-rotation progress events

@@ -1,6 +1,5 @@
 -- Fleet Security: control-center identity, per-node trust roster, channel
--- PSK lifecycle, and rotation transaction history. See FLEET_SECURITY.md
--- for the full design (§3.5 covers this schema specifically).
+-- PSK lifecycle, and rotation transaction history.
 --
 -- All cryptographic material is stored as fingerprints (truncated SHA-256)
 -- only. Raw PSKs and private keys NEVER hit the database -- they live in

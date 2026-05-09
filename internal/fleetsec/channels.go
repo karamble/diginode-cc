@@ -281,8 +281,8 @@ func (s *Service) readRemoteChannel(ctx context.Context, nodeNum uint32, idx int
 // land on the unchanged PRIMARY and decode cleanly.
 //
 // Local admin path -- no PSK gap, no session_passkey enforcement, just
-// a SetChannel that the firmware applies live (no reboot, per the
-// channel admin exception in feedback_meshtastic_pacing.md).
+// a SetChannel that the firmware applies live (channel admin is the
+// one set_* verb that doesn't trigger a reboot post-save).
 func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32, newPSK []byte) error {
 	s.adminMu.Lock()
 	defer s.adminMu.Unlock()

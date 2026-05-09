@@ -67,9 +67,9 @@ type StartRecoveryOpts struct {
 	Notes string
 }
 
-// StartRecovery executes the disaster-recovery flow described in
-// FLEET_SECURITY.md §6.4. Returns the RecoveryID immediately; the
-// actual orchestration runs in a background goroutine.
+// StartRecovery executes the compromise-recovery flow. Returns the
+// RecoveryID immediately; the actual orchestration runs in a
+// background goroutine.
 //
 // Flow:
 //   1. Install operator-supplied rescue keypair on the LOCAL Heltec
