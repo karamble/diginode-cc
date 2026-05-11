@@ -6,7 +6,7 @@ import api from '../api/client'
 interface NodeRow {
   id: string
   nodeNum: number
-  nodeType?: string  // "gotailme" | "antihunter" | "gatesensor" | "operator" | ""
+  nodeType?: string  // "gotailme" | "antihunter" | "gatesensor" | "operator" | "aicam" | ""
   name: string
   shortName?: string
   sensorShortId?: string
@@ -84,6 +84,7 @@ function nodeTypeBadge(nodeType?: string, sensorLineage?: 'halberd' | 'antihunte
     return { label: 'AH', color: 'bg-orange-500/20 text-orange-400 border-orange-500/30' }
   }
   if (nodeType === 'gatesensor') return { label: 'GATE', color: 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30' }
+  if (nodeType === 'aicam') return { label: 'CAM', color: 'bg-pink-500/20 text-pink-300 border-pink-500/30' }
   if (nodeType === 'operator') return { label: 'OP', color: 'bg-slate-500/20 text-slate-300 border-slate-500/30' }
   return null
 }
@@ -398,7 +399,7 @@ export default function NodesPage() {
                                 <div>
                                   <span className="text-dark-500 block">Node Type</span>
                                   <span className="text-dark-300">
-                                    {n.nodeType === 'antihunter' ? 'AntiHunter sensor' : n.nodeType === 'gatesensor' ? 'Gate sensor' : n.nodeType === 'gotailme' ? 'gotailme C2 gateway' : n.nodeType === 'operator' ? 'Meshtastic operator' : 'unclassified'}
+                                    {n.nodeType === 'antihunter' ? 'AntiHunter sensor' : n.nodeType === 'gatesensor' ? 'Gate sensor' : n.nodeType === 'gotailme' ? 'gotailme C2 gateway' : n.nodeType === 'aicam' ? 'AI camera node' : n.nodeType === 'operator' ? 'Meshtastic operator' : 'unclassified'}
                                     {n.isLocal && <span className="ml-1 text-dark-500">(local)</span>}
                                   </span>
                                 </div>
