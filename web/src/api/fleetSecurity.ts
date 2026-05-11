@@ -164,6 +164,14 @@ export const fleetSecurityApi = {
       { ack: 'RETIRE' },
     ),
 
+  // Reveal the raw PRIMARY-channel PSK + a meshtastic enrollment URL.
+  // Used by the "Reveal enrollment PSK" button on the Channels card so
+  // operators can paste the PSK into flash scripts. ADMIN-only at the
+  // backend route layer. The backend rejects any idx whose live Role
+  // is not PRIMARY (403).
+  revealChannel: (idx: number) =>
+    api.get<ChannelReveal>(`/fleet-security/channels/${idx}/reveal-psk`),
+
   // Recovery (legacy CC-PRO compromised-identity flow, distinct from
   // post-rotation stranded-node recovery below).
   startRecovery: (body: {
@@ -203,6 +211,18 @@ export interface Channel {
   lastRotatedAt?: string
   lastRotatedBy?: string
   lastRotationId?: string
+}
+
+// Response shape of GET /fleet-security/channels/:idx/reveal-psk.
+// pskB64 is the raw primary-channel PSK suitable for
+// `meshtastic --ch-set psk base64:<pskB64>` or pasting into flash-script
+// prompts. channelUrl encodes every non-DISABLED channel and is consumed
+// by `meshtastic --seturl '<url>'` or scanned as a QR by the phone app.
+export interface ChannelReveal {
+  index: number
+  name: string
+  pskB64: string
+  channelUrl: string
 }
 
 export type RotationKind = 'psk' | 'identity' | 'admin-keys' | 'recovery'

@@ -7,14 +7,39 @@
 // fleet_channels table). On a fresh install the table is empty -- the
 // card surfaces guidance pointing at the first rotation flow.
 
-import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
+import { QRCodeSVG } from 'qrcode.react'
 
-import fleetSecurityApi, { type Channel, type Rotation } from '../../api/fleetSecurity'
+import fleetSecurityApi, { type Channel, type ChannelReveal, type Rotation } from '../../api/fleetSecurity'
 import { useAuthStore } from '../../stores/authStore'
 import RotatePSKModal from './RotatePSKModal'
 import RotationProgressDrawer from './RotationProgressDrawer'
 import RetireOldPSKModal from './RetireOldPSKModal'
+
+// copyToClipboard mirrors PubkeyChip / IdentityCard: try the secure-
+// context clipboard API first, fall back to the legacy textarea +
+// execCommand path so plain-http LAN deployments still get copy
+// support. Returns true on success so the caller can flash a tick.
+async function copyToClipboard(text: string): Promise<boolean> {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text)
+      return true
+    }
+    const ta = document.createElement('textarea')
+    ta.value = text
+    ta.style.position = 'fixed'
+    ta.style.opacity = '0'
+    document.body.appendChild(ta)
+    ta.select()
+    const ok = document.execCommand('copy')
+    document.body.removeChild(ta)
+    return ok
+  } catch {
+    return false
+  }
+}
 
 export default function ChannelsCard() {
   const { user } = useAuthStore()
@@ -191,6 +216,12 @@ function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire,
     ? formatRelative(channel.lastRotatedAt)
     : '—'
 
+  const [revealed, setRevealed] = useState<ChannelReveal | null>(null)
+  const revealMutation = useMutation({
+    mutationFn: () => fleetSecurityApi.revealChannel(channel.index),
+    onSuccess: (res) => setRevealed(res),
+  })
+
   const retireSummary = (() => {
     if (!pendingRetirement) return null
     const targets = pendingRetirement.targets ?? []
@@ -214,6 +245,17 @@ function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire,
           </span>
         </div>
         <div className="flex items-center gap-2">
+          {isAdmin && channel.role === 'PRIMARY' && (
+            <button
+              type="button"
+              onClick={() => revealMutation.mutate()}
+              disabled={revealMutation.isPending}
+              title="Show the raw PSK + meshtastic enrollment URL/QR. Probes the live radio over 8 channel slots; takes a few seconds."
+              className="px-3 py-1 rounded bg-dark-700 hover:bg-dark-600 disabled:bg-dark-800 disabled:text-dark-500 text-xs text-dark-200"
+            >
+              {revealMutation.isPending ? 'Reading…' : 'Reveal enrollment PSK'}
+            </button>
+          )}
           {isAdmin && pendingRetirement && (
             <button
               type="button"
@@ -243,6 +285,16 @@ function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire,
           )}
         </div>
       </div>
+
+      {revealMutation.isError && (
+        <div className="mb-3 rounded border border-red-700/40 bg-red-900/20 px-3 py-2 text-[11px] text-red-200">
+          {(revealMutation.error as Error).message}
+        </div>
+      )}
+
+      {revealed && (
+        <RevealBlock reveal={revealed} onClose={() => setRevealed(null)} />
+      )}
 
       {pendingRetirement && retireSummary && (
         <div className="mb-3 rounded border border-amber-700/30 bg-amber-900/10 px-3 py-2 text-[11px] text-amber-100/90">
@@ -307,6 +359,129 @@ function ChannelPanel({ channel, isAdmin, onRotate, pendingRetirement, onRetire,
               : <span className="text-dark-500">—</span>}
           </div>
         </div>
+      </div>
+    </div>
+  )
+}
+
+interface RevealBlockProps {
+  reveal: ChannelReveal
+  onClose: () => void
+}
+
+// RevealBlock surfaces the live primary-channel PSK material returned by
+// /fleet-security/channels/:idx/reveal-psk. Three sections:
+//   1. Raw base64 PSK -- pasted into flash-script prompts or
+//      `meshtastic --ch-set psk base64:<value>`.
+//   2. Enrollment QR -- scanned by the Meshtastic phone app to import
+//      the full channel set (PRIMARY + any SECONDARY rotation slots).
+//   3. Channel URL -- the same payload as the QR, copyable text for
+//      `meshtastic --seturl '<url>'`. Collapsed by default so the QR
+//      stays the visual focus.
+function RevealBlock({ reveal, onClose }: RevealBlockProps) {
+  const [pskCopied, setPskCopied] = useState(false)
+  const [urlCopied, setUrlCopied] = useState(false)
+  const [showUrl, setShowUrl] = useState(false)
+
+  const handleCopy = async (text: string, setter: (v: boolean) => void) => {
+    const ok = await copyToClipboard(text)
+    if (ok) {
+      setter(true)
+      setTimeout(() => setter(false), 1500)
+    }
+  }
+
+  return (
+    <div className="mb-3 bg-dark-900/60 border border-dark-700/50 rounded p-3 space-y-3">
+      <div className="flex items-center justify-between">
+        <span className="text-[10px] uppercase tracking-wider text-dark-300">
+          Enrollment material for channel {reveal.index}
+          {reveal.name && <span className="ml-1 normal-case text-dark-400">("{reveal.name}")</span>}
+        </span>
+        <button
+          type="button"
+          onClick={onClose}
+          className="text-[10px] text-dark-500 hover:text-dark-300"
+        >
+          hide
+        </button>
+      </div>
+
+      <div>
+        <div className="flex items-center justify-between mb-1">
+          <span className="text-[10px] uppercase tracking-wider text-dark-400">
+            Primary PSK (base64) — paste into flash-script prompts
+          </span>
+          <button
+            type="button"
+            onClick={() => handleCopy(reveal.pskB64, setPskCopied)}
+            className={`text-[10px] ${pskCopied ? 'text-emerald-400' : 'text-primary-400 hover:text-primary-300'}`}
+          >
+            {pskCopied ? '✓ copied!' : 'copy'}
+          </button>
+        </div>
+        <code
+          onClick={(e) => {
+            const range = document.createRange()
+            range.selectNodeContents(e.currentTarget)
+            const sel = window.getSelection()
+            sel?.removeAllRanges()
+            sel?.addRange(range)
+          }}
+          className="block text-xs text-dark-200 font-mono break-all cursor-text select-all"
+          title="Click to select all, then Ctrl+C"
+        >
+          {reveal.pskB64}
+        </code>
+      </div>
+
+      <div>
+        <div className="text-[10px] uppercase tracking-wider text-dark-400 mb-1.5">
+          Enrollment QR — scan with the Meshtastic phone app
+        </div>
+        <div className="inline-block bg-white p-2 rounded">
+          <QRCodeSVG value={reveal.channelUrl} size={192} level="M" />
+        </div>
+        <div className="text-[10px] text-dark-500 mt-1">
+          Or run on a freshly flashed node:{' '}
+          <code className="text-dark-400">meshtastic --seturl '&lt;url&gt;'</code>
+        </div>
+      </div>
+
+      <div>
+        <button
+          type="button"
+          onClick={() => setShowUrl((v) => !v)}
+          className="text-[10px] text-dark-400 hover:text-dark-200"
+        >
+          {showUrl ? '▾' : '▸'} Channel URL (text)
+        </button>
+        {showUrl && (
+          <div className="mt-1.5">
+            <div className="flex items-center justify-end mb-1">
+              <button
+                type="button"
+                onClick={() => handleCopy(reveal.channelUrl, setUrlCopied)}
+                className={`text-[10px] ${urlCopied ? 'text-emerald-400' : 'text-primary-400 hover:text-primary-300'}`}
+              >
+                {urlCopied ? '✓ copied!' : 'copy'}
+              </button>
+            </div>
+            <code
+              onClick={(e) => {
+                const range = document.createRange()
+                range.selectNodeContents(e.currentTarget)
+                const sel = window.getSelection()
+                sel?.removeAllRanges()
+                sel?.addRange(range)
+              }}
+              className="block text-[10px] text-dark-300 font-mono break-all cursor-text select-all"
+              title="Click to select all, then Ctrl+C"
+            >
+              {reveal.channelUrl}
+            </code>
+          </div>
+        )}
       </div>
     </div>
   )

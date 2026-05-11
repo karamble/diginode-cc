@@ -388,6 +388,12 @@ func (s *Server) setupRoutes() chi.Router {
 					r.Put("/trust/{nodeNum}/admin-keys", s.handleFleetSecSetAdminKeys)
 					r.Put("/trust/{nodeNum}/is-managed", s.handleFleetSecSetIsManaged)
 					r.Post("/channels/{idx}/rotate", s.handleFleetSecRotatePSK)
+					// Reveals the PRIMARY channel's raw base64 PSK plus a
+					// meshtastic enrollment URL for flashing new nodes.
+					// Probes 8 slots over the serial link; allow up to a
+					// minute under EU 868 duty-cycle throttling rather
+					// than tripping the global 30s router timeout.
+					r.With(middleware.Timeout(1 * time.Minute)).Get("/channels/{idx}/reveal-psk", s.handleFleetSecRevealChannelPSK)
 					// Retry + retire walk every fleet member sequentially over PKC,
 					// each transaction up to DefaultRemoteAdminTimeout = 30s. The
 					// global 30s router timeout is far too short -- override per-route.
