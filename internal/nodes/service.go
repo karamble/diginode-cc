@@ -28,6 +28,7 @@ const (
 	NodeTypeGotailme   NodeType = "gotailme"   // C2 gateway (runs DigiNode CC / CC PRO)
 	NodeTypeAntihunter NodeType = "antihunter" // AntiHunter detection sensor node
 	NodeTypeGatesensor NodeType = "gatesensor" // Gate sensor (Arduino Nano → Heltec TEXTMSG bridge)
+	NodeTypeAICamera   NodeType = "aicam"      // gotailme-ai-camera node (XIAO C3 bridge → Wio-SX1262 Meshtastic over UART)
 )
 
 // Node represents a tracked mesh node in memory.
@@ -350,8 +351,12 @@ func (s *Service) ClassifyNode(nodeNum uint32, nodeType string) {
 		s.mu.Unlock()
 		return
 	}
-	// antihunter and gatesensor are leaf classifications — never downgrade.
-	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor {
+	// antihunter, gatesensor, and aicam are leaf classifications — never downgrade.
+	// aicam protection is load-bearing: AI-cam detection frames start with "@CAM"
+	// which the @-prefix early-exit in isAHSensorOutput kicks out, so the dispatcher
+	// falls through to "operator" on every detection. Without this guard the badge
+	// would flap from CAM → OP within seconds of each detection.
+	if node.NodeType == NodeTypeAntihunter || node.NodeType == NodeTypeGatesensor || node.NodeType == NodeTypeAICamera {
 		s.mu.Unlock()
 		return
 	}
@@ -451,15 +456,21 @@ func (s *Service) HandleNodeInfo(info *serial.NodeInfoLite) {
 	node.IsOnline = isNodeOnline(node)
 
 	// Classify based on the LongName the firmware self-reports. gotailme nodes
-	// are flashed with a "GoTailMe" prefix at manufacture; anything else is a
-	// plain Meshtastic client (operator handheld, 3rd-party hardware, etc.).
+	// are flashed with a "GoTailMe" prefix at manufacture; AI-camera nodes are
+	// flashed with the exact LongName "aicam" (see gotailme-ai-camera flash
+	// script). Anything else is a plain Meshtastic client.
 	// Sensor types (antihunter / gatesensor) are set by the dispatcher when it
 	// sees their fingerprinted TEXTMSG output and are leaf — never overridden here.
 	if node.NodeType != NodeTypeAntihunter && node.NodeType != NodeTypeGatesensor {
-		if strings.HasPrefix(node.LongName, "GoTailMe") {
+		switch {
+		case strings.EqualFold(node.LongName, "aicam"):
+			node.NodeType = NodeTypeAICamera
+		case strings.HasPrefix(node.LongName, "GoTailMe"):
 			node.NodeType = NodeTypeGotailme
-		} else if node.NodeType == NodeTypeUnknown {
-			node.NodeType = NodeTypeOperator
+		default:
+			if node.NodeType == NodeTypeUnknown {
+				node.NodeType = NodeTypeOperator
+			}
 		}
 	}
 

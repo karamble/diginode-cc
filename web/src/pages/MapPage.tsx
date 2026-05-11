@@ -74,6 +74,7 @@ function nodeTypeLabel(t?: string): string {
   if (t === 'gotailme') return 'GTM'
   if (t === 'antihunter') return 'AH'
   if (t === 'gatesensor') return 'GATE'
+  if (t === 'aicam') return 'CAM'
   if (t === 'operator') return 'OP'
   return '?'
 }
@@ -261,6 +262,10 @@ export default function MapPage() {
             <span className="text-dark-400">AH ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'antihunter').length})</span>
           </div>
           <div className="flex items-center gap-1.5">
+            <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#EC4899' }} />
+            <span className="text-dark-400">CAM ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'aicam').length})</span>
+          </div>
+          <div className="flex items-center gap-1.5">
             <span className="inline-block w-3 h-3 rounded-full" style={{ backgroundColor: '#94A3B8' }} />
             <span className="text-dark-400">OP ({nodeMarkers.filter((n: NodeRow) => n.nodeType === 'operator').length})</span>
           </div>
@@ -353,15 +358,22 @@ export default function MapPage() {
                         <div className="text-xs min-w-[180px]" style={{ color: '#e2e8f0' }}>
                           <div style={{ fontWeight: 600, fontSize: '13px', marginBottom: '4px', color: '#f1f5f9', display: 'flex', alignItems: 'center', gap: '6px' }}>
                             {n.name || n.shortName || `Node ${n.nodeNum}`}
-                            <span style={{
-                              fontSize: '9px',
-                              padding: '1px 5px',
-                              borderRadius: '3px',
-                              fontFamily: 'monospace',
-                              backgroundColor: n.nodeType === 'antihunter' ? 'rgba(249,115,22,0.2)' : 'rgba(59,130,246,0.2)',
-                              color: n.nodeType === 'antihunter' ? '#FB923C' : '#60A5FA',
-                              border: `1px solid ${n.nodeType === 'antihunter' ? 'rgba(249,115,22,0.3)' : 'rgba(59,130,246,0.3)'}`,
-                            }}>
+                            <span style={(() => {
+                              const c = n.nodeType === 'antihunter'
+                                ? { bg: 'rgba(249,115,22,0.2)', fg: '#FB923C', br: 'rgba(249,115,22,0.3)' }
+                                : n.nodeType === 'aicam'
+                                ? { bg: 'rgba(236,72,153,0.2)', fg: '#F472B6', br: 'rgba(236,72,153,0.3)' }
+                                : { bg: 'rgba(59,130,246,0.2)', fg: '#60A5FA', br: 'rgba(59,130,246,0.3)' }
+                              return {
+                                fontSize: '9px',
+                                padding: '1px 5px',
+                                borderRadius: '3px',
+                                fontFamily: 'monospace',
+                                backgroundColor: c.bg,
+                                color: c.fg,
+                                border: `1px solid ${c.br}`,
+                              }
+                            })()}>
                               {nodeTypeLabel(n.nodeType)}
                             </span>
                             {n.isLocal && (

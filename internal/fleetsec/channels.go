@@ -2,12 +2,16 @@ package fleetsec
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"time"
+
+	"google.golang.org/protobuf/proto"
 
 	"github.com/karamble/diginode-cc/internal/fleetsec/jobs"
 	pb "github.com/karamble/diginode-cc/internal/meshpb"
@@ -82,6 +86,88 @@ func (s *Service) WireHub(hub *ws.Hub) {
 // node's GetChannel(0) reply too, which is out of scope for v1.
 func (s *Service) ListChannels(ctx context.Context) ([]ChannelRecord, error) {
 	return s.store.ListChannels(ctx)
+}
+
+// ReadLocalChannel is the public wrapper around readLocalChannel that
+// the API layer calls into. Returns the full Channel proto so the
+// handler can inspect Role + Settings.Psk + Settings.Name without
+// reaching into package internals.
+func (s *Service) ReadLocalChannel(ctx context.Context, idx int32) (*pb.Channel, error) {
+	return s.readLocalChannel(ctx, idx)
+}
+
+// BuildChannelSetURL probes slots 0..7 on the local Heltec and returns
+// a meshtastic://-style channel URL that encodes every non-DISABLED
+// channel's settings. The returned URL is the same format meshtastic
+// CLI's --seturl consumes and the phone app scans from a QR -- the
+// meshtastic.org/e/ prefix is decorative, the receiver parses the
+// fragment locally without any network round-trip.
+//
+// See encodeChannelSetURL for the wire format. LoRaConfig (ChannelSet
+// field 2) is omitted: the receiving node keeps its own LoRa config
+// (region, bandwidth, etc.) and only learns the channel set from this
+// URL. The flash scripts that consume this URL configure lora.region
+// separately.
+func (s *Service) BuildChannelSetURL(ctx context.Context) (string, error) {
+	var settings []*pb.ChannelSettings
+	for idx := int32(0); idx < 8; idx++ {
+		ch, err := s.readLocalChannel(ctx, idx)
+		if err != nil {
+			// Missing/unreadable slot: skip. Matches probeSlotsLocal's
+			// per-slot tolerance -- the firmware returns an error for
+			// slots that have never been written.
+			continue
+		}
+		if ch.GetRole() == pb.Channel_DISABLED {
+			continue
+		}
+		if cs := ch.GetSettings(); cs != nil {
+			settings = append(settings, cs)
+		}
+	}
+	return encodeChannelSetURL(settings)
+}
+
+// encodeChannelSetURL serialises a ChannelSet protobuf containing the
+// supplied ChannelSettings entries and wraps the result in the standard
+// meshtastic.org/e/ URL form.
+//
+// Wire format (one of these per entry, concatenated):
+//
+//	0x0A                       // ChannelSet field 1 (settings), wire type 2 (length-delimited)
+//	<varint(len(marshalled))>  // ChannelSettings size
+//	<marshalled bytes>         // proto.Marshal(*pb.ChannelSettings)
+//
+// Pure function -- separated from BuildChannelSetURL so the encoding
+// can be round-trip tested without a serial-port stub.
+func encodeChannelSetURL(settings []*pb.ChannelSettings) (string, error) {
+	if len(settings) == 0 {
+		return "", errors.New("no enabled channels found on local Heltec")
+	}
+	var body []byte
+	for i, cs := range settings {
+		payload, err := proto.Marshal(cs)
+		if err != nil {
+			return "", fmt.Errorf("marshal channel %d settings: %w", i, err)
+		}
+		body = append(body, 0x0A)
+		var lenBuf [binary.MaxVarintLen64]byte
+		n := binary.PutUvarint(lenBuf[:], uint64(len(payload)))
+		body = append(body, lenBuf[:n]...)
+		body = append(body, payload...)
+	}
+	return "https://meshtastic.org/e/#" + base64.RawURLEncoding.EncodeToString(body), nil
+}
+
+// AuditReveal writes a fleetsec.reveal_psk audit row. The detail map
+// deliberately carries no PSK material -- auditFleet's redactSecrets
+// layer would catch a key named "psk" but we avoid passing it through
+// at all. Called from the reveal-PSK API handler.
+func (s *Service) AuditReveal(ctx context.Context, userID string, channelIndex int32) {
+	s.auditFleet(ctx, userID, "reveal_psk", "channel",
+		fmt.Sprintf("%d", channelIndex), map[string]any{
+			"channel_url_included": true,
+		})
 }
 
 // RotatePSKOpts modifies RotatePSK behaviour.

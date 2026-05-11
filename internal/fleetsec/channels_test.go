@@ -3,7 +3,9 @@ package fleetsec
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -291,3 +293,86 @@ func containsString(s, sub string) bool {
 // --- Avoid unused import if helper tests don't reference these ---
 var _ = errors.New
 var _ = time.Second
+
+func TestEncodeChannelSetURL_RoundTrip(t *testing.T) {
+	primary := &pb.ChannelSettings{
+		Name: "primary-test",
+		Psk:  bytes.Repeat([]byte{0xAB}, 16),
+	}
+	secondary := &pb.ChannelSettings{
+		Name: "secondary-test",
+		Psk:  bytes.Repeat([]byte{0xCD}, 32),
+	}
+	url, err := encodeChannelSetURL([]*pb.ChannelSettings{primary, secondary})
+	if err != nil {
+		t.Fatalf("encode: %v", err)
+	}
+	if !strings.HasPrefix(url, "https://meshtastic.org/e/#") {
+		t.Fatalf("unexpected prefix: %s", url)
+	}
+
+	frag := strings.TrimPrefix(url, "https://meshtastic.org/e/#")
+	raw, err := base64.RawURLEncoding.DecodeString(frag)
+	if err != nil {
+		t.Fatalf("decode fragment: %v", err)
+	}
+
+	// The wire format we emit is a series of (0x0A, varint-length,
+	// marshalled ChannelSettings). Parse it back manually to confirm
+	// the round-trip without needing an apponly.pb.go ChannelSet type
+	// to be generated.
+	got := []*pb.ChannelSettings{}
+	for len(raw) > 0 {
+		if raw[0] != 0x0A {
+			t.Fatalf("expected tag 0x0A, got 0x%X at offset %d", raw[0], len(raw))
+		}
+		raw = raw[1:]
+		ln, n := readVarint(raw)
+		if n == 0 {
+			t.Fatalf("invalid varint at offset %d", len(raw))
+		}
+		raw = raw[n:]
+		if uint64(len(raw)) < ln {
+			t.Fatalf("payload truncated: want %d bytes, have %d", ln, len(raw))
+		}
+		var cs pb.ChannelSettings
+		if err := proto.Unmarshal(raw[:ln], &cs); err != nil {
+			t.Fatalf("unmarshal settings: %v", err)
+		}
+		got = append(got, &cs)
+		raw = raw[ln:]
+	}
+	if len(got) != 2 {
+		t.Fatalf("got %d entries, want 2", len(got))
+	}
+	if got[0].GetName() != primary.GetName() || !bytes.Equal(got[0].GetPsk(), primary.GetPsk()) {
+		t.Fatalf("primary mismatch: name=%q psk=%x", got[0].GetName(), got[0].GetPsk())
+	}
+	if got[1].GetName() != secondary.GetName() || !bytes.Equal(got[1].GetPsk(), secondary.GetPsk()) {
+		t.Fatalf("secondary mismatch: name=%q psk=%x", got[1].GetName(), got[1].GetPsk())
+	}
+}
+
+func TestEncodeChannelSetURL_Empty(t *testing.T) {
+	_, err := encodeChannelSetURL(nil)
+	if err == nil {
+		t.Fatal("expected error for empty channel set")
+	}
+}
+
+func readVarint(b []byte) (uint64, int) {
+	var x uint64
+	var s uint
+	for i, c := range b {
+		if i >= 10 {
+			return 0, 0
+		}
+		if c < 0x80 {
+			x |= uint64(c) << s
+			return x, i + 1
+		}
+		x |= uint64(c&0x7F) << s
+		s += 7
+	}
+	return 0, 0
+}
