@@ -123,7 +123,7 @@ function formatAge(dateStr?: string): string {
   return `${Math.floor(min / 60)}h ago`
 }
 
-const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System', 'Gate']
+const GROUP_ORDER = ['Status', 'Scanning', 'Detection', 'Triangulation', 'Configuration', 'Security', 'Battery', 'System', 'Gate', 'AI Camera']
 
 // Returns true if a command is supported by the given targetType.
 // targetType may be null/undefined for @ALL broadcasts — in that case every

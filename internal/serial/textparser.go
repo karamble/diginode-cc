@@ -240,6 +240,18 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*CODES:(?P<codes>.*)$`),
 			handler: p.handleCodes,
 		},
+		// AI Camera MODEL_LIST response: "Cam: MODELS:1=person*,2=face,..." or
+		// "Cam: MODELS:NONE". Trailing '*' on a token marks the currently bound
+		// slot. Must precede the generic ACK pattern so "MODELS:" never falls
+		// into the catch-all. Emits an ai-models telemetry event plus a
+		// synthetic MODEL_LIST_ACK so the lifecycle closes — same pattern as
+		// handleCodes for CODE_LIST.
+		{
+			name: "ai-models",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*MODELS:(?P<models>.*)$`),
+			handler: p.handleAIModels,
+		},
 		// Gate sensor RF trigger event: "Gate: TRIGGERED:150910 doorsens1".
 		// One frame per physical trigger (firmware-side debounce collapses the
 		// KERUI retransmit burst). The trailing token is the registered code's
@@ -1178,6 +1190,75 @@ func (p *TextParser) handleCodes(match []string, names []string, raw string) []*
 		Raw: raw,
 	}
 
+	return []*ParsedEvent{telemetryEvent, ackEvent}
+}
+
+// handleAIModels parses the AI camera's MODEL_LIST response. Format:
+//
+//	"<id>: MODELS:1=person*,2=face,3=gesture,4=pet,5=apple"
+//	"<id>: MODELS:NONE"
+//
+// Each token is "<slotId>=<alias>" with an optional trailing '*' marking
+// the currently bound slot. Emits an ai-models telemetry event plus a
+// synthetic MODEL_LIST_ACK so the command lifecycle closes — same trick
+// as handleCodes for CODE_LIST.
+func (p *TextParser) handleAIModels(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	csv := strings.TrimSpace(g["models"])
+
+	type modelSlot struct {
+		ID     int    `json:"id"`
+		Alias  string `json:"alias"`
+		Active bool   `json:"active,omitempty"`
+	}
+	slots := []modelSlot{}
+	activeID := 0
+	if csv != "" && !strings.EqualFold(csv, "NONE") {
+		for _, part := range strings.Split(csv, ",") {
+			part = strings.TrimSpace(part)
+			if part == "" {
+				continue
+			}
+			active := strings.HasSuffix(part, "*")
+			if active {
+				part = strings.TrimSuffix(part, "*")
+			}
+			eq := strings.IndexByte(part, '=')
+			if eq <= 0 {
+				continue
+			}
+			id, err := strconv.Atoi(part[:eq])
+			if err != nil {
+				continue
+			}
+			slots = append(slots, modelSlot{ID: id, Alias: part[eq+1:], Active: active})
+			if active {
+				activeID = id
+			}
+		}
+	}
+
+	telemetryEvent := &ParsedEvent{
+		Kind:     "ai-models",
+		Category: "camera",
+		NodeID:   nodeID,
+		Data: map[string]interface{}{
+			"slots":    slots,
+			"activeId": activeID,
+		},
+		Raw: raw,
+	}
+	ackEvent := &ParsedEvent{
+		Kind:   "command-ack",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"ackType":     "MODEL_LIST_ACK",
+			"status":      "OK",
+			"synthesized": true,
+		},
+		Raw: raw,
+	}
 	return []*ParsedEvent{telemetryEvent, ackEvent}
 }
 

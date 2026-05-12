@@ -221,6 +221,10 @@ var Registry = map[string]*CommandDef{
 	}},
 	"CODE_LIST":  {Name: "CODE_LIST", Group: "Gate", Description: "List registered 433 MHz sensor codes", SupportedTypes: typeGate},
 	"CODE_CLEAR": {Name: "CODE_CLEAR", Group: "Gate", Description: "Clear all registered 433 MHz sensor codes", SupportedTypes: typeGate},
+
+	// AI Camera (gotailme-ai-camera). First cam-specific verb; subsequent
+	// BIND / MODEL / MODEL_INFO entries will land in this group.
+	"MODEL_LIST": {Name: "MODEL_LIST", Group: "AI Camera", Description: "List AI model slots and current binding", SupportedTypes: typeAICam},
 }
 
 // ACKMap maps an AntiHunter ACK frame name to the command it acknowledges.
@@ -267,6 +271,10 @@ var ACKMap = map[string]string{
 	"DEBOUNCE_ACK":   "DEBOUNCE_SET",
 	"CODE_ACK":       "CODE_ADD",
 	"CODE_LIST_ACK":  "CODE_LIST",
+	// AI Camera. MODEL_LIST is answered with "Cam: MODELS:..."; textparser.
+	// handleAIModels synthesizes MODEL_LIST_ACK so the lifecycle closes —
+	// same trick as CODE_LIST_ACK / STATUS_ACK.
+	"MODEL_LIST_ACK": "MODEL_LIST",
 	// STATUS-reply variants: the firmware answers these read-mode commands with
 	// a plain content frame ("VIBRATION_STATUS: ENABLED Last:never") rather
 	// than a real *_ACK. The textparser synthesizes these ACKs from the reply
@@ -561,4 +569,4 @@ func GroupedCommands() map[string][]*CommandDef {
 }
 
 // GroupOrder defines the display order of command groups.
-var GroupOrder = []string{"Status", "Scanning", "Detection", "Triangulation", "Configuration", "Security", "Battery", "System", "Gate"}
+var GroupOrder = []string{"Status", "Scanning", "Detection", "Triangulation", "Configuration", "Security", "Battery", "System", "Gate", "AI Camera"}
