@@ -361,7 +361,16 @@ func (s *Service) getTrustLocked(ctx context.Context, nodeNum uint32) (*NodeTrus
 // computeDriftStatus diffs a node's trust state against the current
 // fleet policy. Pure function, no IO -- suitable for in-memory recompute
 // during list operations.
+//
+// Operational state (unreachable) takes precedence over policy
+// comparison. When the last mesh round-trip failed we don't have a
+// fresh view of the node's admin_keys, and the persisted "unreachable"
+// is more useful to the operator than re-deriving "unknown" or a stale
+// policy verdict.
 func computeDriftStatus(n NodeTrustRecord, p *FleetPolicy) DriftStatus {
+	if n.DriftStatus == DriftStatusUnreachable {
+		return DriftStatusUnreachable
+	}
 	if n.LastVerifiedAt == nil {
 		return DriftStatusUnknown
 	}
