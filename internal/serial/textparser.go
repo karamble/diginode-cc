@@ -292,7 +292,7 @@ func (p *TextParser) initPatterns() {
 		{
 			name: "ack",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|START|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE|RAW_BLE|TARGET_INTERVAL)_ACK):?(?P<status>[A-Z0-9_]*)(?::(?P<value>[A-Z0-9_,.\- +]+))?`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>(?:SCAN|DEVICE_SCAN|DRONE|DEAUTH|RANDOMIZATION|BASELINE|CONFIG|TRIANGULATE(?:_STOP)?|TRI_START|STOP|START|REBOOT|BATTERY_SAVER(?:_START|_STOP)?|VIBRATION_(?:ON|OFF)|HB|HITS_RESET|DEBOUNCE|CODE|PROBE|RAW_BLE|MODEL_SET|DEDUP|TARGET_INTERVAL)_ACK):?(?P<status>[A-Z0-9_]*)(?::(?P<value>[A-Z0-9_,.\- +]+))?`),
 			handler: p.handleACK,
 		},
 		// ANOMALY: "nodeId: ANOMALY-NEW: WiFi AA:BB:CC:DD:EE:FF RSSI:-60 Name:test"

@@ -225,6 +225,12 @@ var Registry = map[string]*CommandDef{
 	// AI Camera (gotailme-ai-camera). First cam-specific verb; subsequent
 	// BIND / MODEL / MODEL_INFO entries will land in this group.
 	"MODEL_LIST": {Name: "MODEL_LIST", Group: "AI Camera", Description: "List AI model slots and current binding", SupportedTypes: typeAICam},
+	"MODEL_SET": {Name: "MODEL_SET", Group: "AI Camera", Description: "Bind a WE-2 model slot (persists across reboot)", SupportedTypes: typeAICam, Params: []ParamDef{
+		{Key: "id", Label: "Slot ID", Type: "number", Required: true, Min: 1, Max: 5, Placeholder: "1..5"},
+	}},
+	"DEDUP_INTERVAL": {Name: "DEDUP_INTERVAL", Group: "AI Camera", Description: "Per-class detection cooldown in seconds (persists across reboot)", SupportedTypes: typeAICam, Params: []ParamDef{
+		{Key: "seconds", Label: "Interval (s)", Type: "number", Required: true, Min: 1, Max: 3600, Placeholder: "1..3600 (default 30)"},
+	}},
 }
 
 // ACKMap maps an AntiHunter ACK frame name to the command it acknowledges.
@@ -275,6 +281,15 @@ var ACKMap = map[string]string{
 	// handleAIModels synthesizes MODEL_LIST_ACK so the lifecycle closes —
 	// same trick as CODE_LIST_ACK / STATUS_ACK.
 	"MODEL_LIST_ACK": "MODEL_LIST",
+	// MODEL_SET emits a real Cam: MODEL_SET_ACK:OK|ERROR frame, so it routes
+	// through the generic ACK regex in textparser.go rather than a synthesized
+	// content-frame ACK like MODEL_LIST_ACK above.
+	"MODEL_SET_ACK": "MODEL_SET",
+	// DEDUP_INTERVAL is acked as DEDUP_ACK (not DEDUP_INTERVAL_ACK) — same
+	// shortened-family pattern as HB_INTERVAL → HB_ACK. Currently only one
+	// DEDUP_* verb exists; if more land later the matcher will still find the
+	// most-recent pending DEDUP_* row by exact name.
+	"DEDUP_ACK": "DEDUP_INTERVAL",
 	// STATUS-reply variants: the firmware answers these read-mode commands with
 	// a plain content frame ("VIBRATION_STATUS: ENABLED Last:never") rather
 	// than a real *_ACK. The textparser synthesizes these ACKs from the reply
