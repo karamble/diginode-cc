@@ -231,6 +231,9 @@ var Registry = map[string]*CommandDef{
 	"DEDUP_INTERVAL": {Name: "DEDUP_INTERVAL", Group: "AI Camera", Description: "Per-class detection cooldown in seconds (persists across reboot)", SupportedTypes: typeAICam, Params: []ParamDef{
 		{Key: "seconds", Label: "Interval (s)", Type: "number", Required: true, Min: 1, Max: 3600, Placeholder: "1..3600 (default 30)"},
 	}},
+	"CONF_THRESHOLD": {Name: "CONF_THRESHOLD", Group: "AI Camera", Description: "Minimum detection confidence (strict, score > n fires; persists across reboot)", SupportedTypes: typeAICam, Params: []ParamDef{
+		{Key: "n", Label: "Confidence (%)", Type: "number", Required: true, Min: 1, Max: 100, Placeholder: "1..100 (default 65)"},
+	}},
 }
 
 // ACKMap maps an AntiHunter ACK frame name to the command it acknowledges.
@@ -290,6 +293,9 @@ var ACKMap = map[string]string{
 	// DEDUP_* verb exists; if more land later the matcher will still find the
 	// most-recent pending DEDUP_* row by exact name.
 	"DEDUP_ACK": "DEDUP_INTERVAL",
+	// CONF_THRESHOLD acks as CONF_ACK — same shortened-family pattern as
+	// DEDUP_ACK above.
+	"CONF_ACK": "CONF_THRESHOLD",
 	// STATUS-reply variants: the firmware answers these read-mode commands with
 	// a plain content frame ("VIBRATION_STATUS: ENABLED Last:never") rather
 	// than a real *_ACK. The textparser synthesizes these ACKs from the reply
