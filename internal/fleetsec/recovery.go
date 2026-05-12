@@ -320,8 +320,7 @@ func (s *Service) runRecovery(
 }
 
 func (s *Service) installLocalKeypair(ctx context.Context, priv, pub []byte) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 	msg := AdminSetSecurity(SecurityConfigUpdate{
 		PrivateKey: priv,
 		PublicKey:  pub,
@@ -331,8 +330,7 @@ func (s *Service) installLocalKeypair(ctx context.Context, priv, pub []byte) err
 }
 
 func (s *Service) pushRecoveryAdminKeys(ctx context.Context, nodeNum uint32, rescuePub, newPub []byte) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 	msg := AdminSetSecurity(SecurityConfigUpdate{
 		AdminKeys: [][]byte{rescuePub, newPub},
 	})

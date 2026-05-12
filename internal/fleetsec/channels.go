@@ -314,9 +314,9 @@ func (s *Service) probeSlotsLocal(ctx context.Context) (empty map[int32]bool, pr
 	empty = make(map[int32]bool)
 	primary = -1
 	for idx := int32(0); idx < 8; idx++ {
-		s.adminMu.Lock()
+		unlock := s.adminLockLocal()
 		reply, perr := s.runLocalAdmin(ctx, AdminGetChannel(uint32(idx)), "local-probe-channel")
-		s.adminMu.Unlock()
+		unlock()
 		if perr != nil {
 			continue
 		}
@@ -340,8 +340,7 @@ func (s *Service) probeSlotsLocal(ctx context.Context) (empty map[int32]bool, pr
 // readLocalChannel reads slot idx on the local Heltec via local admin.
 // Returns the full Channel proto (role + settings.psk + settings.name).
 func (s *Service) readLocalChannel(ctx context.Context, idx int32) (*pb.Channel, error) {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 	reply, err := s.runLocalAdmin(ctx, AdminGetChannel(uint32(idx)), "local-read-channel")
 	if err != nil {
 		return nil, err
@@ -351,8 +350,7 @@ func (s *Service) readLocalChannel(ctx context.Context, idx int32) (*pb.Channel,
 
 // readRemoteChannel reads slot idx on the named remote via PKC.
 func (s *Service) readRemoteChannel(ctx context.Context, nodeNum uint32, idx int32) (*pb.Channel, error) {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 	reply, err := s.runRemoteAdmin(ctx, nodeNum, AdminGetChannel(uint32(idx)), "remote-read-channel")
 	if err != nil {
 		return nil, err
@@ -370,8 +368,7 @@ func (s *Service) readRemoteChannel(ctx context.Context, nodeNum uint32, idx int
 // a SetChannel that the firmware applies live (channel admin is the
 // one set_* verb that doesn't trigger a reboot post-save).
 func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32, newPSK []byte) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 	msg := AdminSetChannel(stagingIdx, "", pb.Channel_SECONDARY, newPSK)
 	if _, err := s.runLocalAdmin(ctx, msg, "local-stage-secondary"); err != nil {
 		return fmt.Errorf("apply staging channel locally: %w", err)
@@ -396,8 +393,7 @@ func (s *Service) applyLocalStagingChannel(ctx context.Context, stagingIdx int32
 // stagingIdx (Phase A) so Pi can decode replies from the post-commit
 // remote.
 func (s *Service) migrateRemoteAtomic(ctx context.Context, nodeNum uint32, stagingIdx, oldSlot int32, newPSK []byte) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 	// AdminModule rejects state-changing verbs without a valid
 	// session_passkey; AdminGetChannel(0) returns one. Long timeout
 	// because the establish frame can wait 20-30s in the TX queue
@@ -497,8 +493,7 @@ func (s *Service) migratePiAtomic(ctx context.Context, stagingIdx, oldSlot int32
 // flash write. Pass recoverySlot=-1 + recoveryPSK=nil to skip the
 // recovery write entirely.
 func (s *Service) migratePiAtomicWithRecovery(ctx context.Context, stagingIdx, oldSlot int32, newPSK []byte, recoverySlot int32, recoveryPSK []byte) error {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 	if _, err := s.runLocalAdmin(ctx, AdminBeginEditSettings(), "local-begin-edit"); err != nil {
 		return fmt.Errorf("begin edit: %w", err)
 	}

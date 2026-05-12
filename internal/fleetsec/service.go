@@ -39,10 +39,18 @@ type LocalNodeProvider interface {
 //   - Channels + PSK  → channels.go (step 8)
 //   - Recovery        → recovery.go (step 9)
 //
-// All mutating operations serialize on Service.adminMu so two operators
-// can't fire conflicting admin transactions simultaneously. The lock is
-// held only across the single admin round-trip; long-running operations
-// (e.g. fleet-wide PSK rotation) take the lock once per target.
+// Admin transactions serialize per-target node-num so two operators
+// can't fire conflicting admin sessions against the same node, while
+// transactions against different nodes proceed in parallel. The
+// underlying Tracker is already keyed by request_id and the session-
+// passkey cache by remote node-num, so concurrency across targets is
+// mechanically safe; the firmware's outbound queue and LoRa duty cycle
+// are the real throughput ceiling.
+//
+// Local admin operations key on the local Heltec's node-num, so two
+// local-admin calls still serialize against each other (correct: one
+// radio, one outbound at a time) but run in parallel with remote
+// admin to other nodes.
 type Service struct {
 	store     *Store
 	tracker   *Tracker
@@ -54,7 +62,9 @@ type Service struct {
 
 	hubRef hubRef // optional WS broadcaster, set via WireHub
 
-	adminMu sync.Mutex // serializes admin transactions
+	// adminMuMap holds one *sync.Mutex per target node-num. Acquired
+	// via adminLock(nodeNum); see the method for the locking rules.
+	adminMuMap sync.Map // map[uint32]*sync.Mutex
 
 	// sessionPasskeys caches per-remote AdminMessage.session_passkey values.
 	// Meshtastic firmware emits a fresh passkey in every get_*_response
@@ -126,6 +136,38 @@ func (s *Service) invalidateSessionPasskey(nodeNum uint32) {
 // implements meshtastic.AdminReplyHandler.
 func (s *Service) Tracker() *Tracker { return s.tracker }
 
+// adminLock acquires the admin mutex for the given target node-num and
+// returns an unlock function. Different node-nums lock independently, so
+// admin transactions against different nodes proceed in parallel. The
+// same node-num still serializes -- two operators editing one node's
+// admin_keys will queue, which is the property the previous global
+// mutex was protecting.
+//
+// For local-admin paths pass s.localNode.LocalNodeNum() (or the
+// unexported wrapper adminLockLocal). The local Heltec is treated as
+// just another node-num; concurrent local-admin calls still serialize
+// against each other but run in parallel with remote admin.
+//
+// Idiomatic use:
+//
+//	defer s.adminLock(nodeNum)()
+//
+// which acquires immediately and releases on function return.
+func (s *Service) adminLock(nodeNum uint32) func() {
+	v, _ := s.adminMuMap.LoadOrStore(nodeNum, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
+
+// adminLockLocal is a convenience wrapper around adminLock keyed on the
+// local Heltec's node-num. Pre-LocalNodeNum-resolution (node-num 0)
+// callers still get a single shared bucket, which is the right
+// conservative behaviour during the brief startup window.
+func (s *Service) adminLockLocal() func() {
+	return s.adminLock(s.localNode.LocalNodeNum())
+}
+
 // --- Errors ---
 
 var (
@@ -158,8 +200,9 @@ var (
 // payload if the firmware responded with one (e.g. get_*_response), or
 // nil if just an ack.
 //
-// The caller must hold s.adminMu (or an outer lock that excludes other
-// admin paths).
+// The caller must hold the per-target admin lock (via adminLock or
+// adminLockLocal) so concurrent local-admin calls don't interleave on
+// the local Heltec's outbound queue.
 func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind string) (*pb.AdminMessage, error) {
 	localNum := s.localNode.LocalNodeNum()
 	if localNum == 0 {

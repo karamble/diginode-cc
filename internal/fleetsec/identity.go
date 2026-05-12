@@ -29,8 +29,7 @@ type Identity struct {
 // with an existing keypair shouldn't require operator action before
 // trust display works -- the auto-entry can be relabelled later.
 func (s *Service) GetIdentity(ctx context.Context) (*Identity, error) {
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 
 	reply, err := s.runLocalAdmin(ctx, AdminGetConfig(pb.AdminMessage_SECURITY_CONFIG), "local-get-security")
 	if err != nil {
@@ -117,8 +116,7 @@ func (s *Service) ImportIdentity(ctx context.Context, userID, label string, priv
 		return nil, errors.New("supplied private key does not match supplied public key")
 	}
 
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLockLocal()()
 
 	// Hold the privkey in a SecretBytes so the deferred Clear() runs
 	// no matter how we exit.

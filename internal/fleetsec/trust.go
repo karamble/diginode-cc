@@ -53,8 +53,7 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 	if nodeNum == 0 {
 		return nil, errors.New("node number must be non-zero")
 	}
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	// Decide local vs remote: if asked for the local Heltec's number,
 	// avoid a needless PKC round-trip.
@@ -211,8 +210,7 @@ func (s *Service) SetAdminKeys(ctx context.Context, userID string, nodeNum uint3
 		return err
 	}
 
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	msg := AdminSetSecurity(SecurityConfigUpdate{AdminKeys: pubs})
 	useRemote := true
@@ -292,8 +290,7 @@ func (s *Service) SetIsManaged(ctx context.Context, userID string, nodeNum uint3
 		}
 	}
 
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	msg := AdminSetSecurity(SecurityConfigUpdate{IsManaged: &value})
 	var err error
@@ -318,8 +315,9 @@ func (s *Service) SetIsManaged(ctx context.Context, userID string, nodeNum uint3
 }
 
 // getTrustLocked is the lock-already-held variant of GetTrust used by
-// SetAdminKeys for the post-push read-back. The outer lock is
-// adminMu, held by the caller.
+// SetAdminKeys for the post-push read-back. The outer lock is the
+// per-target admin mutex acquired via adminLock(nodeNum), held by the
+// caller.
 func (s *Service) getTrustLocked(ctx context.Context, nodeNum uint32) (*NodeTrustRecord, error) {
 	method := VerifyMethodRemotePKC
 	var reply *pb.AdminMessage
