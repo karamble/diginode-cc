@@ -234,6 +234,14 @@ var Registry = map[string]*CommandDef{
 	"CONF_THRESHOLD": {Name: "CONF_THRESHOLD", Group: "AI Camera", Description: "Minimum detection confidence (strict, score > n fires; persists across reboot)", SupportedTypes: typeAICam, Params: []ParamDef{
 		{Key: "n", Label: "Confidence (%)", Type: "number", Required: true, Min: 1, Max: 100, Placeholder: "1..100 (default 65)"},
 	}},
+	"WIFI_ON":  {Name: "WIFI_ON", Group: "AI Camera", Description: "Enable the bridge's Wi-Fi softAP operator console", SupportedTypes: typeAICam},
+	"WIFI_OFF": {Name: "WIFI_OFF", Group: "AI Camera", Description: "Disable the bridge's Wi-Fi softAP", SupportedTypes: typeAICam},
+	"WIFI_SSID": {Name: "WIFI_SSID", Group: "AI Camera", Description: "Set the Wi-Fi softAP SSID (cycle WIFI_OFF/ON to apply)", SupportedTypes: typeAICam, Params: []ParamDef{
+		{Key: "name", Label: "SSID", Type: "text", Required: true, Placeholder: "1..32 chars (default aicam-bridge)"},
+	}},
+	"WIFI_PSK": {Name: "WIFI_PSK", Group: "AI Camera", Description: "Set the Wi-Fi softAP password (cycle WIFI_OFF/ON to apply)", SupportedTypes: typeAICam, Params: []ParamDef{
+		{Key: "pass", Label: "Passphrase", Type: "text", Required: true, Placeholder: "8..63 chars (default aicam-12345)"},
+	}},
 }
 
 // ACKMap maps an AntiHunter ACK frame name to the command it acknowledges.
@@ -296,6 +304,14 @@ var ACKMap = map[string]string{
 	// CONF_THRESHOLD acks as CONF_ACK — same shortened-family pattern as
 	// DEDUP_ACK above.
 	"CONF_ACK": "CONF_THRESHOLD",
+	// WIFI family. Each verb has its own dedicated ACK kind (matches the
+	// VIBRATION_ON_ACK / VIBRATION_OFF_ACK precedent above) so every WIFI_*
+	// command closes on an exact-name match with no prefix or suffix
+	// carve-out needed.
+	"WIFI_ON_ACK":   "WIFI_ON",
+	"WIFI_OFF_ACK":  "WIFI_OFF",
+	"WIFI_SSID_ACK": "WIFI_SSID",
+	"WIFI_PSK_ACK":  "WIFI_PSK",
 	// STATUS-reply variants: the firmware answers these read-mode commands with
 	// a plain content frame ("VIBRATION_STATUS: ENABLED Last:never") rather
 	// than a real *_ACK. The textparser synthesizes these ACKs from the reply
