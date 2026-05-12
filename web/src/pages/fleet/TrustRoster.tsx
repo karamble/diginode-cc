@@ -4,16 +4,31 @@
 // actions: Verify, Edit admin keys.
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import fleetSecurityApi, {
   type IdentityRecord,
   type NodeTrust,
+  type VerifyResult,
 } from '../../api/fleetSecurity'
 import { useAuthStore } from '../../stores/authStore'
 import PubkeyChip from '../../components/PubkeyChip'
 import TrustHealthPill from '../../components/TrustHealthPill'
 import EditAdminKeysModal from './EditAdminKeysModal'
+
+type RowFeedback = { kind: 'ok' | 'err'; text?: string }
+
+const FEEDBACK_MS = 4000
+
+function lastVerifiedClass(lastVerifiedAt?: string): string {
+  if (!lastVerifiedAt) return 'text-dark-500'
+  const ageMs = Date.now() - new Date(lastVerifiedAt).getTime()
+  const days = ageMs / 86_400_000
+  if (days < 1) return 'text-dark-400'
+  if (days < 3) return 'text-amber-300'
+  if (days < 7) return 'text-orange-300'
+  return 'text-red-300'
+}
 
 export default function TrustRoster() {
   const { user } = useAuthStore()
@@ -42,12 +57,80 @@ export default function TrustRoster() {
   const labelByFp = new Map<string, IdentityRecord>()
   for (const r of registry ?? []) labelByFp.set(r.fingerprint, r)
 
-  const verifyM = useMutation({
+  // Per-row pending + transient feedback. We deliberately do NOT disable
+  // the Verify button when a row is in flight -- the operator may want
+  // to re-trigger at any time. We just show a spinner so the click
+  // registers visually.
+  const [pending, setPending] = useState<Set<number>>(() => new Set())
+  const [feedback, setFeedback] = useState<Map<number, RowFeedback>>(() => new Map())
+  const feedbackTimers = useRef<Map<number, ReturnType<typeof setTimeout>>>(new Map())
+
+  useEffect(() => {
+    const timers = feedbackTimers.current
+    return () => {
+      for (const t of timers.values()) clearTimeout(t)
+      timers.clear()
+    }
+  }, [])
+
+  function setRowFeedback(nodeNum: number, fb: RowFeedback) {
+    setFeedback((prev) => {
+      const next = new Map(prev)
+      next.set(nodeNum, fb)
+      return next
+    })
+    const existing = feedbackTimers.current.get(nodeNum)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      setFeedback((prev) => {
+        const next = new Map(prev)
+        next.delete(nodeNum)
+        return next
+      })
+      feedbackTimers.current.delete(nodeNum)
+    }, FEEDBACK_MS)
+    feedbackTimers.current.set(nodeNum, timer)
+  }
+
+  const verifyM = useMutation<VerifyResult, Error, number>({
     mutationFn: (nodeNum: number) => fleetSecurityApi.verifyTrust(nodeNum),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fleet-security', 'trust'] })
-    },
   })
+
+  function runVerify(nodeNum: number) {
+    setPending((prev) => {
+      const next = new Set(prev)
+      next.add(nodeNum)
+      return next
+    })
+    verifyM.mutate(nodeNum, {
+      onSuccess: (result) => {
+        // Backend returns 200 even on mesh failure; the ok flag in the
+        // body distinguishes success from a failed round-trip.
+        if (result.ok) {
+          setRowFeedback(nodeNum, { kind: 'ok' })
+        } else {
+          setRowFeedback(nodeNum, {
+            kind: 'err',
+            text: result.error || 'verify failed',
+          })
+        }
+        qc.invalidateQueries({ queryKey: ['fleet-security', 'trust'] })
+      },
+      onError: (err) => {
+        setRowFeedback(nodeNum, {
+          kind: 'err',
+          text: err.message || 'request failed',
+        })
+      },
+      onSettled: () => {
+        setPending((prev) => {
+          const next = new Set(prev)
+          next.delete(nodeNum)
+          return next
+        })
+      },
+    })
+  }
 
   const [editing, setEditing] = useState<NodeTrust | null>(null)
 
@@ -99,93 +182,113 @@ export default function TrustRoster() {
               </tr>
             </thead>
             <tbody>
-              {nodes.map((n) => (
-                <tr
-                  key={n.nodeNum}
-                  className="border-b border-dark-700/30 hover:bg-dark-800/50"
-                >
-                  <td className="py-2 pr-3">
-                    <div className="text-xs text-dark-100">
-                      <span className="font-semibold">
-                        {n.longName || n.shortName || n.sensorShortId || `node ${n.nodeNum}`}
-                      </span>
-                      {n.shortName && n.longName && (
-                        <span className="text-dark-400">
-                          {' · '}
-                          {n.shortName}
+              {nodes.map((n) => {
+                const isPending = pending.has(n.nodeNum)
+                const fb = feedback.get(n.nodeNum)
+                return (
+                  <tr
+                    key={n.nodeNum}
+                    className="border-b border-dark-700/30 hover:bg-dark-800/50"
+                  >
+                    <td className="py-2 pr-3">
+                      <div className="text-xs text-dark-100">
+                        <span className="font-semibold">
+                          {n.longName || n.shortName || n.sensorShortId || `node ${n.nodeNum}`}
                         </span>
-                      )}
-                    </div>
-                    <div className="text-[10px] text-dark-500 font-mono">
-                      {n.nodeId || `!${n.nodeNum.toString(16)}`}
-                    </div>
-                  </td>
-                  <td className="py-2 pr-3">
-                    <TrustHealthPill
-                      driftStatus={n.driftStatus}
-                      lastVerifiedAt={n.lastVerifiedAt}
-                      currentPskFp={n.currentPskFp}
-                      fleetPrimaryFp={fleetPrimaryFp}
-                    />
-                  </td>
-                  <td className="py-2 pr-3">
-                    <div className="flex items-center gap-1 flex-wrap">
-                      {n.adminKeyFingerprints.length === 0 && (
-                        <span className="text-[10px] text-dark-500 italic">
-                          empty
+                        {n.shortName && n.longName && (
+                          <span className="text-dark-400">
+                            {' · '}
+                            {n.shortName}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-[10px] text-dark-500 font-mono">
+                        {n.nodeId || `!${n.nodeNum.toString(16)}`}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      <TrustHealthPill
+                        driftStatus={n.driftStatus}
+                        lastVerifiedAt={n.lastVerifiedAt}
+                        currentPskFp={n.currentPskFp}
+                        fleetPrimaryFp={fleetPrimaryFp}
+                      />
+                    </td>
+                    <td className="py-2 pr-3">
+                      <div className="flex items-center gap-1 flex-wrap">
+                        {n.adminKeyFingerprints.length === 0 && (
+                          <span className="text-[10px] text-dark-500 italic">
+                            empty
+                          </span>
+                        )}
+                        {n.adminKeyFingerprints.map((fp) => {
+                          const reg = labelByFp.get(fp)
+                          return (
+                            <PubkeyChip
+                              key={fp}
+                              fingerprint={fp}
+                              label={reg?.label ?? '<unknown>'}
+                              role={reg?.role ?? 'operator'}
+                              compact
+                            />
+                          )
+                        })}
+                      </div>
+                    </td>
+                    <td className="py-2 pr-3">
+                      {n.isManaged ? (
+                        <span className="text-[10px] uppercase tracking-wider text-amber-300">
+                          managed
                         </span>
+                      ) : (
+                        <span className="text-[10px] text-dark-500">no</span>
                       )}
-                      {n.adminKeyFingerprints.map((fp) => {
-                        const reg = labelByFp.get(fp)
-                        return (
-                          <PubkeyChip
-                            key={fp}
-                            fingerprint={fp}
-                            label={reg?.label ?? '<unknown>'}
-                            role={reg?.role ?? 'operator'}
-                            compact
-                          />
-                        )
-                      })}
-                    </div>
-                  </td>
-                  <td className="py-2 pr-3">
-                    {n.isManaged ? (
-                      <span className="text-[10px] uppercase tracking-wider text-amber-300">
-                        managed
-                      </span>
-                    ) : (
-                      <span className="text-[10px] text-dark-500">no</span>
-                    )}
-                  </td>
-                  <td className="py-2 pr-3 text-[10px] text-dark-400">
-                    {n.lastVerifiedAt
-                      ? new Date(n.lastVerifiedAt).toLocaleString()
-                      : '—'}
-                  </td>
-                  <td className="py-2 pr-3 text-right">
-                    <div className="inline-flex items-center gap-1">
-                      <button
-                        type="button"
-                        disabled={verifyM.isPending}
-                        onClick={() => verifyM.mutate(n.nodeNum)}
-                        className="px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-[10px] text-dark-200"
-                      >
-                        Verify
-                      </button>
-                      {isAdmin && (
+                    </td>
+                    <td className={`py-2 pr-3 text-[10px] ${lastVerifiedClass(n.lastVerifiedAt)}`}>
+                      {n.lastVerifiedAt
+                        ? new Date(n.lastVerifiedAt).toLocaleString()
+                        : '—'}
+                    </td>
+                    <td className="py-2 pr-3 text-right">
+                      <div className="inline-flex items-center gap-2 justify-end">
+                        {fb?.kind === 'err' && (
+                          <span
+                            className="text-[10px] text-red-300 truncate max-w-[200px]"
+                            title={fb.text}
+                          >
+                            {fb.text}
+                          </span>
+                        )}
+                        {fb?.kind === 'ok' && (
+                          <span className="text-[10px] text-emerald-300">✓ verified</span>
+                        )}
                         <button
                           type="button"
-                          onClick={() => setEditing(n)}
-                          className="px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-[10px] text-dark-200"
+                          onClick={() => runVerify(n.nodeNum)}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-[10px] text-dark-200"
                         >
-                          Edit
+                          {isPending && (
+                            <span
+                              className="inline-block w-2.5 h-2.5 rounded-full border border-dark-300 border-t-transparent animate-spin"
+                              aria-hidden
+                            />
+                          )}
+                          {isPending ? 'Verifying…' : 'Verify'}
                         </button>
-                      )}
-                    </div>
-                  </td>
-                </tr>
-              ))}
+                        {isAdmin && (
+                          <button
+                            type="button"
+                            onClick={() => setEditing(n)}
+                            className="px-2 py-0.5 rounded bg-dark-700 hover:bg-dark-600 text-[10px] text-dark-200"
+                          >
+                            Edit
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>

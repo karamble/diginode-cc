@@ -69,13 +69,11 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 	}
 	if err != nil {
 		// Persist unreachable status so the UI shows an honest pill,
-		// but propagate the error to the handler.
-		now := time.Now().UTC()
-		_ = s.store.UpsertNodeTrust(ctx, NodeTrustRecord{
-			NodeNum:          nodeNum,
-			LastDriftCheckAt: &now,
-			DriftStatus:      DriftStatusUnreachable,
-		})
+		// but propagate the error to the handler. MarkNodeUnreachable
+		// only touches drift_status + last_drift_check_at -- the
+		// previously-verified admin_key list and is_managed flag stay
+		// intact while the node is off the air.
+		_ = s.store.MarkNodeUnreachable(ctx, nodeNum, time.Now().UTC())
 		return nil, fmt.Errorf("get_config from %x: %w", nodeNum, err)
 	}
 	sec, err := extractSecurityConfig(reply)

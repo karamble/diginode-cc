@@ -248,6 +248,28 @@ func (s *Store) UpsertNodeTrust(ctx context.Context, r NodeTrustRecord) error {
 	return nil
 }
 
+// MarkNodeUnreachable stamps drift_status + last_drift_check_at without
+// disturbing the previously-verified admin_key list or is_managed state.
+// Used when a mesh round-trip to the node fails -- we want the pill to
+// reflect "unreachable" but the operator still needs to see the last
+// known good admin_key list and is_managed flag while the node is off
+// the air. If no row exists yet, inserts an empty placeholder.
+func (s *Store) MarkNodeUnreachable(ctx context.Context, nodeNum uint32, at time.Time) error {
+	_, err := s.db.Pool.Exec(ctx, `
+		INSERT INTO fleet_node_trust (
+			node_num, admin_key_fps, is_managed,
+			last_drift_check_at, drift_status
+		) VALUES ($1, '[]'::jsonb, false, $2, $3)
+		ON CONFLICT (node_num) DO UPDATE SET
+			last_drift_check_at = EXCLUDED.last_drift_check_at,
+			drift_status        = EXCLUDED.drift_status`,
+		int64(nodeNum), at, string(DriftStatusUnreachable))
+	if err != nil {
+		return fmt.Errorf("mark node unreachable: %w", err)
+	}
+	return nil
+}
+
 // --- Channels ---
 
 func (s *Store) ListChannels(ctx context.Context) ([]ChannelRecord, error) {
