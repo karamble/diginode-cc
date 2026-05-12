@@ -56,11 +56,13 @@ var targetRegex = regexp.MustCompile(`^@(ALL|NODE_[A-Za-z0-9]+|[A-Za-z0-9]{2,6})
 var macRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 var gateNameRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,15}$`)
 
-// typeUniversal / typeAH / typeGate are SupportedTypes shorthands.
+// typeUniversal / typeAH / typeGate / typeAICam are SupportedTypes shorthands.
 var (
 	typeUniversal = []string{"*"}
 	typeAH        = []string{"antihunter"}
 	typeGate      = []string{"gatesensor"}
+	typeAICam     = []string{"aicam"}
+	typeAHAICam   = []string{"antihunter", "aicam"}
 )
 
 // Registry holds all known command definitions.
@@ -92,7 +94,8 @@ var Registry = map[string]*CommandDef{
 		{Key: "captureProbes", Label: "Capture probes", Type: "bool", LiteralTrue: "+PROBE", Placeholder: "Also record 802.11 probe requests during the scan"},
 	}},
 	"DEVICE_SCAN_STOP": {Name: "DEVICE_SCAN_STOP", WireName: "STOP", Group: "Scanning", Description: "Stop device scan", SupportedTypes: typeAH},
-	"STOP":             {Name: "STOP", Group: "Scanning", Description: "Stop all scanning activities", SupportedTypes: typeAH},
+	"STOP":             {Name: "STOP", Group: "Scanning", Description: "Stop all scanning / inference activities", SupportedTypes: typeAHAICam},
+	"START":            {Name: "START", Group: "Scanning", Description: "Start AI inference / detection forwarding", SupportedTypes: typeAICam},
 	"PROBE_START": {Name: "PROBE_START", Group: "Scanning", Description: "Start passive probe-request sniffer. Default broadcasts only CONFIG_TARGETS matches; toggle 'broadcastAll' to push every probe (still 60s dedup per MAC+SSID).", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "mode", Label: "Mode", Type: "select", Required: true, Options: []string{"0", "1", "2"}, Placeholder: "0=WiFi 1=BLE 2=Both"},
 		{Key: "duration", Label: "Duration (sec)", Type: "duration", Required: true, Min: 1, Max: 86400},
@@ -243,6 +246,7 @@ var ACKMap = map[string]string{
 	"HB_ACK":               "HB_ON",
 	"TARGET_INTERVAL_ACK":  "TARGET_INTERVAL",
 	"STOP_ACK":             "STOP",
+	"START_ACK":            "START",
 	"REBOOT_ACK":           "REBOOT",
 	// STATUS_ACK is synthesized by the textparser from the plain STATUS: reply
 	// frame (the firmware never emits a real *_ACK for STATUS). Lets STATUS

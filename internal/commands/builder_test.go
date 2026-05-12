@@ -35,7 +35,7 @@ func TestRegistry_AlphabeticalWithinGroup(t *testing.T) {
 				"DEVICE_SCAN_START", "DEVICE_SCAN_STOP",
 				"PROBE_START", "PROBE_STOP",
 				"SCAN_START", "SCAN_STOP",
-				"STOP",
+				"START", "STOP",
 			},
 		},
 		{
