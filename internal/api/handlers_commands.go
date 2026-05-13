@@ -25,7 +25,7 @@ func (s *Server) handleListCommands(w http.ResponseWriter, r *http.Request) {
 
 // sendCommandRequest is the CC PRO-compatible structured command input.
 type sendCommandRequest struct {
-	Target  string   `json:"target"`           // @ALL, @NODE_22, etc.
+	Target  string   `json:"target"`           // @ALL or @<shortid> (e.g. @AH34, @cam)
 	Name    string   `json:"name"`             // STATUS, SCAN_START, etc.
 	Params  []string `json:"params,omitempty"` // command parameters
 	Forever bool     `json:"forever,omitempty"`

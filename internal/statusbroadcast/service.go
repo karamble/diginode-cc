@@ -133,10 +133,12 @@ func (s *Service) replyEnabledFromConfig() bool {
 }
 
 // statusRequestRe matches an operator-issued STATUS request line. The first
-// token is the @target (case-insensitive: ALL, NODE_<X>, or AHxx-style short
-// IDs); the second is the bare verb STATUS with no params. Anything past the
-// verb (whitespace + comment) is tolerated and ignored.
-var statusRequestRe = regexp.MustCompile(`(?i)^\s*@(ALL|NODE_[A-Za-z0-9]+|[A-Za-z0-9]{2,6})\s+STATUS\s*$`)
+// token is the @target (case-insensitive: ALL or a 2–6 char shortid such as
+// AH34, HB34, cam, Gate); the second is the bare verb STATUS with no params.
+// Anything past the verb (whitespace + comment) is tolerated and ignored.
+// The CC-PRO-era @NODE_<id> form is intentionally not accepted — no firmware
+// in the fleet emits or parses it.
+var statusRequestRe = regexp.MustCompile(`(?i)^\s*@(ALL|[A-Za-z0-9]{2,6})\s+STATUS\s*$`)
 
 // HandleStatusRequest is invoked for every inbound TEXTMSG payload. If the
 // payload matches "@<target> STATUS" and the target resolves to this node,
@@ -186,24 +188,18 @@ func (s *Service) HandleStatusRequest(from, _to, _channel uint32, text string) {
 }
 
 // targetMatchesLocal returns true if the upper-cased target token (without
-// the leading "@") refers to this node.
+// the leading "@") refers to this node. The only accepted self-address is
+// the bare Meshtastic ShortName (e.g. "@diginode-cc-1" becomes target token
+// matched against the ShortName "DIGI"). @ALL is handled by the caller.
 func (s *Service) targetMatchesLocal(target string, localNum uint32) bool {
 	if target == "ALL" {
 		return true
 	}
 	local := s.nodes.GetByNodeNum(localNum)
-	shortName := ""
-	if local != nil {
-		shortName = strings.ToUpper(local.ShortName)
+	if local == nil || local.ShortName == "" {
+		return false
 	}
-	numStr := strconv.FormatUint(uint64(localNum), 10)
-	if rest, ok := strings.CutPrefix(target, "NODE_"); ok {
-		return (shortName != "" && rest == shortName) || rest == numStr
-	}
-	// Bare short-id form (e.g. "@AH34") — only matches if it exactly equals
-	// our Meshtastic short name. Diginode-cc doesn't have an AntiHunter-style
-	// CONFIG_NODEID, so this is effectively the legacy/aliased form.
-	return shortName != "" && target == shortName
+	return target == strings.ToUpper(local.ShortName)
 }
 
 func (s *Service) intervalFromConfig() time.Duration {
