@@ -53,8 +53,7 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 	if nodeNum == 0 {
 		return nil, errors.New("node number must be non-zero")
 	}
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	// Decide local vs remote: if asked for the local Heltec's number,
 	// avoid a needless PKC round-trip.
@@ -69,13 +68,11 @@ func (s *Service) GetTrust(ctx context.Context, nodeNum uint32) (*NodeTrustRecor
 	}
 	if err != nil {
 		// Persist unreachable status so the UI shows an honest pill,
-		// but propagate the error to the handler.
-		now := time.Now().UTC()
-		_ = s.store.UpsertNodeTrust(ctx, NodeTrustRecord{
-			NodeNum:          nodeNum,
-			LastDriftCheckAt: &now,
-			DriftStatus:      DriftStatusUnreachable,
-		})
+		// but propagate the error to the handler. MarkNodeUnreachable
+		// only touches drift_status + last_drift_check_at -- the
+		// previously-verified admin_key list and is_managed flag stay
+		// intact while the node is off the air.
+		_ = s.store.MarkNodeUnreachable(ctx, nodeNum, time.Now().UTC())
 		return nil, fmt.Errorf("get_config from %x: %w", nodeNum, err)
 	}
 	sec, err := extractSecurityConfig(reply)
@@ -213,8 +210,7 @@ func (s *Service) SetAdminKeys(ctx context.Context, userID string, nodeNum uint3
 		return err
 	}
 
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	msg := AdminSetSecurity(SecurityConfigUpdate{AdminKeys: pubs})
 	useRemote := true
@@ -294,8 +290,7 @@ func (s *Service) SetIsManaged(ctx context.Context, userID string, nodeNum uint3
 		}
 	}
 
-	s.adminMu.Lock()
-	defer s.adminMu.Unlock()
+	defer s.adminLock(nodeNum)()
 
 	msg := AdminSetSecurity(SecurityConfigUpdate{IsManaged: &value})
 	var err error
@@ -320,8 +315,9 @@ func (s *Service) SetIsManaged(ctx context.Context, userID string, nodeNum uint3
 }
 
 // getTrustLocked is the lock-already-held variant of GetTrust used by
-// SetAdminKeys for the post-push read-back. The outer lock is
-// adminMu, held by the caller.
+// SetAdminKeys for the post-push read-back. The outer lock is the
+// per-target admin mutex acquired via adminLock(nodeNum), held by the
+// caller.
 func (s *Service) getTrustLocked(ctx context.Context, nodeNum uint32) (*NodeTrustRecord, error) {
 	method := VerifyMethodRemotePKC
 	var reply *pb.AdminMessage
@@ -363,7 +359,16 @@ func (s *Service) getTrustLocked(ctx context.Context, nodeNum uint32) (*NodeTrus
 // computeDriftStatus diffs a node's trust state against the current
 // fleet policy. Pure function, no IO -- suitable for in-memory recompute
 // during list operations.
+//
+// Operational state (unreachable) takes precedence over policy
+// comparison. When the last mesh round-trip failed we don't have a
+// fresh view of the node's admin_keys, and the persisted "unreachable"
+// is more useful to the operator than re-deriving "unknown" or a stale
+// policy verdict.
 func computeDriftStatus(n NodeTrustRecord, p *FleetPolicy) DriftStatus {
+	if n.DriftStatus == DriftStatusUnreachable {
+		return DriftStatusUnreachable
+	}
 	if n.LastVerifiedAt == nil {
 		return DriftStatusUnknown
 	}

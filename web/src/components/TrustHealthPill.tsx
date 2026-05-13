@@ -1,17 +1,14 @@
-// TrustHealthPill renders the per-node trust-roster status as a colored
-// chip. Combines three backend signals:
-//   - DriftStatus: in-policy / drift / unreachable / unknown
-//   - currentPskFp vs the channel's current fingerprint: drives the
-//     "old psk" / "migration lagging" amber pill during a staged
-//     rotation; takes precedence over age but yields to drift /
-//     unreachable.
-//   - lastVerifiedAt age: green ≤1h, yellow ≤24h, orange >24h
+// TrustHealthPill renders the per-node trust-roster health as a colored
+// chip. The pill answers a single question: does this node's admin_key
+// list still match fleet policy, and did the last mesh round-trip
+// succeed? Age of last verification lives in the "Last verified" column
+// instead.
 //
-// Priority: drift > unreachable > unverified > old-psk > age-based.
+// Priority: drift > unreachable > unverified > old-psk > verified.
 // A node that's known-drifted always pills as drift even if recently
 // verified; a node mid-migration takes the amber "old psk" pill so the
-// operator sees at-a-glance which fleet members still need Phase B/C
-// to push them forward.
+// operator sees which fleet members still need Phase B/C to push them
+// forward.
 
 import type { DriftStatus } from '../api/fleetSecurity'
 
@@ -21,7 +18,7 @@ interface TrustHealthPillProps {
   // currentPskFp + fleetPrimaryFp drive the migration-lagging
   // detection. Both optional -- when either is missing (no rotation
   // ever ran, or the node is unverified post-000028) the pill falls
-  // back to age-based status.
+  // back to verified/unverified.
   currentPskFp?: string
   fleetPrimaryFp?: string
 }
@@ -61,11 +58,8 @@ function pillFor(
   }
 
   // Migration lagging: the node was last verified on a different PSK
-  // than the channel's current PRIMARY. Indicates a staged rotation
-  // landed on the rest of the fleet but missed this node. Operator
-  // action: Retry the Phase B/C against this target. Takes precedence
-  // over age-based stale because the fix here is rotation-specific,
-  // not "click Verify."
+  // than the channel's current PRIMARY. Operator action is Retry on
+  // this node, so it takes precedence over the plain "verified" pill.
   if (currentPskFp && fleetPrimaryFp && currentPskFp !== fleetPrimaryFp) {
     return {
       cls: 'bg-amber-600/20 text-amber-300 border-amber-600/40',
@@ -74,39 +68,11 @@ function pillFor(
     }
   }
 
-  const ageMs = Date.now() - new Date(lastVerifiedAt).getTime()
-  const hours = ageMs / 3_600_000
-
-  if (hours <= 1) {
-    return {
-      cls: 'bg-emerald-600/20 text-emerald-300 border-emerald-600/40',
-      label: 'verified',
-      title: `Verified ${formatAge(ageMs)} ago`,
-    }
-  }
-  if (hours <= 24) {
-    return {
-      cls: 'bg-amber-600/20 text-amber-300 border-amber-600/40',
-      label: 'stale',
-      title: `Verified ${formatAge(ageMs)} ago -- consider re-verifying`,
-    }
-  }
   return {
-    cls: 'bg-orange-600/20 text-orange-300 border-orange-600/40',
-    label: 'old',
-    title: `Verified ${formatAge(ageMs)} ago -- trust state may not reflect current node config`,
+    cls: 'bg-emerald-600/20 text-emerald-300 border-emerald-600/40',
+    label: 'verified',
+    title: 'admin_key list matches fleet policy and last verify succeeded',
   }
-}
-
-function formatAge(ms: number): string {
-  const sec = Math.floor(ms / 1000)
-  if (sec < 60) return `${sec}s`
-  const min = Math.floor(sec / 60)
-  if (min < 60) return `${min}m`
-  const hr = Math.floor(min / 60)
-  if (hr < 48) return `${hr}h`
-  const days = Math.floor(hr / 24)
-  return `${days}d`
 }
 
 export default function TrustHealthPill({

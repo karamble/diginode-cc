@@ -39,10 +39,18 @@ type LocalNodeProvider interface {
 //   - Channels + PSK  → channels.go (step 8)
 //   - Recovery        → recovery.go (step 9)
 //
-// All mutating operations serialize on Service.adminMu so two operators
-// can't fire conflicting admin transactions simultaneously. The lock is
-// held only across the single admin round-trip; long-running operations
-// (e.g. fleet-wide PSK rotation) take the lock once per target.
+// Admin transactions serialize per-target node-num so two operators
+// can't fire conflicting admin sessions against the same node, while
+// transactions against different nodes proceed in parallel. The
+// underlying Tracker is already keyed by request_id and the session-
+// passkey cache by remote node-num, so concurrency across targets is
+// mechanically safe; the firmware's outbound queue and LoRa duty cycle
+// are the real throughput ceiling.
+//
+// Local admin operations key on the local Heltec's node-num, so two
+// local-admin calls still serialize against each other (correct: one
+// radio, one outbound at a time) but run in parallel with remote
+// admin to other nodes.
 type Service struct {
 	store     *Store
 	tracker   *Tracker
@@ -54,7 +62,9 @@ type Service struct {
 
 	hubRef hubRef // optional WS broadcaster, set via WireHub
 
-	adminMu sync.Mutex // serializes admin transactions
+	// adminMuMap holds one *sync.Mutex per target node-num. Acquired
+	// via adminLock(nodeNum); see the method for the locking rules.
+	adminMuMap sync.Map // map[uint32]*sync.Mutex
 
 	// sessionPasskeys caches per-remote AdminMessage.session_passkey values.
 	// Meshtastic firmware emits a fresh passkey in every get_*_response
@@ -126,6 +136,38 @@ func (s *Service) invalidateSessionPasskey(nodeNum uint32) {
 // implements meshtastic.AdminReplyHandler.
 func (s *Service) Tracker() *Tracker { return s.tracker }
 
+// adminLock acquires the admin mutex for the given target node-num and
+// returns an unlock function. Different node-nums lock independently, so
+// admin transactions against different nodes proceed in parallel. The
+// same node-num still serializes -- two operators editing one node's
+// admin_keys will queue, which is the property the previous global
+// mutex was protecting.
+//
+// For local-admin paths pass s.localNode.LocalNodeNum() (or the
+// unexported wrapper adminLockLocal). The local Heltec is treated as
+// just another node-num; concurrent local-admin calls still serialize
+// against each other but run in parallel with remote admin.
+//
+// Idiomatic use:
+//
+//	defer s.adminLock(nodeNum)()
+//
+// which acquires immediately and releases on function return.
+func (s *Service) adminLock(nodeNum uint32) func() {
+	v, _ := s.adminMuMap.LoadOrStore(nodeNum, &sync.Mutex{})
+	m := v.(*sync.Mutex)
+	m.Lock()
+	return m.Unlock
+}
+
+// adminLockLocal is a convenience wrapper around adminLock keyed on the
+// local Heltec's node-num. Pre-LocalNodeNum-resolution (node-num 0)
+// callers still get a single shared bucket, which is the right
+// conservative behaviour during the brief startup window.
+func (s *Service) adminLockLocal() func() {
+	return s.adminLock(s.localNode.LocalNodeNum())
+}
+
 // --- Errors ---
 
 var (
@@ -158,8 +200,9 @@ var (
 // payload if the firmware responded with one (e.g. get_*_response), or
 // nil if just an ack.
 //
-// The caller must hold s.adminMu (or an outer lock that excludes other
-// admin paths).
+// The caller must hold the per-target admin lock (via adminLock or
+// adminLockLocal) so concurrent local-admin calls don't interleave on
+// the local Heltec's outbound queue.
 func (s *Service) runLocalAdmin(ctx context.Context, msg *pb.AdminMessage, kind string) (*pb.AdminMessage, error) {
 	localNum := s.localNode.LocalNodeNum()
 	if localNum == 0 {
@@ -340,11 +383,64 @@ func (s *Service) send(ctx context.Context, frame []byte, packetID uint32, kind 
 			if reason == pb.Routing_ADMIN_BAD_SESSION_KEY && expectedFrom != 0 {
 				s.invalidateSessionPasskey(expectedFrom)
 			}
-			return nil, fmt.Errorf("%s: routing error %v", kind, reason)
+			return nil, fmt.Errorf("%s: %s (%s)", kind, routingErrorMessage(reason), reason.String())
 		}
 		return nil, nil
 	default:
 		return nil, fmt.Errorf("%s: unexpected reply kind %v", kind, r.Kind)
+	}
+}
+
+// routingErrorMessage maps a Meshtastic Routing.Error to an
+// operator-facing description for PKC remote-admin failures. The error
+// returned to the API also includes the raw enum name in parentheses so
+// firmware-level debugging stays possible. Comments next to each case
+// describe the most common cause in the trust-roster context.
+func routingErrorMessage(reason pb.Routing_Error) string {
+	switch reason {
+	case pb.Routing_NONE:
+		return "ok"
+	case pb.Routing_NO_ROUTE:
+		return "no mesh route to target -- node may be offline or out of range"
+	case pb.Routing_GOT_NAK:
+		return "intermediate hop NAK'd the packet"
+	case pb.Routing_TIMEOUT:
+		return "mesh hop timed out -- node may be off-air"
+	case pb.Routing_NO_INTERFACE:
+		return "no radio interface available for delivery"
+	case pb.Routing_MAX_RETRANSMIT:
+		return "max retries exhausted -- target not responding on the mesh"
+	case pb.Routing_NO_CHANNEL:
+		// Firmware bounces PKC admin packets as NO_CHANNEL when it
+		// can't derive a matching channel hash. The most common cause
+		// in a fleet context is an empty admin_key list on the target;
+		// the firmware needs at least one admin pubkey to compute the
+		// candidate PKC channel hash for an inbound admin packet.
+		return "target has no matching admin channel -- check that CC's pubkey is in its security.admin_key list and the PRIMARY PSK matches"
+	case pb.Routing_TOO_LARGE:
+		return "admin packet exceeds the radio MTU after encoding"
+	case pb.Routing_NO_RESPONSE:
+		return "target received the request but did not reply (service unavailable or bad channel permissions)"
+	case pb.Routing_DUTY_CYCLE_LIMIT:
+		return "duty-cycle regulator blocked send -- retry shortly"
+	case pb.Routing_BAD_REQUEST:
+		return "target rejected the admin request as malformed"
+	case pb.Routing_NOT_AUTHORIZED:
+		return "target rejected as not authorized -- packet must arrive on the bound admin channel"
+	case pb.Routing_PKI_FAILED:
+		return "local PKC encryption failed -- no usable pubkey for target"
+	case pb.Routing_PKI_UNKNOWN_PUBKEY:
+		return "target lacks our pubkey -- let NodeInfo broadcast on the PRIMARY channel before retrying"
+	case pb.Routing_ADMIN_BAD_SESSION_KEY:
+		return "session passkey stale or expired -- the cached key was dropped, retry the verify"
+	case pb.Routing_ADMIN_PUBLIC_KEY_UNAUTHORIZED:
+		return "CC's admin pubkey is not in target's security.admin_key list"
+	case pb.Routing_RATE_LIMIT_EXCEEDED:
+		return "airtime rate limit exceeded -- retry shortly"
+	case pb.Routing_PKI_SEND_FAIL_PUBLIC_KEY:
+		return "no PKC pubkey for target known locally -- wait for NodeInfo or rerun manufacture"
+	default:
+		return "unrecognised mesh routing error"
 	}
 }
 
