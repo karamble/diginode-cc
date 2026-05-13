@@ -92,7 +92,7 @@ type Command struct {
 	CreatedAt   time.Time              `json:"createdAt"`
 
 	// Structured command fields (CC PRO parity)
-	Target string   `json:"target,omitempty"` // @ALL, @NODE_22, etc.
+	Target string   `json:"target,omitempty"` // @ALL or @<shortid> (e.g. @AH34, @cam)
 	Name   string   `json:"name,omitempty"`   // STATUS, SCAN_START, etc.
 	Params []string `json:"params,omitempty"` // command parameters
 	Line   string   `json:"line,omitempty"`   // formatted mesh text line

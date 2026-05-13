@@ -52,7 +52,12 @@ type BuildOutput struct {
 	Line   string   `json:"line"` // formatted mesh text line
 }
 
-var targetRegex = regexp.MustCompile(`^@(ALL|NODE_[A-Za-z0-9]+|[A-Za-z0-9]{2,6})$`)
+// targetRegex permits the two on-mesh addressing forms every leaf-sensor
+// firmware understands: @ALL (broadcast) or @<shortid>. The @NODE_<id> form
+// the original CC PRO UI emitted has no firmware that parses it (verified
+// across antihunter, halberd, aicam, gatesensor) and was removed along with
+// the dropdown branch that produced it.
+var targetRegex = regexp.MustCompile(`^@(ALL|[A-Za-z0-9]{2,6})$`)
 var macRegex = regexp.MustCompile(`^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$`)
 var gateNameRegex = regexp.MustCompile(`^[A-Za-z0-9_-]{1,15}$`)
 
@@ -352,7 +357,7 @@ func Build(target, name string, params []string, forever bool) (*BuildOutput, er
 		target = "@" + target
 	}
 	if !targetRegex.MatchString(target) {
-		return nil, fmt.Errorf("invalid target %q: must be @ALL, @NODE_<id>, or @<shortid>", target)
+		return nil, fmt.Errorf("invalid target %q: must be @ALL or @<shortid>", target)
 	}
 
 	// Lookup command definition

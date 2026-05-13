@@ -137,6 +137,36 @@ function commandFits(cmd: CommandDef, targetType: string | null | undefined): bo
   return types.includes('*') || types.includes(targetType)
 }
 
+// targetForNode builds the on-mesh "@<id>" addressing string for a node, or
+// null when the node has no command receiver and shouldn't appear in the
+// Target dropdown at all. Only leaf-sensor firmwares parse @<target> and act
+// on it — gotailme C2 bridges and unclassified nodes don't, so we hide them.
+//
+// Per-firmware addressing forms (verified against each repo's mesh parser):
+//   antihunter / halberd → @<CONFIG_NODEID>      (e.g. @AH34, @HB34)
+//   aicam               → @<MeshtasticShortName> (e.g. @cam, also literal @CAM)
+//   gatesensor          → @<SENSOR_NAME>         (e.g. @Gate)
+function targetForNode(n: NodeRow): string | null {
+  switch (n.nodeType) {
+    case 'antihunter':
+      return n.sensorShortId ? `@${n.sensorShortId}` : null
+    case 'aicam':
+    case 'gatesensor':
+      return n.shortName ? `@${n.shortName}` : null
+    default:
+      return null
+  }
+}
+
+function targetKindLabel(nodeType: string | undefined): string {
+  switch (nodeType) {
+    case 'antihunter': return 'AH'
+    case 'aicam':     return 'CAM'
+    case 'gatesensor': return 'GATE'
+    default:          return ''
+  }
+}
+
 // ValidationAlert renders backend validation errors as a compact alert box.
 // The Go builder's error messages already include a concrete example
 // ("node ID must match 'AH' + 1–3 digits (e.g. AH07, AH123)"), so we just
@@ -331,16 +361,14 @@ export default function CommandsPage() {
 
   // Resolve the target's sensor type so the command dropdown can be filtered.
   // For @ALL we pass null, which commandFits() treats as "universal-only".
-  // For a specific node we look it up by matching the target value back to the
-  // entry in the nodes list (mirrors the target-building logic in the dropdown
-  // above: @<sensorShortId> for antihunter, @NODE_<shortName|nodeNum> otherwise).
+  // For a specific node we look it up by matching the target value back to
+  // the entry in the nodes list using targetForNode() — same source of truth
+  // as the dropdown options below, so a match is guaranteed for any value the
+  // operator could have selected from the dropdown.
   const targetNodeType = useMemo<string | null>(() => {
     if (!target || target === '@ALL') return null
     for (const n of nodes) {
-      const tv = n.nodeType === 'antihunter' && n.sensorShortId
-        ? `@${n.sensorShortId}`
-        : `@NODE_${n.shortName || n.nodeNum}`
-      if (tv === target) return n.nodeType || null
+      if (targetForNode(n) === target) return n.nodeType || null
     }
     return null
   }, [target, nodes])
@@ -435,14 +463,12 @@ export default function CommandsPage() {
             >
               <option value="@ALL">@ALL — broadcast</option>
               {nodes.map(n => {
-                // AntiHunter sensors only honour their CONFIG_NODEID (sensorShortId)
-                // as a target prefix — Meshtastic short-names are ignored by the
-                // sensor dispatcher. Fall back to @NODE_<shortName> for gotailme
-                // gateways or sensors whose short id hasn't been heard yet.
-                const targetValue = n.nodeType === 'antihunter' && n.sensorShortId
-                  ? `@${n.sensorShortId}`
-                  : `@NODE_${n.shortName || n.nodeNum}`
-                const kind = n.nodeType === 'antihunter' ? 'AH' : 'GTM'
+                // Only leaf-sensor nodes appear here — gotailme C2 bridges and
+                // unclassified nodes have no @<target> command receiver and
+                // are filtered out by targetForNode() returning null.
+                const targetValue = targetForNode(n)
+                if (!targetValue) return null
+                const kind = targetKindLabel(n.nodeType)
                 const loc = [n.siteCountry, n.siteCity].filter(Boolean).join('/')
                 const siteLabel = loc || n.siteName || ''
                 const state = n.isOnline ? 'online' : 'offline'
