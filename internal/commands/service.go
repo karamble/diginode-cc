@@ -130,10 +130,6 @@ type Service struct {
 	// when chat is unwired (tests). Called post-TX with the resolved
 	// from/to/text the chat service would have built itself.
 	chatEcho func(from, to, channel uint32, text string)
-	// rawBLEAvailable gates the auto-attach of RAW_BLE_ON/OFF around
-	// DEVICE_SCAN_START. Set once at boot from the lookupper's
-	// startup-probe result. Never flipped at runtime.
-	rawBLEAvailable bool
 }
 
 // NewService creates a new command queue service.
@@ -144,16 +140,6 @@ func NewService(db *database.DB, hub *ws.Hub) *Service {
 		pending:  make(map[string]*Command),
 		nodeRate: make(map[uint32]time.Time),
 	}
-}
-
-// SetRawBLEAvailable records whether the BLE lookupper was reachable at
-// startup. When true, Enqueue auto-attaches a RAW_BLE_ON to every accepted
-// DEVICE_SCAN_START targeting an antihunter-class node, and fires
-// RAW_BLE_OFF when the scan terminates.
-func (s *Service) SetRawBLEAvailable(v bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.rawBLEAvailable = v
 }
 
 // SetSendFunc sets the function used to actually transmit commands via serial.
@@ -192,15 +178,18 @@ func (s *Service) Enqueue(cmd *Command) error {
 
 	s.pending[cmd.ID] = cmd
 
-	// Auto-attach for DEVICE_SCAN_START when the BLE lookupper is available.
-	// Critical ordering: RAW_BLE_ON must be sent BEFORE the scan start so the
-	// firmware has rawBleMode=true on the very first BLE callback. If we sent
-	// the parent first, the firmware would be 3-7 s into the scan before
-	// rawBleMode flipped, and any BLE devices detected in that pre-RAW window
-	// would miss bleRawCache population on first sight. We send RAW_BLE_ON
+	// Auto-attach RAW_BLE_ON for every DEVICE_SCAN_START. Critical ordering:
+	// RAW_BLE_ON must be sent BEFORE the scan start so the firmware has
+	// rawBleMode=true on the very first BLE callback. If we sent the parent
+	// first, the firmware would be 3-7 s into the scan before rawBleMode
+	// flipped, and any BLE devices detected in that pre-RAW window would
+	// miss bleRawCache population on first sight. We send RAW_BLE_ON
 	// immediately and defer the parent by autoAttachDelay so they don't
 	// collide on the Pi-side Heltec SerialModule's UART input window.
-	if s.rawBLEAvailable && cmd.Name == "DEVICE_SCAN_START" {
+	// When the lookupper isn't reachable the raw frames still arrive and
+	// get persisted with null classification fields, so the bytes are
+	// recoverable once the lookupper is back.
+	if cmd.Name == "DEVICE_SCAN_START" {
 		cmd.autoRawAttached = true
 		s.enqueuePrecedingRawBLEOnLocked(cmd)
 		return nil

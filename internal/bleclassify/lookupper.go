@@ -6,9 +6,9 @@
 // cascade (manufacturer ID, SIG appearance, FindMy fingerprint, surveillance
 // OUI, AirTag/Tile/SmartTag pattern match). Diginode-cc only knows the
 // endpoint exists and how to call it — the cascade itself stays inside the
-// upstream service. If the lookupper isn't reachable at startup, raw-BLE
-// classification is disabled for the rest of the session and the BLERAW:
-// wire frames are persisted with classification fields null.
+// upstream service. Each Classify call is independent: a per-call timeout
+// bounds the cost when the lookupper is slow or unreachable, and any
+// failure persists the BLERAW: wire frame with classification fields null.
 package bleclassify
 
 import (
@@ -18,7 +18,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"time"
 )
@@ -36,17 +35,13 @@ func lookupperURL() string {
 	return "http://localhost:8000/api/ble/lookupper"
 }
 
-const (
-	// probeTimeout caps the one-shot existence check on startup. Any failure
-	// (timeout, network error, non-200) marks the lookupper unavailable for
-	// the lifetime of the process.
-	probeTimeout = 2 * time.Second
-
-	// classifyTimeout caps a single classification call. BLE detections arrive
-	// at high cadence during scans; a stalled lookupper must not back-pressure
-	// the serial dispatch path.
-	classifyTimeout = 3 * time.Second
-)
+// classifyTimeout caps a single classification call. BLE detections arrive
+// at high cadence during scans; a stalled lookupper must not back-pressure
+// the serial dispatch path. This is the only guard against an unreachable
+// or slow lookupper; there is no boot-time probe or cached availability
+// flag, so a lookupper that comes online mid-session starts producing
+// classifications on the very next BLE advertisement.
+const classifyTimeout = 3 * time.Second
 
 // ErrLookupperFailed is returned by Classify when the lookupper request fails
 // for any reason (unreachable, timeout, non-200 status, malformed JSON). The
@@ -54,49 +49,20 @@ const (
 // advertisement bytes with classification fields null.
 var ErrLookupperFailed = errors.New("ble lookup failed")
 
-// Lookupper holds the in-memory available flag (set once at boot) and a
-// dedicated HTTP client with classification-call timeouts.
+// Lookupper holds the HTTP client used for classification calls.
 type Lookupper struct {
-	available bool
-	client    *http.Client
+	client *http.Client
 }
 
-// NewLookupper performs the one-shot existence check and returns a Lookupper
-// reflecting whatever it found. Available() returns true only when the probe
-// succeeded with HTTP 200. There are no retries — operators restart
-// diginode-cc to pick up a lookupper that came up after boot.
-func NewLookupper(ctx context.Context) *Lookupper {
-	l := &Lookupper{
+// NewLookupper returns a Lookupper ready to issue classification calls. There
+// is no boot-time probe: every Classify call attempts the round-trip and is
+// bounded by classifyTimeout. This is intentional so a lookupper that
+// restarts, deploys, or arrives late doesn't require a diginode-cc restart
+// to be picked up.
+func NewLookupper() *Lookupper {
+	return &Lookupper{
 		client: &http.Client{Timeout: classifyTimeout},
 	}
-
-	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(probeCtx, http.MethodGet, lookupperURL(), nil)
-	if err != nil {
-		slog.Info("BLE lookup unavailable")
-		return l
-	}
-	resp, err := l.client.Do(req)
-	if err != nil {
-		slog.Info("BLE lookup unavailable")
-		return l
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode == http.StatusOK {
-		l.available = true
-		slog.Info("BLE lookup ready")
-	} else {
-		slog.Info("BLE lookup unavailable")
-	}
-	return l
-}
-
-// Available reports whether the startup probe succeeded. Callers gate
-// raw-BLE features on this so we don't queue forwards we can't service.
-func (l *Lookupper) Available() bool {
-	return l != nil && l.available
 }
 
 // classifyRequest mirrors the gotailme lookupper's request shape. Encoded as
@@ -141,10 +107,6 @@ type ClassifyResult struct {
 // (timeout, non-200, malformed JSON). The caller logs a generic message —
 // no upstream-identifying detail leaks into operator-visible output.
 func (l *Lookupper) Classify(ctx context.Context, nodeID, mac string, rssi, channel int, advBytes []byte, isRandomAddr bool) (*ClassifyResult, error) {
-	if !l.Available() {
-		return nil, ErrLookupperFailed
-	}
-
 	reqBody := classifyRequest{
 		MAC:          mac,
 		RSSI:         rssi,

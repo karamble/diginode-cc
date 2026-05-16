@@ -35,9 +35,10 @@ type Service struct {
 	onClassified ClassifiedCallback
 }
 
-// NewService builds the service. lookupper.Available() reports whether
-// classification will actually run; HandleRaw still persists the raw bytes
-// even when classification can't run, so the row is recoverable later.
+// NewService builds the service. HandleRaw always attempts classification
+// and persists the row regardless of whether the lookupper produced a
+// result, so a row written with null classification fields stays
+// recoverable later once the lookupper is reachable again.
 // hub may be nil for tests; HandleRaw skips the broadcast in that case.
 // db must not be nil at runtime; tests can pass nil to skip persistence.
 func NewService(db *database.DB, hub *ws.Hub, lookupper *Lookupper) *Service {
@@ -71,21 +72,19 @@ func (s *Service) HandleRaw(nodeID, mac string, rssi, channel int, advBytes []by
 
 	now := time.Now()
 	var result *ClassifyResult
-	if s.lookupper.Available() {
-		ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
-		// is_random_addr is not encoded in the BLERAW: wire frame today
-		// (Halberd emits MAC + RSSI + CH + base64 only). Default false;
-		// the lookupper classifier can infer randomization from the MAC's
-		// locally-administered bit on its own.
-		r, err := s.lookupper.Classify(ctx, nodeID, mac, rssi, channel, advBytes, false)
-		cancel()
-		if err != nil {
-			if errors.Is(err, ErrLookupperFailed) {
-				slog.Warn("BLE lookup failed", "node", nodeID, "mac", mac)
-			}
-		} else {
-			result = r
+	ctx, cancel := context.WithTimeout(context.Background(), classifyTimeout)
+	// is_random_addr is not encoded in the BLERAW: wire frame today
+	// (Halberd emits MAC + RSSI + CH + base64 only). Default false; the
+	// lookupper classifier can infer randomization from the MAC's locally-
+	// administered bit on its own.
+	r, err := s.lookupper.Classify(ctx, nodeID, mac, rssi, channel, advBytes, false)
+	cancel()
+	if err != nil {
+		if errors.Is(err, ErrLookupperFailed) {
+			slog.Warn("BLE lookup failed", "node", nodeID, "mac", mac)
 		}
+	} else {
+		result = r
 	}
 
 	s.persist(nodeID, mac, rssi, channel, advBytes, now, result)
