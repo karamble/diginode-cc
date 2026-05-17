@@ -215,12 +215,18 @@ func (p *TextParser) initPatterns() {
 				`(?i)^\[NODE_HB\]\s*(?P<id>[A-Za-z0-9_.:-]+)\s+Time:(?P<time>[^ ]+)\s+Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS:(?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?`),
 			handler: p.handleNodeHB,
 		},
-		// Battery-saver heartbeat: "nodeId: HEARTBEAT: Temp:38c/100F GPS:12.34,56.78 Battery:SAVER"
+		// Battery-saver heartbeat: "nodeId: HEARTBEAT: Temp:38c/100F GPS:12.34,56.78 Batt:38% 10.39V DIS SAVER"
 		// Must precede node-hb-inline since that pattern would otherwise swallow the "HEARTBEAT:" token.
+		//
+		// The Batt: group mirrors the STATUS pattern (percent-first, trailing
+		// voltage/state ignored) so Halberd firmware emits one consistent
+		// battery format on both frames. The no-INA case `Batt:-- SAVER` simply
+		// fails the optional `\d+` and is skipped, matching prior behaviour
+		// where Battery:SAVER yielded no usable percent.
 		{
 			name: "node-hb-saver",
 			regex: regexp.MustCompile(
-				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*HEARTBEAT:\s*Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?(?:\s+Battery:(?P<battery>\S+))?`),
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*HEARTBEAT:\s*Temp:(?P<tempC>-?\d+(?:\.\d+)?)(?:[cCfF])?(?:/(?P<tempF>-?\d+(?:\.\d+)?)[fF])?(?:\s+GPS[:=](?P<lat>-?\d+(?:\.\d+)?),(?P<lon>-?\d+(?:\.\d+)?))?(?:\s+Batt[:=](?P<battery>\d+)%?)?`),
 			handler: p.handleNodeHB,
 		},
 		// NODE_HB inline: "nodeId: Time:12345 Temp:38c/100F GPS:12.34,56.78"
@@ -1075,6 +1081,12 @@ func (p *TextParser) handleNodeHB(match []string, names []string, raw string) []
 	}
 	if v := g["lon"]; v != "" {
 		data["lon"] = parseOptFloat(v)
+	}
+	// Battery only appears on the node-hb-saver pattern (Halberd HEARTBEAT in
+	// battery-saver mode). Other heartbeat patterns lack the capture group, so
+	// g["battery"] is empty for them and this block is a no-op.
+	if v := g["battery"]; v != "" {
+		data["battery"] = parseOptFloat(v)
 	}
 
 	telemetry := &ParsedEvent{
