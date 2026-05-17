@@ -2,6 +2,7 @@ package serial
 
 import (
 	"bytes"
+	"encoding/base64"
 	"testing"
 )
 
@@ -48,8 +49,11 @@ func TestParseDevice_LongAndShort(t *testing.T) {
 // zero channel field; the parser defaults channel=0 via parseOptInt on
 // the missing capture group so downstream handlers see identical data.
 func TestParseBLERaw_LongAndShort(t *testing.T) {
-	// "BAQEZmls" decodes to the bytes 0x04,0x04,0x04,0x66,0x69,0x6c — used
-	// here just to give the parser a non-empty advBytes payload to decode.
+	// "BAQEZmls" decodes to the bytes 0x04,0x04,0x04,0x66,0x69,0x6c. Those
+	// bytes happen NOT to contain a local-name AD (type 0x04 = Incomplete
+	// 16-bit Service UUIDs), so the synth target-detected event omits
+	// data["name"] for these cases. The name-bearing path is covered
+	// separately in TestParseBLERaw_LocalNameAD.
 	cases := []struct {
 		name        string
 		line        string
@@ -76,29 +80,122 @@ func TestParseBLERaw_LongAndShort(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			events := p.ParseLine(tc.line)
-			if len(events) != 1 {
-				t.Fatalf("want 1 event, got %d", len(events))
+			// handleBLERaw now emits ble-raw + a synthesized
+			// target-detected so inventory_devices keeps getting BLE
+			// rows after Halberd suppresses redundant D: BLE frames
+			// in raw mode.
+			if len(events) != 2 {
+				t.Fatalf("want 2 events (ble-raw + target-detected), got %d", len(events))
 			}
-			ev := events[0]
-			if ev.Kind != "ble-raw" {
-				t.Fatalf("want kind ble-raw, got %q", ev.Kind)
+			raw := events[0]
+			if raw.Kind != "ble-raw" {
+				t.Fatalf("event 0: want kind ble-raw, got %q", raw.Kind)
 			}
-			if got, _ := ev.Data["mac"].(string); got != "AA:BB:CC:DD:EE:FF" {
+			if got, _ := raw.Data["mac"].(string); got != "AA:BB:CC:DD:EE:FF" {
 				t.Errorf("mac: want AA:BB:CC:DD:EE:FF, got %q", got)
 			}
-			if got, _ := ev.Data["rssi"].(int); got != -85 {
+			if got, _ := raw.Data["rssi"].(int); got != -85 {
 				t.Errorf("rssi: want -85, got %d", got)
 			}
-			if got, _ := ev.Data["channel"].(int); got != tc.wantChannel {
+			if got, _ := raw.Data["channel"].(int); got != tc.wantChannel {
 				t.Errorf("channel: want %d, got %d", tc.wantChannel, got)
 			}
-			advBytes, ok := ev.Data["advBytes"].([]byte)
+			advBytes, ok := raw.Data["advBytes"].([]byte)
 			if !ok {
 				t.Fatalf("advBytes missing or wrong type")
 			}
 			want := []byte{0x04, 0x04, 0x04, 0x66, 0x69, 0x6c}
 			if !bytes.Equal(advBytes, want) {
 				t.Errorf("advBytes: want %x, got %x", want, advBytes)
+			}
+
+			td := events[1]
+			if td.Kind != "target-detected" {
+				t.Fatalf("event 1: want kind target-detected, got %q", td.Kind)
+			}
+			if got, _ := td.Data["mac"].(string); got != "AA:BB:CC:DD:EE:FF" {
+				t.Errorf("target-detected mac: want AA:BB:CC:DD:EE:FF, got %q", got)
+			}
+			if got, _ := td.Data["type"].(string); got != "BLE" {
+				t.Errorf("target-detected type: want BLE, got %q", got)
+			}
+			if got, _ := td.Data["rssi"].(int); got != -85 {
+				t.Errorf("target-detected rssi: want -85, got %d", got)
+			}
+			if _, ok := td.Data["name"]; ok {
+				t.Errorf("target-detected name: must be absent when adv has no local-name AD")
+			}
+		})
+	}
+}
+
+// TestParseBLERaw_LocalNameAD asserts that handleBLERaw extracts the
+// Complete Local Name (AD type 0x09) from a BLE advertisement payload and
+// surfaces it on the synthesized target-detected event so it lands in
+// inventory_devices.last_ssid via the existing TrackFull pipeline. Also
+// asserts the 0x08 Short Local Name fallback path.
+func TestParseBLERaw_LocalNameAD(t *testing.T) {
+	// Build an AD: [len=0x05][type=0x09="Halo"]. base64-encode the bytes.
+	// 0x05 length byte covers type + 4 name chars (0x09 H a l o).
+	completeAD := []byte{0x05, 0x09, 'H', 'a', 'l', 'o'}
+	completeB64 := base64.StdEncoding.EncodeToString(completeAD)
+
+	shortAD := []byte{0x04, 0x08, 'H', 'a', 'l'}
+	shortB64 := base64.StdEncoding.EncodeToString(shortAD)
+
+	// Both AD types present: 0x09 must win over 0x08.
+	bothAD := append([]byte{}, shortAD...)
+	bothAD = append(bothAD, completeAD...)
+	bothB64 := base64.StdEncoding.EncodeToString(bothAD)
+
+	cases := []struct {
+		name     string
+		b64      string
+		wantName string
+	}{
+		{"complete-local-name-0x09", completeB64, "Halo"},
+		{"short-local-name-0x08", shortB64, "Hal"},
+		{"both-prefer-complete", bothB64, "Halo"},
+	}
+
+	p := NewTextParser()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			line := "HB55: B:AA:BB:CC:DD:EE:FF -60 " + tc.b64
+			events := p.ParseLine(line)
+			if len(events) != 2 {
+				t.Fatalf("want 2 events, got %d", len(events))
+			}
+			td := events[1]
+			if td.Kind != "target-detected" {
+				t.Fatalf("event 1: want kind target-detected, got %q", td.Kind)
+			}
+			got, _ := td.Data["name"].(string)
+			if got != tc.wantName {
+				t.Errorf("name: want %q, got %q", tc.wantName, got)
+			}
+		})
+	}
+}
+
+// TestParseBLELocalName_Malformed exercises the AD walker's bounds checks.
+// Malformed length bytes must not panic or read past the buffer.
+func TestParseBLELocalName_Malformed(t *testing.T) {
+	cases := []struct {
+		name string
+		adv  []byte
+		want string
+	}{
+		{"empty", []byte{}, ""},
+		{"zero-length-terminates", []byte{0x00, 0x09, 'X'}, ""},
+		{"length-runs-off-end", []byte{0x10, 0x09, 'X'}, ""},
+		{"name-after-other-ad", []byte{0x02, 0x01, 0x06, 0x03, 0x09, 'O', 'k'}, "Ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := parseBLELocalName(tc.adv)
+			if got != tc.want {
+				t.Errorf("want %q, got %q", tc.want, got)
 			}
 		})
 	}
@@ -113,29 +210,35 @@ func TestParseBLERaw_LongAndShort(t *testing.T) {
 func TestParseShortFormDoesNotMatchLongForm(t *testing.T) {
 	p := NewTextParser()
 	cases := []struct {
-		name     string
-		line     string
-		wantKind string
+		name      string
+		line      string
+		wantKind  string
+		wantCount int
 	}{
 		{
-			name:     "device-long-stays-device",
-			line:     "HB55: DEVICE:AA:BB:CC:DD:EE:FF B -85",
-			wantKind: "target-detected",
+			name:      "device-long-stays-device",
+			line:      "HB55: DEVICE:AA:BB:CC:DD:EE:FF B -85",
+			wantKind:  "target-detected",
+			wantCount: 1,
 		},
 		{
-			name:     "bleraw-long-stays-ble-raw",
-			line:     "HB55: BLERAW:AA:BB:CC:DD:EE:FF -85 0 BAQEZmls",
-			wantKind: "ble-raw",
+			name: "bleraw-long-stays-ble-raw",
+			line: "HB55: BLERAW:AA:BB:CC:DD:EE:FF -85 0 BAQEZmls",
+			// handleBLERaw emits ble-raw first, then a synthesized
+			// target-detected so inventory_devices stays populated when
+			// Halberd suppresses the redundant D: BLE frame in raw mode.
+			wantKind:  "ble-raw",
+			wantCount: 2,
 		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			events := p.ParseLine(tc.line)
-			if len(events) != 1 {
-				t.Fatalf("want 1 event, got %d", len(events))
+			if len(events) != tc.wantCount {
+				t.Fatalf("want %d events, got %d", tc.wantCount, len(events))
 			}
 			if events[0].Kind != tc.wantKind {
-				t.Errorf("kind: want %q, got %q", tc.wantKind, events[0].Kind)
+				t.Errorf("first-event kind: want %q, got %q", tc.wantKind, events[0].Kind)
 			}
 		})
 	}

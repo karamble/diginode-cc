@@ -930,12 +930,19 @@ func (p *TextParser) handleDevice(match []string, names []string, raw string) []
 	}}
 }
 
-// handleBLERaw decodes a BLERAW: line into a "ble-raw" event. The base64 adv
-// payload is decoded here so downstream consumers (the classification service)
-// can hand the bytes straight to the lookupper without re-parsing the line.
-// Malformed base64 silently drops the event — at worst we lose one
-// classification round, the legacy DEVICE: frame for the same MAC still feeds
-// inventory_devices.
+// handleBLERaw decodes a BLERAW: line into two events:
+//
+//  1. "ble-raw" — the raw advertisement bytes for the bleclassify lookupper.
+//  2. "target-detected" — a synthesized device-detection event so
+//     inventory_devices keeps getting BLE rows now that Halberd firmware
+//     suppresses the redundant D: BLE frame whenever rawBleMode is on. The
+//     local name is parsed inline from the AD structures (type 0x09
+//     Complete Local Name preferred, 0x08 Short Local Name fallback) so the
+//     Devices page row carries a human-readable label, matching the parity
+//     handleDevice provided before the firmware change.
+//
+// Malformed base64 silently drops both events — at worst we lose one BLE
+// observation; the next advertisement will re-emit.
 func (p *TextParser) handleBLERaw(match []string, names []string, raw string) []*ParsedEvent {
 	g := extractGroups(match, names)
 	nodeID := g["id"]
@@ -945,19 +952,78 @@ func (p *TextParser) handleBLERaw(match []string, names []string, raw string) []
 		return nil
 	}
 
-	data := map[string]interface{}{
-		"mac":      strings.ToUpper(g["mac"]),
-		"rssi":     parseOptInt(g["rssi"]),
-		"channel":  parseOptInt(g["channel"]),
+	mac := strings.ToUpper(g["mac"])
+	rssi := parseOptInt(g["rssi"])
+	channel := parseOptInt(g["channel"])
+
+	rawData := map[string]interface{}{
+		"mac":      mac,
+		"rssi":     rssi,
+		"channel":  channel,
 		"advBytes": advBytes,
 	}
 
-	return []*ParsedEvent{{
-		Kind:   "ble-raw",
-		NodeID: nodeID,
-		Data:   data,
-		Raw:    raw,
-	}}
+	targetData := map[string]interface{}{
+		"mac":     mac,
+		"rssi":    rssi,
+		"type":    "BLE",
+		"channel": channel,
+	}
+	if name := parseBLELocalName(advBytes); name != "" {
+		targetData["name"] = name
+	}
+
+	return []*ParsedEvent{
+		{
+			Kind:   "ble-raw",
+			NodeID: nodeID,
+			Data:   rawData,
+			Raw:    raw,
+		},
+		{
+			Kind:   "target-detected",
+			NodeID: nodeID,
+			Data:   targetData,
+			Raw:    raw,
+		},
+	}
+}
+
+// parseBLELocalName walks the AD structures of a BLE advertisement payload
+// and returns the Complete Local Name (AD type 0x09) when present, otherwise
+// the Short Local Name (AD type 0x08). Returns empty string when neither AD
+// is present or when the buffer is malformed. Each AD structure on the wire
+// is [length:1][type:1][data:length-1].
+func parseBLELocalName(adv []byte) string {
+	var shortName string
+	i := 0
+	for i < len(adv) {
+		length := int(adv[i])
+		if length == 0 {
+			// Zero-length is the standard end-of-list marker in
+			// padded advertisement buffers.
+			break
+		}
+		if i+1+length > len(adv) {
+			// Malformed: declared length runs off the end.
+			break
+		}
+		adType := adv[i+1]
+		dataStart := i + 2
+		dataLen := length - 1
+		if dataLen > 0 {
+			switch adType {
+			case 0x09:
+				return string(adv[dataStart : dataStart+dataLen])
+			case 0x08:
+				if shortName == "" {
+					shortName = string(adv[dataStart : dataStart+dataLen])
+				}
+			}
+		}
+		i += 1 + length
+	}
+	return shortName
 }
 
 func (p *TextParser) handleAttackLong(match []string, names []string, raw string) []*ParsedEvent {
