@@ -83,16 +83,38 @@ func (s *Service) List(ctx context.Context, filter ListFilter) ([]*Detection, er
 		limit = 1000
 	}
 
+	// LEFT JOIN inventory_devices so the row's local_name falls back to the
+	// MAC's last seen name when the BLE advertisement itself carried no
+	// local-name AD. Without this the BLE page shows an empty Local Name
+	// column for any device that broadcasts only manufacturer data + UUIDs,
+	// even though the same MAC has a name on the Devices page (sourced from
+	// a D: frame's N:... field or the BLERAW synth target-detected event).
+	// The MAC-prefixed WHERE clauses are already qualified on the outer
+	// expression (bleDetectionsMACFilterScope) — when filter.MAC is set,
+	// extractGroups uppercases it, so the inner reference to mac stays
+	// correct under the join.
 	q := `
-		SELECT id, mac, node_id, rssi, channel, timestamp,
-		       detection_type, manufacturer, manufacturer_id, local_name, appearance,
-		       service_uuids_16, service_uuids_128, tx_power,
-		       is_random_addr, raw_adv, classification, findmy_score, combined_score
-		FROM ble_detections`
+		SELECT b.id, b.mac, b.node_id, b.rssi, b.channel, b.timestamp,
+		       b.detection_type, b.manufacturer, b.manufacturer_id,
+		       COALESCE(NULLIF(b.local_name, ''), i.last_ssid) AS local_name,
+		       b.appearance,
+		       b.service_uuids_16, b.service_uuids_128, b.tx_power,
+		       b.is_random_addr, b.raw_adv, b.classification, b.findmy_score, b.combined_score
+		FROM ble_detections b
+		LEFT JOIN inventory_devices i ON i.mac = b.mac`
 	if len(clauses) > 0 {
-		q += " WHERE " + strings.Join(clauses, " AND ")
+		// Existing filter clauses reference unqualified column names
+		// (mac, node_id, detection_type, timestamp). Qualify them on the
+		// ble_detections side so the join doesn't make them ambiguous.
+		qualified := strings.NewReplacer(
+			"mac = ", "b.mac = ",
+			"node_id = ", "b.node_id = ",
+			"detection_type = ", "b.detection_type = ",
+			"timestamp >= ", "b.timestamp >= ",
+		).Replace(strings.Join(clauses, " AND "))
+		q += " WHERE " + qualified
 	}
-	q += fmt.Sprintf(" ORDER BY timestamp DESC LIMIT %d", limit)
+	q += fmt.Sprintf(" ORDER BY b.timestamp DESC LIMIT %d", limit)
 
 	rows, err := s.db.Pool.Query(ctx, q, args...)
 	if err != nil {
