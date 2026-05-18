@@ -51,7 +51,7 @@ func TestRegistry_AlphabeticalWithinGroup(t *testing.T) {
 			want: []string{
 				"AUTOERASE_STATUS", "BASELINE_STATUS", "BATTERY_SAVER_STATUS",
 				"C5_I2C_SCAN", "I2C_SCAN",
-				"RAW_BLE_STATUS", "STATUS", "VIBRATION_STATUS",
+				"RAW_BLE_STATUS", "VIBRATION_STATUS",
 			},
 		},
 	}

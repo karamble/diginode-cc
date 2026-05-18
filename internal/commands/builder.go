@@ -76,12 +76,16 @@ var Registry = map[string]*CommandDef{
 	"VIBRATION_OFF": {Name: "VIBRATION_OFF", Group: "Status", Description: "Disable vibration TEXTMSG broadcasts (detection still runs locally)", SupportedTypes: typeAH},
 	"VIBRATION_ON":  {Name: "VIBRATION_ON", Group: "Status", Description: "Enable vibration TEXTMSG broadcasts", SupportedTypes: typeAH},
 
+	// STATUS stays in Status alongside the heartbeat-control verbs so the
+	// eponymous category actually contains its namesake — the other read-only
+	// state queries live in Diagnostics.
+	"STATUS": {Name: "STATUS", Group: "Status", Description: "Request node status report", SupportedTypes: typeUniversal},
+
 	// Diagnostics (read-only device-state queries — no config writes, no start/stop)
-	"STATUS":               {Name: "STATUS", Group: "Diagnostics", Description: "Request node status report", SupportedTypes: typeUniversal},
-	"BASELINE_STATUS":      {Name: "BASELINE_STATUS", Group: "Diagnostics", Description: "Request baseline scan status", SupportedTypes: typeAH},
-	"VIBRATION_STATUS":     {Name: "VIBRATION_STATUS", Group: "Diagnostics", Description: "Request vibration sensor status", SupportedTypes: typeAH},
-	"I2C_SCAN":             {Name: "I2C_SCAN", Group: "Diagnostics", Description: "Probe the on-board I2C bus (RTC, INA219) and list responding addresses", SupportedTypes: typeAH},
-	"C5_I2C_SCAN":          {Name: "C5_I2C_SCAN", Group: "Diagnostics", Description: "Probe the C5 expansion I2C bus (J_EXP / J_QWIIC) and list responding addresses", SupportedTypes: typeAH},
+	"BASELINE_STATUS":  {Name: "BASELINE_STATUS", Group: "Diagnostics", Description: "Request baseline scan status", SupportedTypes: typeAH},
+	"VIBRATION_STATUS": {Name: "VIBRATION_STATUS", Group: "Diagnostics", Description: "Request vibration sensor status", SupportedTypes: typeAH},
+	"I2C_SCAN":         {Name: "I2C_SCAN", Group: "Diagnostics", Description: "Probe the on-board I2C bus (RTC, INA219) and list responding addresses", SupportedTypes: typeAH},
+	"C5_I2C_SCAN":      {Name: "C5_I2C_SCAN", Group: "Diagnostics", Description: "Probe the C5 expansion I2C bus (J_EXP / J_QWIIC) and list responding addresses", SupportedTypes: typeAH},
 
 	// Scanning (AntiHunter-only)
 	"SCAN_START": {Name: "SCAN_START", Group: "Scanning", Description: "Start WiFi/BLE scanning", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
