@@ -430,6 +430,17 @@ func (p *TextParser) initPatterns() {
 				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*AUTOERASE_STATUS:\s*(?P<body>.+)$`),
 			handler: p.handleDoneSummaryWithAck("autoerase-status", "AUTOERASE_STATUS_ACK"),
 		},
+		// I2C_SCAN / C5_I2C_SCAN reply: "nodeId: I2C_SCAN: 0x40,0x68 (2)" or
+		// "nodeId: I2C_SCAN: empty (0)". Halberd firmware emits these as
+		// plain content frames (no real *_ACK), so the handler synthesizes
+		// I2C_SCAN_ACK / C5_I2C_SCAN_ACK with the parsed address list + count
+		// embedded in the result — mirrors handleCodes for CODE_LIST.
+		{
+			name: "i2c-scan",
+			regex: regexp.MustCompile(
+				`(?i)^(?P<id>[A-Za-z0-9_.:-]+):\s*(?P<kind>C5_I2C_SCAN|I2C_SCAN):\s*(?P<list>[^()]+?)\s*\((?P<count>\d+)\)\s*$`),
+			handler: p.handleI2cScan,
+		},
 		// IDENTITY: "nodeId: IDENTITY:ID123 W -68 Hits:4 MACs:3"
 		{
 			name: "identity",
@@ -1264,6 +1275,69 @@ func (p *TextParser) handleCodes(match []string, names []string, raw string) []*
 		Data: map[string]interface{}{
 			"codes": codes,
 			"names": nameMap,
+		},
+		Raw: raw,
+	}
+
+	return []*ParsedEvent{telemetryEvent, ackEvent}
+}
+
+// handleI2cScan parses a halberd I2C bus probe reply and synthesizes the
+// matching command-ack. Frames take one of two shapes:
+//   "nodeId: I2C_SCAN: 0x40,0x68 (2)"      → on-board bus (RTC + INA219)
+//   "nodeId: C5_I2C_SCAN: 0x62 (1)"        → C5 expansion (J_EXP / Qwiic)
+//   "nodeId: I2C_SCAN: empty (0)"          → nothing answered
+// Firmware emits no real *_ACK for either verb, so this is the only path
+// that closes the pending command row. Same content-frame-as-ack pattern
+// as handleCodes / handleStatus.
+func (p *TextParser) handleI2cScan(match []string, names []string, raw string) []*ParsedEvent {
+	g := extractGroups(match, names)
+	nodeID := g["id"]
+	kind := strings.ToUpper(g["kind"])
+	listStr := strings.TrimSpace(g["list"])
+
+	addresses := []string{}
+	if listStr != "" && !strings.EqualFold(listStr, "empty") {
+		for _, part := range strings.Split(listStr, ",") {
+			part = strings.TrimSpace(part)
+			if part != "" {
+				addresses = append(addresses, part)
+			}
+		}
+	}
+	count := 0
+	if n, err := strconv.Atoi(g["count"]); err == nil {
+		count = n
+	}
+
+	bus := "onboard"
+	ackType := "I2C_SCAN_ACK"
+	if kind == "C5_I2C_SCAN" {
+		bus = "c5"
+		ackType = "C5_I2C_SCAN_ACK"
+	}
+
+	telemetryEvent := &ParsedEvent{
+		Kind:   "i2c-scan",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"bus":       bus,
+			"addresses": addresses,
+			"count":     count,
+		},
+		Raw: raw,
+	}
+
+	ackEvent := &ParsedEvent{
+		Kind:   "command-ack",
+		NodeID: nodeID,
+		Data: map[string]interface{}{
+			"ackType":     ackType,
+			"status":      "OK",
+			"synthesized": true,
+			"bus":         bus,
+			"addresses":   addresses,
+			"count":       count,
 		},
 		Raw: raw,
 	}

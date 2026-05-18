@@ -43,7 +43,15 @@ func TestRegistry_AlphabeticalWithinGroup(t *testing.T) {
 			want: []string{
 				"CONFIG_CHANNELS", "CONFIG_NODEID", "CONFIG_RSSI",
 				"CONFIG_TARGETS", "CONFIG_TARGETS_BLE",
-				"RAW_BLE_OFF", "RAW_BLE_ON", "RAW_BLE_STATUS",
+				"RAW_BLE_OFF", "RAW_BLE_ON",
+			},
+		},
+		{
+			group: "Diagnostics",
+			want: []string{
+				"AUTOERASE_STATUS", "BASELINE_STATUS", "BATTERY_SAVER_STATUS",
+				"C5_I2C_SCAN", "I2C_SCAN",
+				"RAW_BLE_STATUS", "STATUS", "VIBRATION_STATUS",
 			},
 		},
 	}

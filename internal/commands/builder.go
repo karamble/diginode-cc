@@ -72,12 +72,16 @@ var (
 
 // Registry holds all known command definitions.
 var Registry = map[string]*CommandDef{
-	// Status (universal STATUS + AntiHunter-specific status queries)
-	"STATUS":           {Name: "STATUS", Group: "Status", Description: "Request node status report", SupportedTypes: typeUniversal},
-	"BASELINE_STATUS":  {Name: "BASELINE_STATUS", Group: "Status", Description: "Request baseline scan status", SupportedTypes: typeAH},
-	"VIBRATION_STATUS": {Name: "VIBRATION_STATUS", Group: "Status", Description: "Request vibration sensor status", SupportedTypes: typeAH},
-	"VIBRATION_OFF":    {Name: "VIBRATION_OFF", Group: "Status", Description: "Disable vibration TEXTMSG broadcasts (detection still runs locally)", SupportedTypes: typeAH},
-	"VIBRATION_ON":     {Name: "VIBRATION_ON", Group: "Status", Description: "Enable vibration TEXTMSG broadcasts", SupportedTypes: typeAH},
+	// Status (heartbeat / broadcast control — read-only state queries live in Diagnostics)
+	"VIBRATION_OFF": {Name: "VIBRATION_OFF", Group: "Status", Description: "Disable vibration TEXTMSG broadcasts (detection still runs locally)", SupportedTypes: typeAH},
+	"VIBRATION_ON":  {Name: "VIBRATION_ON", Group: "Status", Description: "Enable vibration TEXTMSG broadcasts", SupportedTypes: typeAH},
+
+	// Diagnostics (read-only device-state queries — no config writes, no start/stop)
+	"STATUS":               {Name: "STATUS", Group: "Diagnostics", Description: "Request node status report", SupportedTypes: typeUniversal},
+	"BASELINE_STATUS":      {Name: "BASELINE_STATUS", Group: "Diagnostics", Description: "Request baseline scan status", SupportedTypes: typeAH},
+	"VIBRATION_STATUS":     {Name: "VIBRATION_STATUS", Group: "Diagnostics", Description: "Request vibration sensor status", SupportedTypes: typeAH},
+	"I2C_SCAN":             {Name: "I2C_SCAN", Group: "Diagnostics", Description: "Probe the on-board I2C bus (RTC, INA219) and list responding addresses", SupportedTypes: typeAH},
+	"C5_I2C_SCAN":          {Name: "C5_I2C_SCAN", Group: "Diagnostics", Description: "Probe the C5 expansion I2C bus (J_EXP / J_QWIIC) and list responding addresses", SupportedTypes: typeAH},
 
 	// Scanning (AntiHunter-only)
 	"SCAN_START": {Name: "SCAN_START", Group: "Scanning", Description: "Start WiFi/BLE scanning", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
@@ -169,14 +173,14 @@ var Registry = map[string]*CommandDef{
 		{Key: "cooldown", Label: "Cooldown (sec)", Type: "number", Min: 300, Max: 3600},
 	}},
 	"AUTOERASE_DISABLE": {Name: "AUTOERASE_DISABLE", Group: "Security", Description: "Disable auto-erase", SupportedTypes: typeAH},
-	"AUTOERASE_STATUS":  {Name: "AUTOERASE_STATUS", Group: "Security", Description: "Check auto-erase status", SupportedTypes: typeAH},
+	"AUTOERASE_STATUS":  {Name: "AUTOERASE_STATUS", Group: "Diagnostics", Description: "Check auto-erase status", SupportedTypes: typeAH},
 
 	// Battery (AntiHunter-only)
 	"BATTERY_SAVER_START": {Name: "BATTERY_SAVER_START", Group: "Battery", Description: "Start battery saver mode", AllowForever: true, SupportedTypes: typeAH, Params: []ParamDef{
 		{Key: "interval", Label: "Interval (min)", Type: "number", Required: true, Min: 1, Max: 1440},
 	}},
 	"BATTERY_SAVER_STOP":   {Name: "BATTERY_SAVER_STOP", Group: "Battery", Description: "Stop battery saver", SupportedTypes: typeAH},
-	"BATTERY_SAVER_STATUS": {Name: "BATTERY_SAVER_STATUS", Group: "Battery", Description: "Check battery saver status", SupportedTypes: typeAH},
+	"BATTERY_SAVER_STATUS": {Name: "BATTERY_SAVER_STATUS", Group: "Diagnostics", Description: "Check battery saver status", SupportedTypes: typeAH},
 
 	// Raw BLE forwarding (AntiHunter-only). When ON, the firmware emits a
 	// BLERAW: wire frame alongside the legacy DEVICE: line so the C2 can
@@ -187,7 +191,7 @@ var Registry = map[string]*CommandDef{
 	// lookupper is reachable on this host.
 	"RAW_BLE_ON":     {Name: "RAW_BLE_ON", Group: "Configuration", Description: "Enable raw BLE advertisement forwarding (BLERAW: wire frames)", SingleNode: true, SupportedTypes: typeAH},
 	"RAW_BLE_OFF":    {Name: "RAW_BLE_OFF", Group: "Configuration", Description: "Disable raw BLE advertisement forwarding", SingleNode: true, SupportedTypes: typeAH},
-	"RAW_BLE_STATUS": {Name: "RAW_BLE_STATUS", Group: "Configuration", Description: "Query raw BLE forwarding state", SingleNode: true, SupportedTypes: typeAH},
+	"RAW_BLE_STATUS": {Name: "RAW_BLE_STATUS", Group: "Diagnostics", Description: "Query raw BLE forwarding state", SingleNode: true, SupportedTypes: typeAH},
 
 	// System (universal)
 	"REBOOT": {Name: "REBOOT", Group: "System", Description: "Reboot node", SupportedTypes: typeUniversal},
@@ -332,6 +336,10 @@ var ACKMap = map[string]string{
 	// synthesizes RAW_BLE_STATUS_ACK from that reply so the lifecycle closes.
 	"RAW_BLE_ACK":        "RAW_BLE_ON",
 	"RAW_BLE_STATUS_ACK": "RAW_BLE_STATUS",
+	// I2C_SCAN / C5_I2C_SCAN are content-frame replies (HB##: I2C_SCAN: addr,addr (N)),
+	// not real *_ACK frames; textparser synthesizes the ACKs so the command rows close.
+	"I2C_SCAN_ACK":    "I2C_SCAN",
+	"C5_I2C_SCAN_ACK": "C5_I2C_SCAN",
 	// *_DONE synthesized ACKs: long-running scans/detections reach RUNNING on
 	// the initial *_ACK:STARTED reply, then the firmware broadcasts a
 	// *_DONE: W=... B=... summary when the scan window ends. textparser
@@ -611,4 +619,4 @@ func GroupedCommands() map[string][]*CommandDef {
 }
 
 // GroupOrder defines the display order of command groups.
-var GroupOrder = []string{"Status", "Scanning", "Detection", "Triangulation", "Configuration", "Security", "Battery", "System", "Gate", "AI Camera"}
+var GroupOrder = []string{"Status", "Diagnostics", "Scanning", "Detection", "Triangulation", "Configuration", "Security", "Battery", "System", "Gate", "AI Camera"}
